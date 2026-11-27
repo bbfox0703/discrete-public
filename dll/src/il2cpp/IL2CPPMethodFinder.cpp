@@ -61,6 +61,9 @@ const char* SehClassName(fn_class_get_name fn, Il2CppClass* k) {
 const char* SehClassNs(fn_class_get_namespace fn, Il2CppClass* k) {
     __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
+Il2CppClass* SehClassDeclaring(fn_class_get_declaring fn, Il2CppClass* k) {
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
 #pragma warning(pop)
 
 // Mirror of IL2CPPClassWalker.cpp::ReadMethodPointer. Duplicated because
@@ -111,13 +114,32 @@ FindMethodResult FindMethodInstances(Il2CppClass* klass,
         return result;
     }
 
+    // Capture Outer/Inner display name + outermost namespace once (B-L12)
+    // so nested types round-trip cleanly back into FindClass.
     std::string classDisplay;
     std::string classNs;
-    if (r.class_get_name != nullptr) {
-        if (const char* nm = SehClassName(r.class_get_name, klass)) classDisplay = nm;
-    }
-    if (r.class_get_namespace != nullptr) {
-        if (const char* ns = SehClassNs(r.class_get_namespace, klass)) classNs = ns;
+    {
+        std::vector<Il2CppClass*> chain;
+        Il2CppClass* cur = klass;
+        for (int depth = 0; cur != nullptr && depth < 16; ++depth) {
+            chain.push_back(cur);
+            cur = (r.class_get_declaring != nullptr)
+                ? SehClassDeclaring(r.class_get_declaring, cur)
+                : nullptr;
+        }
+        if (r.class_get_name != nullptr) {
+            for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+                const char* nm = SehClassName(r.class_get_name, *it);
+                if (nm == nullptr || *nm == '\0') continue;
+                if (!classDisplay.empty()) classDisplay += '/';
+                classDisplay += nm;
+            }
+        }
+        if (r.class_get_namespace != nullptr && !chain.empty()) {
+            if (const char* ns = SehClassNs(r.class_get_namespace, chain.back())) {
+                classNs = ns;
+            }
+        }
     }
 
     void* iter = nullptr;

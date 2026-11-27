@@ -54,8 +54,9 @@ struct Candidate {
 };
 
 struct Session {
-    std::uint64_t                          id        = 0;
-    Memory::ValueDataType                  dt        = Memory::ValueDataType::Int32;
+    std::uint64_t                          id            = 0;
+    std::uint64_t                          ownerClientId = 0;  // C-L6: 0 = unowned/test
+    Memory::ValueDataType                  dt            = Memory::ValueDataType::Int32;
     std::vector<Candidate>                 candidates;
     std::chrono::steady_clock::time_point  lastUse;
 };
@@ -67,17 +68,23 @@ public:
     // Allocate a new session, take ownership of the candidate vector,
     // return its sessionId. Triggers a lazy expiry pass on existing
     // sessions so abandoned sessions don't accumulate.
-    std::uint64_t Begin(Memory::ValueDataType dt, std::vector<Candidate> candidates);
+    std::uint64_t Begin(Memory::ValueDataType dt,
+                        std::vector<Candidate> candidates,
+                        std::uint64_t ownerClientId = 0);
 
     // Run `fn(dataType, candidates&)` under the manager's lock. Returns
-    // false if the session doesn't exist (caller should map to wire
-    // error "session_not_found"). `fn` may mutate the candidates vector
-    // (typical Refine behavior is to prune entries that no longer match).
+    // false if the session doesn't exist, expired, or belongs to a different
+    // client (C-L6). `fn` may mutate the candidates vector.
     template <typename Fn>
-    bool RefineWith(std::uint64_t sessionId, Fn&& fn) {
+    bool RefineWith(std::uint64_t sessionId, Fn&& fn, std::uint64_t callerClientId = 0) {
         std::lock_guard<std::mutex> lk(mu_);
+        ExpireOldSessionsLocked(std::chrono::steady_clock::now());
         auto it = sessions_.find(sessionId);
         if (it == sessions_.end()) return false;
+        if (it->second->ownerClientId != 0 && callerClientId != 0 &&
+            it->second->ownerClientId != callerClientId) {
+            return false;
+        }
         it->second->lastUse = std::chrono::steady_clock::now();
         fn(it->second->dt, it->second->candidates);
         return true;
@@ -86,19 +93,26 @@ public:
     // Read-only access — same lock as RefineWith but caller promises not
     // to mutate (used by Begin's optional "echo back the row set" path).
     template <typename Fn>
-    bool ViewWith(std::uint64_t sessionId, Fn&& fn) {
+    bool ViewWith(std::uint64_t sessionId, Fn&& fn, std::uint64_t callerClientId = 0) {
         std::lock_guard<std::mutex> lk(mu_);
+        ExpireOldSessionsLocked(std::chrono::steady_clock::now());
         auto it = sessions_.find(sessionId);
         if (it == sessions_.end()) return false;
+        if (it->second->ownerClientId != 0 && callerClientId != 0 &&
+            it->second->ownerClientId != callerClientId) {
+            return false;
+        }
         fn(it->second->dt, it->second->candidates);
         return true;
     }
 
-    // Drop a specific session. Returns false if not found.
-    bool End(std::uint64_t sessionId);
+    // Drop a specific session (enforces ownerClientId when both are non-zero).
+    bool End(std::uint64_t sessionId, std::uint64_t callerClientId = 0);
+
+    // C-L6: Drop all sessions owned by a disconnecting client.
+    std::size_t DropForOwner(std::uint64_t ownerClientId);
 
     // Drop sessions whose lastUse is older than kExpirySeconds.
-    // Called lazily from Begin().
     void ExpireOldSessions();
 
     // Drop every session — called from pipe shutdown / DLL unload.
@@ -116,6 +130,16 @@ private:
     SessionManager() = default;
     SessionManager(const SessionManager&) = delete;
     SessionManager& operator=(const SessionManager&) = delete;
+
+    void ExpireOldSessionsLocked(std::chrono::steady_clock::time_point now) {
+        for (auto it = sessions_.begin(); it != sessions_.end(); ) {
+            if (now - it->second->lastUse > kExpirySeconds) {
+                it = sessions_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
 
     static constexpr std::chrono::seconds kExpirySeconds{300};
 

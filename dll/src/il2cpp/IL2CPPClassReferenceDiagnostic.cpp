@@ -9,6 +9,7 @@
 #include "../shared/Memory.h"
 #include "../shared/ModuleHelper.h"
 #include "../shared/RuntimeHealth.h"
+#include "../shared/SafeChunkRead.h"
 #include "../shared/ScanCancel.h"
 #include "../shared/SehFilter.h"
 
@@ -151,40 +152,45 @@ void ScanRangeForPointer(std::uintptr_t base, std::size_t size,
     thread_local std::vector<std::uint8_t> buf;
     if (buf.size() < kChunkSize) buf.resize(kChunkSize);
 
-    std::size_t pos = 0;
-    while (pos < size) {
-        if (ScanCancel::IsCancelRequested()) return;
-        std::size_t want = (size - pos) < kChunkSize ? (size - pos) : kChunkSize;
-        want = (want / sizeof(std::uintptr_t)) * sizeof(std::uintptr_t);
-        if (want == 0) break;
-        if (!Memory::SafeReadBytes(
-                reinterpret_cast<const void*>(base + pos), buf.data(), want)) {
-            // AC-stripped / guarded page — skip 4 KB and continue.
-            pos += 4096u;
-            continue;
-        }
-        for (std::size_t i = 0; i + sizeof(std::uintptr_t) <= want;
-             i += sizeof(std::uintptr_t)) {
-            std::uintptr_t val = 0;
-            std::memcpy(&val, buf.data() + i, sizeof(val));
-            if (val != target) continue;
-            if (outSlots->size() >= limit) {
-                if (outCapHit) *outCapHit = true;
-                *outBytesScanned += pos + i;
-                return;
+    // B-L5: Use SafePeScan::ScanReadableSpans so an AC-stripped / guarded page
+    // inside a 1 MiB chunk falls back to 4 KiB page reads instead of dropping
+    // up to ~1 MiB of readable pages ahead of it.
+    SafePeScan::ScanReadableSpans(
+        reinterpret_cast<const std::uint8_t*>(base),
+        size,
+        kChunkSize,
+        /*overlapBytes=*/0u,
+        buf,
+        [&](const std::uint8_t* localSpan,
+            const std::uint8_t* realSpanBase,
+            std::size_t spanLen) -> bool {
+            if (ScanCancel::IsCancelRequested()) return false;
+            const std::uintptr_t realAddr0 = reinterpret_cast<std::uintptr_t>(realSpanBase);
+            const std::size_t alignPad =
+                (sizeof(std::uintptr_t) - (realAddr0 & (sizeof(std::uintptr_t) - 1u))) &
+                (sizeof(std::uintptr_t) - 1u);
+            for (std::size_t i = alignPad; i + sizeof(std::uintptr_t) <= spanLen;
+                 i += sizeof(std::uintptr_t)) {
+                std::uintptr_t val = 0;
+                std::memcpy(&val, localSpan + i, sizeof(val));
+                if (val != target) continue;
+                if (outSlots->size() >= limit) {
+                    if (outCapHit) *outCapHit = true;
+                    *outBytesScanned += i;
+                    return false;
+                }
+                DiagnosticSlot s = CaptureContext(realAddr0 + i,
+                                                  regionLow, regionHigh);
+                s.sectionName   = sectionName;
+                s.regionBase    = regionLow;
+                s.regionSize    = static_cast<std::size_t>(regionHigh - regionLow);
+                s.regionProtect = regionProtect;
+                s.regionType    = regionType;
+                outSlots->push_back(std::move(s));
             }
-            DiagnosticSlot s = CaptureContext(base + pos + i,
-                                              regionLow, regionHigh);
-            s.sectionName   = sectionName;
-            s.regionBase    = regionLow;
-            s.regionSize    = static_cast<std::size_t>(regionHigh - regionLow);
-            s.regionProtect = regionProtect;
-            s.regionType    = regionType;
-            outSlots->push_back(std::move(s));
-        }
-        *outBytesScanned += want;
-        pos += want;
-    }
+            *outBytesScanned += spanLen;
+            return true;
+        });
 }
 
 }  // namespace

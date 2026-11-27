@@ -69,6 +69,14 @@ void* SehCompile(fn_compile_method fn, MonoMethod* m) {
     __try { return fn(m); }
     __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
+int SehClassIsGeneric(fn_class_is_generic fn, MonoClass* k) {
+    __try { return fn(k); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
+}
+int SehMethodIsGeneric(fn_method_is_generic fn, MonoMethod* m) {
+    __try { return fn(m); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
+}
 const char* SehClassName(fn_class_get_name fn, MonoClass* k) {
     __try { return fn(k); }
     __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
@@ -398,8 +406,32 @@ bool ResolveOverload(MonoClass* klass,
     if (matchCount == 0) { outErr = "method_not_found"; return false; }
     if (matchCount  > 1) { outErr = "ambiguous_method";  return false; }
 
-    // JIT-compile only AFTER confirming a unique match so ambiguous lookups
-    // never trigger side-effectful JIT compilation (B-L9).
+    // B-L9: Reject open generic class/method definitions before calling
+    // mono_compile_method (cannot be invoked without concrete type arguments).
+    bool isOpenGeneric = false;
+    if (r.class_is_generic != nullptr && SehClassIsGeneric(r.class_is_generic, klass) != 0) {
+        isOpenGeneric = true;
+    } else if (r.class_is_generic == nullptr && r.class_get_name != nullptr) {
+        if (const char* cn = SehClassName(r.class_get_name, klass)) {
+            std::string cname(cn);
+            if (cname.find('`') != std::string::npos &&
+                cname.find('<') == std::string::npos &&
+                cname.find('[') == std::string::npos) {
+                isOpenGeneric = true;
+            }
+        }
+    }
+    if (!isOpenGeneric && r.method_is_generic != nullptr &&
+        SehMethodIsGeneric(r.method_is_generic, first.method) != 0) {
+        isOpenGeneric = true;
+    }
+    if (isOpenGeneric) {
+        outErr = "open_generic_method";
+        return false;
+    }
+
+    // JIT-compile only AFTER confirming a unique non-generic match so ambiguous
+    // or open-generic lookups never trigger side-effectful JIT compilation (B-L9).
     if (r.compile_method != nullptr && !first.isAbstract) {
         first.address = SehCompile(r.compile_method, first.method);
     }

@@ -717,11 +717,13 @@ int CmdCodeModules(const std::wstring& path) {
                 "\"code_gen_modules_array_rva\":\"0x%08llX\","
                 "\"code_gen_modules_array_va\":\"0x%016llX\","
                 "\"module_count\":%zu,"
+                "\"array_slots\":%zu,"
                 "\"section\":",
                 static_cast<unsigned long long>(img.imageBase),
                 static_cast<unsigned long long>(f.arrayRva),
                 static_cast<unsigned long long>(f.arrayVa),
-                f.moduleCount);
+                f.moduleCount,
+                f.arraySlots);
     PutJsonString(f.sectionName);
     std::fputs(",\"modules\":[", stdout);
     bool firstMod = true;

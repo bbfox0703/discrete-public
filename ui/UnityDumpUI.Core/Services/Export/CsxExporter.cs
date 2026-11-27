@@ -175,6 +175,26 @@ public static class CsxExporter
         foreach (FieldEntry f in fields.Where(x => !x.Static))
         {
             ManagedTypeShape shape = UnityTypeMap.Resolve(f.Type);
+            if (!shape.IsPointer && UnityTypeMap.TryGetKnownMathComponents(f.Type) is { } comps)
+            {
+                foreach (var comp in comps)
+                {
+                    ManagedTypeShape cs = UnityTypeMap.Resolve(comp.ClrType);
+                    string cdesc = isInherited
+                        ? $"{f.Name}.{comp.Name} : {comp.ClrType}  (inherited from {declaredIn})"
+                        : $"{f.Name}.{comp.Name} : {comp.ClrType}";
+                    int coff = f.Offset + comp.Offset;
+                    sink.Add(new EmittedElement(
+                        Offset: coff,
+                        Vartype: cs.CeTypeKeyword,
+                        Bytesize: cs.SizeBytes,
+                        Description: cdesc,
+                        DisplayMethod: DisplayMethodForType(comp.ClrType, cs.CeTypeKeyword)));
+                    int cend = coff + cs.SizeBytes;
+                    if (cend > totalSize) totalSize = cend;
+                }
+                continue;
+            }
             bool isNativeInt = TemplateExportHelpers.IsNativeIntType(f.Type);
             string vt = shape.IsPointer
                 ? "Pointer"
@@ -220,9 +240,24 @@ public static class CsxExporter
 
             ManagedTypeShape shape = UnityTypeMap.Resolve(f.Type);
 
-            // 1. Known primitive / non-pointer scalar.
+            // 1. Known primitive / non-pointer scalar (and E-L5 math struct expansion).
             if (!shape.IsPointer)
             {
+                if (UnityTypeMap.TryGetKnownMathComponents(f.Type) is { } comps)
+                {
+                    foreach (var comp in comps)
+                    {
+                        ManagedTypeShape cs = UnityTypeMap.Resolve(comp.ClrType);
+                        string cdesc = isInherited
+                            ? $"{fieldName}.{comp.Name} : {comp.ClrType}  (inherited from {declaredIn})"
+                            : $"{fieldName}.{comp.Name} : {comp.ClrType}";
+                        int coff = fieldOffset + comp.Offset;
+                        EmitFlat(sb, indent, coff, cs.CeTypeKeyword, cs.SizeBytes, cdesc,
+                                 DisplayMethodForType(comp.ClrType, cs.CeTypeKeyword));
+                        if (coff + cs.SizeBytes > maxEnd) maxEnd = coff + cs.SizeBytes;
+                    }
+                    continue;
+                }
                 bool isNativeInt = TemplateExportHelpers.IsNativeIntType(f.Type);
                 string vt = isNativeInt ? TemplateExportHelpers.PointerVartype(ptr) : shape.CeTypeKeyword;
                 int sz = isNativeInt ? ptr : shape.SizeBytes;
@@ -428,13 +463,32 @@ public static class CsxExporter
         {
             bool isNativeInt = TemplateExportHelpers.IsNativeIntType(elementType);
             int stride = isNativeInt ? ptr : elemShape.SizeBytes;
-            string vt  = isNativeInt ? TemplateExportHelpers.PointerVartype(ptr) : elemShape.CeTypeKeyword;
-            string dm  = DisplayMethodForType(elementType, vt);
-            for (int i = 0; i < options.ArrayLimit; ++i)
+            if (UnityTypeMap.TryGetKnownMathComponents(elementType) is { } comps)
             {
-                int off = dataOff + i * stride;
-                EmitFlat(body, elemsIndent, off, vt, stride, $"[{i}] {elementType}", dm);
-                totalSize = off + stride;
+                for (int i = 0; i < options.ArrayLimit; ++i)
+                {
+                    int elemBase = dataOff + i * stride;
+                    foreach (var comp in comps)
+                    {
+                        ManagedTypeShape cs = UnityTypeMap.Resolve(comp.ClrType);
+                        int coff = elemBase + comp.Offset;
+                        EmitFlat(body, elemsIndent, coff, cs.CeTypeKeyword, cs.SizeBytes,
+                                 $"[{i}].{comp.Name} {comp.ClrType}",
+                                 DisplayMethodForType(comp.ClrType, cs.CeTypeKeyword));
+                        totalSize = Math.Max(totalSize, coff + cs.SizeBytes);
+                    }
+                }
+            }
+            else
+            {
+                string vt  = isNativeInt ? TemplateExportHelpers.PointerVartype(ptr) : elemShape.CeTypeKeyword;
+                string dm  = DisplayMethodForType(elementType, vt);
+                for (int i = 0; i < options.ArrayLimit; ++i)
+                {
+                    int off = dataOff + i * stride;
+                    EmitFlat(body, elemsIndent, off, vt, stride, $"[{i}] {elementType}", dm);
+                    totalSize = off + stride;
+                }
             }
         }
         else
@@ -618,21 +672,5 @@ public static class CsxExporter
         };
     }
 
-    private static string XmlEscape(string s)
-    {
-        var sb = new StringBuilder(s.Length);
-        foreach (char c in s)
-        {
-            sb.Append(c switch
-            {
-                '<'  => "&lt;",
-                '>'  => "&gt;",
-                '&'  => "&amp;",
-                '"'  => "&quot;",
-                '\'' => "&apos;",
-                _    => c.ToString(),
-            });
-        }
-        return sb.ToString();
-    }
+    private static string XmlEscape(string s) => TemplateExportHelpers.XmlEscape(s);
 }

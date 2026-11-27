@@ -146,14 +146,18 @@ ProcessMemorySnapshot QueryProcessMemory() noexcept {
     return out;
 }
 
-// 32-bit guard threshold. Process user-space ceiling on 32-bit
-// Windows is 2 GB by default, 3 GB with /3GB-aware OS, 4 GB on
-// WOW64-with-LARGEADDRESSAWARE (the common case for modern Unity
-// 32-bit builds). Snapshot capture adds 300-500 MB of DLL-side
-// JSON cache, so 3.0 GB current private-usage is the danger line —
-// past it we're one bad allocation away from the game CTD that
-// build #646 hit on 活俠傳.
-constexpr std::uint64_t kX86PrivateUsageRefuseThreshold = 3ULL * 1024 * 1024 * 1024;
+// C-L7: Dynamic 32-bit guard threshold — 75% of the process's actual virtual
+// address space (`ullTotalVirtual` = 2 GB on non-LAA x86, 3 GB on /3GB, 4 GB
+// on WOW64 + LARGEADDRESSAWARE). Protects both 2 GB legacy Unity builds and
+// 4 GB WOW64 builds against snapshot OOM CTDs.
+std::uint64_t QueryX86PrivateUsageRefuseThreshold() noexcept {
+    MEMORYSTATUSEX ms{};
+    ms.dwLength = sizeof(ms);
+    const std::uint64_t totalVirtual = ::GlobalMemoryStatusEx(&ms)
+        ? static_cast<std::uint64_t>(ms.ullTotalVirtual)
+        : 0ULL;
+    return Discrete::ExportHelpers::ComputeX86PrivateUsageRefuseThreshold(totalVirtual);
+}
 
 // Phase P1-fix — available physical RAM right now. The snapshot decode builds
 // the ENTIRE snapshot in the game process before streaming, so a huge game
@@ -320,6 +324,7 @@ json CaptureMonoStructFields(const StructDecodeFieldFn& decodeField,
         if (f.flags & 0x10u) continue;          // skip statics
         if (produced >= memberCap) break;
         const long relOff = static_cast<long>(f.offset) - hdr;
+        if (relOff < 0) continue;               // C-L8: skip torn-class negative struct offsets
         std::uintptr_t memberAddr = structBase + static_cast<std::uintptr_t>(relOff);
         const std::string& decType = (f.isEnum && !f.underlyingTypeName.empty())
             ? f.underlyingTypeName : f.typeName;
@@ -561,6 +566,7 @@ json CaptureIl2cppStructFields(const StructDecodeFieldFn& decodeField,
         if (f.flags & 0x10u) continue;          // skip statics
         if (produced >= memberCap) break;
         const long relOff = static_cast<long>(f.offset) - hdr;
+        if (relOff < 0) continue;               // C-L8: skip torn-class negative struct offsets
         std::uintptr_t memberAddr = structBase + static_cast<std::uintptr_t>(relOff);
         const std::string& decType = (f.isEnum && !f.underlyingTypeName.empty())
             ? f.underlyingTypeName : f.typeName;
@@ -1925,15 +1931,16 @@ static int g_detectCacheRev = -1;
 // is safe to compute on every handshake as the detection cache key.
 static std::string CurrentGameBuildId() {
     using namespace Discrete;
+    std::string id;
 #if defined(DISCRETE_BACKEND_MONO)
-    std::string id = Snapshot::ComputeGameBuildId(MagicStrings::ModuleMonoBdwgc);
+    id = Snapshot::ComputeGameBuildId(MagicStrings::ModuleMonoBdwgc);
     if (id.empty()) id = Snapshot::ComputeGameBuildId(MagicStrings::ModuleMonoLegacy);
-    return id;
 #elif defined(DISCRETE_BACKEND_IL2CPP)
-    return Snapshot::ComputeGameBuildId(MagicStrings::ModuleIL2CPP);
-#else
-    return std::string();
+    id = Snapshot::ComputeGameBuildId(MagicStrings::ModuleIL2CPP);
 #endif
+    // C-L7: Explicit host EXE fallback when none of the runtime modules matched.
+    if (id.empty()) id = Snapshot::ComputeGameBuildId(nullptr);
+    return id;
 }
 
 // BackendDetector::Detect(), memoized per game_build_id (see g_detectCache). A
@@ -2002,6 +2009,16 @@ json BuildHandshakeJson() {
     j["game_pointer_size"] = mem.pointerSize;
     j["game_working_set"]  = mem.workingSet;
     j["game_private_usage"] = mem.privateUsage;
+    // E-L10: backend-agnostic capability flag so the UI doesn't branch on the
+    // backend name to decide whether module-relative method symbols can export.
+#if defined(DISCRETE_BACKEND_IL2CPP)
+    j["stable_module_relative_methods"] = true;
+#else
+    j["stable_module_relative_methods"] = false;
+#endif
+    // C-L8: advertise every registered RPC command name so the UI can probe
+    // capabilities without switching on the backend string.
+    j["commands"] = PipeServer::RegisteredCommands();
     return j;
 }
 
@@ -2055,7 +2072,7 @@ void TryInstallMainThreadHookAndReport(json& j) {
 
 void RegisterCoreHandlers() {
     using namespace Discrete;
-    PipeServer::RegisterHandler("ping", [](const json&) -> json {
+    PipeServer::RegisterHandler(MagicStrings::CmdPing, [](const json&) -> json {
         return json{{"pong", true}};
     });
     PipeServer::RegisterHandler(MagicStrings::CmdHandshake, [](const json&) -> json {
@@ -2155,8 +2172,8 @@ void RegisterCoreHandlers() {
         for (const auto& v : kValidScanTypes) if (stStr == v) { stOk = true; break; }
         if (!stOk) return json{{"error", "unknown 'scanType'"}};
 
-        std::size_t emitLimit = static_cast<std::size_t>(args.value("limit", 5000));
-        if (emitLimit == 0 || emitLimit > 50000) emitLimit = 5000;
+        const std::size_t emitLimit = Discrete::ExportHelpers::ClampRpcLimit(
+            args.value("limit", std::int64_t{5000}), 5000u, 50000u);
         double tolerance = args.value("tolerance", 0.0001);
 
         json rows = json::array();
@@ -2208,7 +2225,7 @@ void RegisterCoreHandlers() {
                 rows.push_back(EmitCandidateRow(cands[i], dt, fmtHex));
             }
             dtStrOut = std::string(ValueDataTypeClrName(dt));
-        });
+        }, PipeServer::CurrentClientId());
 
         if (!ok)               return json{{"error", "session_not_found"}};
         if (!errorOut.empty()) return json{{"error", errorOut}};
@@ -2242,7 +2259,7 @@ void RegisterCoreHandlers() {
         try {
             sessionId = std::stoull(args["sessionId"].get<std::string>());
         } catch (...) { return json{{"error", "invalid 'sessionId'"}}; }
-        bool dropped = ValueScan::SessionManager::Instance().End(sessionId);
+        bool dropped = ValueScan::SessionManager::Instance().End(sessionId, PipeServer::CurrentClientId());
         return json{
             {"ok",        true},
             {"sessionId", std::to_string(sessionId)},
@@ -2265,8 +2282,8 @@ void RegisterCoreHandlers() {
         if (!args.contains("slots") || !args["slots"].is_array())
             return json{{"error", "missing 'slots' array"}};
         const json& refineSlots = args["slots"];
-        std::size_t emitLimit = static_cast<std::size_t>(args.value("limit", 200));
-        if (emitLimit == 0 || emitLimit > 50000) emitLimit = 200;
+        const std::size_t emitLimit = Discrete::ExportHelpers::ClampRpcLimit(
+            args.value("limit", std::int64_t{200}), 200u, 50000u);
 
         json rows = json::array();
         std::size_t totalCands = 0, removed = 0;
@@ -2374,7 +2391,7 @@ void RegisterCoreHandlers() {
             std::size_t toShow = std::min(totalCands, emitLimit);
             for (std::size_t i = 0; i < toShow; ++i)
                 rows.push_back(EmitGroupCandidateRow(cands[i], slots, fmtHex));
-        });
+        }, PipeServer::CurrentClientId());
 
         if (!ok)               return json{{"error", "session_not_found"}};
         if (!errorOut.empty()) return json{{"error", errorOut}};
@@ -2403,9 +2420,11 @@ void RegisterCoreHandlers() {
         std::uint64_t sessionId = 0;
         try { sessionId = std::stoull(args["sessionId"].get<std::string>()); }
         catch (...) { return json{{"error", "invalid 'sessionId'"}}; }
-        std::size_t offset = static_cast<std::size_t>(args.value("offset", 0));
-        std::size_t limit  = static_cast<std::size_t>(args.value("limit", 200));
-        if (limit == 0 || limit > 50000) limit = 200;
+        const std::int64_t rawOffset = args.value("offset", std::int64_t{0});
+        if (rawOffset < 0) return json{{"error", "'offset' must be non-negative"}};
+        const std::size_t offset = static_cast<std::size_t>(rawOffset);
+        const std::size_t limit  = Discrete::ExportHelpers::ClampRpcLimit(
+            args.value("limit", std::int64_t{200}), 200u, 50000u);
 
         json rows = json::array();
         std::size_t totalCands = 0;
@@ -2414,10 +2433,12 @@ void RegisterCoreHandlers() {
             [&](std::vector<GroupScan::SlotSpec>& slots,
                 std::vector<GroupScan::Candidate>& cands) {
             totalCands = cands.size();
-            std::size_t end = std::min(totalCands, offset + limit);
+            const std::size_t end = (offset >= totalCands)
+                ? totalCands
+                : (offset + std::min(totalCands - offset, limit));
             for (std::size_t i = offset; i < end; ++i)
                 rows.push_back(EmitGroupCandidateRow(cands[i], slots, fmtHex));
-        });
+        }, PipeServer::CurrentClientId());
         if (!ok) return json{{"error", "session_not_found"}};
         return json{
             {"ok",              true},
@@ -2425,7 +2446,7 @@ void RegisterCoreHandlers() {
             {"offset",          offset},
             {"count",           rows.size()},
             {"totalCandidates", totalCands},
-            {"truncated",       totalCands > offset + rows.size()},
+            {"truncated",       offset < totalCands && (totalCands - offset) > rows.size()},
             {"candidates",      std::move(rows)},
         };
     });
@@ -2436,7 +2457,7 @@ void RegisterCoreHandlers() {
         std::uint64_t sessionId = 0;
         try { sessionId = std::stoull(args["sessionId"].get<std::string>()); }
         catch (...) { return json{{"error", "invalid 'sessionId'"}}; }
-        bool dropped = GroupScan::SessionManager::Instance().End(sessionId);
+        bool dropped = GroupScan::SessionManager::Instance().End(sessionId, PipeServer::CurrentClientId());
         return json{
             {"ok",        true},
             {"sessionId", std::to_string(sessionId)},
@@ -2462,26 +2483,10 @@ void RegisterCoreHandlers() {
     // bad pointer returns an error envelope instead of crashing the game.
     // ----------------------------------------------------------------------
 
+    // C-L4: Strict hex-string / non-negative-integer address parser (no trailing
+    // garbage, no silent x86 truncation, no overflow or negative integers).
     auto parseAddr = [](const json& v, std::uintptr_t& out) -> bool {
-        if (v.is_string()) {
-            const std::string s = v.get<std::string>();
-            const char* p = s.c_str();
-            if (s.size() >= 2 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) p += 2;
-            char* end = nullptr;
-            unsigned long long val = ::_strtoui64(p, &end, 16);
-            if (end == p) return false;
-            out = static_cast<std::uintptr_t>(val);
-            return true;
-        }
-        if (v.is_number_unsigned()) {
-            out = static_cast<std::uintptr_t>(v.get<std::uint64_t>());
-            return true;
-        }
-        if (v.is_number_integer()) {
-            out = static_cast<std::uintptr_t>(v.get<std::int64_t>());
-            return true;
-        }
-        return false;
+        return Discrete::ExportHelpers::ParseAddress(v, out);
     };
 
     auto bytesToHex = [](const std::uint8_t* data, std::size_t n) {
@@ -3042,14 +3047,16 @@ void RegisterCoreHandlers() {
             }
         }
 
+        constexpr std::size_t kMaxWalkArrayElementSize = 4096u;
         const bool hasCallerElemSize =
             args.contains("elementSize") && args["elementSize"].is_number_unsigned();
-        const std::size_t callerElemSize =
-            hasCallerElemSize ? args["elementSize"].get<std::size_t>() : 0;
+        const std::size_t callerElemSize = hasCallerElemSize
+            ? std::min<std::size_t>(args["elementSize"].get<std::size_t>(), kMaxWalkArrayElementSize)
+            : 0u;
         const auto elemLayout = Discrete::ExportHelpers::ResolveArrayElementLayout(
             knownPrimSize, elemClassResolved, elemIsValueType, classValueSize,
             hasCallerElemSize, callerElemSize);
-        const std::size_t elemSize  = elemLayout.elemSize;
+        const std::size_t elemSize  = std::min<std::size_t>(elemLayout.elemSize, kMaxWalkArrayElementSize);
         const bool        isPointer = elemLayout.isPointer;
 
         // Read array header — bounds (validate SZARRAY) + max_length. Both
@@ -3158,7 +3165,7 @@ void RegisterCoreHandlers() {
         return json{{"name", name}, {"address", formatHex(addr)}, {"set", true}};
     });
 
-    PipeServer::RegisterHandler("lookupSymbol",
+    PipeServer::RegisterHandler(MagicStrings::CmdLookupSymbol,
         [formatHex](const json& args) -> json {
         std::string name = args.value("name", std::string{});
         if (name.empty()) return json{{"error", "missing 'name'"}};
@@ -3168,7 +3175,7 @@ void RegisterCoreHandlers() {
         return json{{"name", name}, {"address", formatHex(it->second)}};
     });
 
-    PipeServer::RegisterHandler("listSymbols",
+    PipeServer::RegisterHandler(MagicStrings::CmdListSymbols,
         [formatHex](const json&) -> json {
         std::lock_guard<std::mutex> lk(g_symbolMutex);
         json arr = json::array();
@@ -3426,8 +3433,18 @@ void RegisterCoreHandlers() {
         };
         auto asU64 = [&](std::uint64_t& out) -> bool {
             if (jv.is_number_unsigned())     { out = jv.get<std::uint64_t>(); return true; }
-            if (jv.is_number_integer())      { out = static_cast<std::uint64_t>(jv.get<std::int64_t>()); return true; }
-            if (jv.is_number_float())        { out = static_cast<std::uint64_t>(jv.get<double>()); return true; }
+            if (jv.is_number_integer()) {
+                const std::int64_t iv = jv.get<std::int64_t>();
+                if (iv < 0) return false;  // C-L5: reject negative values for unsigned fields
+                out = static_cast<std::uint64_t>(iv);
+                return true;
+            }
+            if (jv.is_number_float()) {
+                const double dv = jv.get<double>();
+                if (!std::isfinite(dv) || dv < 0.0) return false;
+                out = static_cast<std::uint64_t>(dv);
+                return true;
+            }
             if (jv.is_boolean())             { out = jv.get<bool>() ? 1 : 0; return true; }
             return false;
         };
@@ -3460,8 +3477,13 @@ void RegisterCoreHandlers() {
                    ty == "System.UInt16" || ty == "System.Char") {
             std::uint64_t v = 0;
             if (ty == "char" || ty == "System.Char") {
-                if (jv.is_string() && !jv.get<std::string>().empty()) {
-                    v = static_cast<std::uint8_t>(jv.get<std::string>()[0]);
+                if (jv.is_string()) {
+                    std::uint16_t ch = 0;
+                    if (!Discrete::ExportHelpers::DecodeFirstUtf16CodeUnit(
+                            jv.get_ref<const std::string&>(), ch)) {
+                        return json{{"error", "'value' not a valid UTF-8 char"}};
+                    }
+                    v = ch;
                 } else if (!asU64(v)) {
                     return json{{"error", "'value' not a char or number"}};
                 }
@@ -3492,19 +3514,12 @@ void RegisterCoreHandlers() {
             if (!asU64(v)) return json{{"error", "'value' not a number"}};
             std::memcpy(buf, &v, 8); size = 8;
         } else if (ty == "float" || ty == "single" || ty == "System.Single") {
-            double d = 0.0;
-            if      (jv.is_number())          d = jv.get<double>();
-            else if (jv.is_number_integer())  d = static_cast<double>(jv.get<std::int64_t>());
-            else if (jv.is_number_unsigned()) d = static_cast<double>(jv.get<std::uint64_t>());
-            else return json{{"error", "'value' not a number"}};
-            float w = static_cast<float>(d);
+            if (!jv.is_number()) return json{{"error", "'value' not a number"}};
+            float w = static_cast<float>(jv.get<double>());
             std::memcpy(buf, &w, 4); size = 4;
         } else if (ty == "double" || ty == "System.Double") {
-            double w = 0.0;
-            if      (jv.is_number())          w = jv.get<double>();
-            else if (jv.is_number_integer())  w = static_cast<double>(jv.get<std::int64_t>());
-            else if (jv.is_number_unsigned()) w = static_cast<double>(jv.get<std::uint64_t>());
-            else return json{{"error", "'value' not a number"}};
+            if (!jv.is_number()) return json{{"error", "'value' not a number"}};
+            double w = jv.get<double>();
             std::memcpy(buf, &w, 8); size = 8;
         } else if (ty == "address" || ty == "intptr" || ty == "uintptr" || ty == "ptr" ||
                    ty == "System.IntPtr" || ty == "System.UIntPtr") {
@@ -4085,7 +4100,7 @@ void RegisterCoreHandlers() {
         // at the cost of asking the user to lower caps + retry.
         const ProcessMemorySnapshot memBefore = QueryProcessMemory();
         if (memBefore.pointerSize == 4 &&
-            memBefore.privateUsage >= kX86PrivateUsageRefuseThreshold) {
+            memBefore.privateUsage >= QueryX86PrivateUsageRefuseThreshold()) {
             const double gb = memBefore.privateUsage / (1024.0 * 1024.0 * 1024.0);
             return json{
                 {"error",
@@ -4102,9 +4117,10 @@ void RegisterCoreHandlers() {
         // Snapshot memory budget (mirror of the IL2CPP handler) — stop the
         // decode before the game OOMs. budget = pre-snapshot private usage +
         // headroom, headroom clamped to a fraction of free RAM.
-        std::uint64_t memHeadroomMono =
-            static_cast<std::uint64_t>(args.value("memHeadroomMB", 0)) * 1024ull * 1024ull;
-        if (memHeadroomMono == 0) memHeadroomMono = kSnapshotDefaultHeadroomBytes;
+        const std::int64_t reqHeadroomMonoMB = args.value("memHeadroomMB", std::int64_t{0});
+        std::uint64_t memHeadroomMono = (reqHeadroomMonoMB > 0)
+            ? static_cast<std::uint64_t>(reqHeadroomMonoMB) * 1024ull * 1024ull
+            : kSnapshotDefaultHeadroomBytes;
         if (const std::uint64_t availMono = QueryAvailablePhysBytes(); availMono > 0) {
             const auto cap = static_cast<std::uint64_t>(availMono * kSnapshotAvailPhysFraction);
             if (memHeadroomMono > cap) memHeadroomMono = cap;
@@ -4260,11 +4276,7 @@ void RegisterCoreHandlers() {
         // wide-scan result.
         auto session = std::make_unique<Snapshot::Session>();
         session->capturedAt    = Snapshot::CapturedAtUtcNow();
-        session->gameBuildId   = Snapshot::ComputeGameBuildId(MagicStrings::ModuleMonoBdwgc);
-        // Fallback to legacy mono.dll for Unity < 5.4 builds.
-        if (session->gameBuildId.empty()) {
-            session->gameBuildId = Snapshot::ComputeGameBuildId(MagicStrings::ModuleMonoLegacy);
-        }
+        session->gameBuildId   = CurrentGameBuildId();
         session->gameSessionId = Snapshot::SessionManager::GameSessionId();
         session->instanceCap   = instanceCap;
         session->arrayCap      = arrayCap;
@@ -4287,8 +4299,8 @@ void RegisterCoreHandlers() {
         // session is std::move'd into the SessionManager before the Begin
         // response is built (echoing session->… there would be use-after-move).
         const bool        effValueStructFields = args.value("valueStructFields", true);
-        const std::size_t effStructMemberCap   = args.value("structMemberCap",
-                                                            static_cast<std::size_t>(32));
+        const std::size_t effStructMemberCap   = Discrete::ExportHelpers::ClampRpcLimit(
+            args.value("structMemberCap", std::int64_t{32}), 32u, 256u);
         session->valueStructFields = effValueStructFields;
         session->structMemberCap   = effStructMemberCap;
         session->plan.reserve(descs.size());
@@ -4782,7 +4794,17 @@ void RegisterCoreHandlers() {
             });
         }
 
-        std::uint64_t sid = Snapshot::SessionManager::Instance().Begin(std::move(session));
+        // C-L6: Mono decoded every class payload during Begin, so `plan` is no
+        // longer needed — free it immediately to reduce 32-bit peak memory, and
+        // wrap `classes` in an immutable shared_ptr so snapshotChunk can slice
+        // outside SessionManager's global mutex.
+        session->plan.clear();
+        session->plan.shrink_to_fit();
+        session->sharedClasses = std::make_shared<const std::vector<Snapshot::ClassPayload>>(
+            std::move(session->classes));
+
+        std::uint64_t sid = Snapshot::SessionManager::Instance().Begin(
+            std::move(session), PipeServer::CurrentClientId());
 
         json scanStats = {
             {"regionsTotal",     bulk.regionsTotal},
@@ -4879,18 +4901,32 @@ void RegisterCoreHandlers() {
         json classes = json::array();
         std::size_t totalPlan   = 0;
         std::size_t startCursor = 0;
+        std::shared_ptr<const std::vector<Snapshot::ClassPayload>> sharedClasses;
         bool found = Snapshot::SessionManager::Instance().View(sid,
             [&](Snapshot::Session& s) {
-                totalPlan = s.classes.size();
                 startCursor = (cursorIn < 0) ? 0 : static_cast<std::size_t>(cursorIn);
-                if (startCursor > totalPlan) startCursor = totalPlan;
-                std::size_t end = std::min(totalPlan, startCursor + limit);
-                for (std::size_t i = startCursor; i < end; ++i) {
-                    classes.push_back(s.classes[i]);   // json copy — small per entry
+                if (s.sharedClasses) {
+                    sharedClasses = s.sharedClasses;
+                } else {
+                    totalPlan = s.classes.size();
+                    if (startCursor > totalPlan) startCursor = totalPlan;
+                    std::size_t end = std::min(totalPlan, startCursor + limit);
+                    for (std::size_t i = startCursor; i < end; ++i) {
+                        classes.push_back(s.classes[i]);
+                    }
                 }
-            });
+            }, PipeServer::CurrentClientId());
         if (!found) {
             return json{{"error", "session_not_found"}, {"snapshotId", sidStr}};
+        }
+        // C-L6: Perform the JSON slice copy outside SessionManager::mu_.
+        if (sharedClasses) {
+            totalPlan = sharedClasses->size();
+            if (startCursor > totalPlan) startCursor = totalPlan;
+            std::size_t end = std::min(totalPlan, startCursor + limit);
+            for (std::size_t i = startCursor; i < end; ++i) {
+                classes.push_back((*sharedClasses)[i]);
+            }
         }
         std::size_t nextCursor = startCursor + static_cast<std::size_t>(classes.size());
         bool done = (nextCursor >= totalPlan);
@@ -4912,7 +4948,7 @@ void RegisterCoreHandlers() {
         try { sid = std::stoull(sidStr); } catch (...) {
             return json{{"error", "bad 'snapshotId'"}};
         }
-        bool dropped = Snapshot::SessionManager::Instance().End(sid);
+        bool dropped = Snapshot::SessionManager::Instance().End(sid, PipeServer::CurrentClientId());
         return json{
             {"ok",         true},
             {"snapshotId", sidStr},
@@ -5307,11 +5343,26 @@ void RegisterCoreHandlers() {
         if (k == nullptr) return json{{"error", err}};
 
         auto cm = Mono::CompileMethodByName(k, methodName);
-        if (!cm.ok) return json{{"error", "mono_compile_method failed for: " + methodName}};
+        if (!cm.ok) {
+            if (cm.ambiguous) {
+                return json{
+                    {"error",       "ambiguous method (multiple overloads): " + methodName + " — use findMethodInstances"},
+                    {"ambiguous",   true},
+                    {"match_count", cm.matchCount},
+                };
+            }
+            return json{
+                {"error",       "mono_compile_method failed for: " + methodName},
+                {"ambiguous",   false},
+                {"match_count", cm.matchCount},
+            };
+        }
         return json{
-            {"method",  cm.name},
-            {"token",   cm.token},
-            {"address", formatHex(reinterpret_cast<std::uintptr_t>(cm.address))},
+            {"method",      cm.name},
+            {"token",       cm.token},
+            {"address",     formatHex(reinterpret_cast<std::uintptr_t>(cm.address))},
+            {"ambiguous",   cm.ambiguous},
+            {"match_count", cm.matchCount},
         };
     });
 
@@ -5386,8 +5437,10 @@ void RegisterCoreHandlers() {
         // is never WORSE than the default, instead of returning a misleading 0.
         bool liveWalkEmpty = false;
         if (usedLiveWalk && matches.empty()) { usedLiveWalk = false; liveWalkEmpty = true; }
+        const bool skipMapped = args.value("skipMapped", true);
         if (!usedLiveWalk) {
-            matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(vtable), limit, &stats);
+            matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(vtable),
+                                             limit, &stats, 0, 0, skipMapped);
         }
         if (ScanCancel::IsCancelRequested()) {
             return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
@@ -5439,10 +5492,10 @@ void RegisterCoreHandlers() {
             char line[256];
             std::snprintf(line, sizeof(line),
                 "findInstances(Mono) class=%p vtable=%p matches=%zu "
-                "regions total=%zu scanned=%zu skipImage=%zu skipStack=%zu bytes=%zu stacks=%zu",
+                "regions total=%zu scanned=%zu skipImage=%zu skipMapped=%zu skipStack=%zu bytes=%zu stacks=%zu",
                 static_cast<const void*>(k), static_cast<const void*>(vtable),
                 matches.size(), stats.regionsTotal, stats.regionsScanned,
-                stats.regionsSkipImage, stats.regionsSkipStack,
+                stats.regionsSkipImage, stats.regionsSkipMapped, stats.regionsSkipStack,
                 stats.bytesScanned, stats.threadStacks);
             Discrete::Log::Write(MagicStrings::LogCategoryScan, line);
         }
@@ -5460,12 +5513,13 @@ void RegisterCoreHandlers() {
             {"matches",  std::move(arr)},
             {"filter",   std::move(filterStats)},
             {"scan_stats", json{
-                {"regions_total",      stats.regionsTotal},
-                {"regions_scanned",    stats.regionsScanned},
-                {"regions_skip_image", stats.regionsSkipImage},
-                {"regions_skip_stack", stats.regionsSkipStack},
-                {"bytes_scanned",      stats.bytesScanned},
-                {"thread_stacks",      stats.threadStacks},
+                {"regions_total",       stats.regionsTotal},
+                {"regions_scanned",     stats.regionsScanned},
+                {"regions_skip_image",  stats.regionsSkipImage},
+                {"regions_skip_mapped", stats.regionsSkipMapped},
+                {"regions_skip_stack",  stats.regionsSkipStack},
+                {"bytes_scanned",       stats.bytesScanned},
+                {"thread_stacks",       stats.threadStacks},
             }},
         };
     });
@@ -5478,7 +5532,7 @@ void RegisterCoreHandlers() {
     // as walkInstance, so primitives come back as `value`, strings as `ptr`
     // + `string`, references as `ptr`, unreadable rows as `error: unreadable`.
     PipeServer::RegisterHandler(MagicStrings::CmdListFieldValuesAcrossInstances,
-        [resolveClassFromArgs, formatHex, decodeField](const json& args) -> json {
+        [resolveClassFromArgs, formatHex, decodeField, filterMatches](const json& args) -> json {
         if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
         std::string err;
         Mono::MonoClass* k = resolveClassFromArgs(args, err);
@@ -5511,11 +5565,15 @@ void RegisterCoreHandlers() {
             limit = std::min<std::size_t>(args["limit"].get<std::size_t>(), 4096);
         }
         // C-M1: own a ScanCancel::Scope across the heap scan + row decode.
+        // C-L3: match findInstances's skipMapped=true and post-scan validation.
+        const bool skipMapped = args.value("skipMapped", true);
         ScanCancel::Scope scanCancelScope;
-        auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(vtable), limit, nullptr);
+        auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(vtable),
+                                              limit, nullptr, 0, 0, skipMapped);
         if (ScanCancel::IsCancelRequested()) {
             return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
         }
+        (void)filterMatches(matches, reinterpret_cast<std::uintptr_t>(vtable), args, {}, {});
 
         json rows = json::array();
         for (const void* p : matches) {
@@ -6123,7 +6181,8 @@ void RegisterCoreHandlers() {
 
         if (ScanCancel::IsCancelRequested())
             return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
-        std::uint64_t sessionId = ValueScan::SessionManager::Instance().Begin(dt, std::move(sessionCands));
+        std::uint64_t sessionId = ValueScan::SessionManager::Instance().Begin(
+            dt, std::move(sessionCands), PipeServer::CurrentClientId());
 
         // Re-render the same rows for immediate display — caller doesn't have
         // to make a second RPC to see the initial set. ViewWith locks the
@@ -6137,7 +6196,7 @@ void RegisterCoreHandlers() {
             shown = std::min(kept, emitLimit);          // DISPLAYED (sent to UI)
             for (std::size_t i = 0; i < shown; ++i)
                 rows.push_back(EmitCandidateRow(cands[i], d, fmtHex));
-        });
+        }, PipeServer::CurrentClientId());
 
         {
             char line[320];
@@ -6254,8 +6313,8 @@ void RegisterCoreHandlers() {
             ValueScanDefaultRetain(), hardCap);
         const std::size_t rawCapPerSlot = ClampCap(
             static_cast<std::size_t>(args.value("rawCap", hardCap)), hardCap, hardCap);
-        std::size_t emitLimit = static_cast<std::size_t>(args.value("limit", 200));
-        if (emitLimit == 0 || emitLimit > 50000) emitLimit = 200;
+        const std::size_t emitLimit = Discrete::ExportHelpers::ClampRpcLimit(
+            args.value("limit", std::int64_t{200}), 200u, 50000u);
         const std::size_t perInstanceLeafCap = 256;
 
         // Phase 1 — raw scan every task (pure SafeReadBytes; no mono_* APIs).
@@ -6334,7 +6393,8 @@ void RegisterCoreHandlers() {
 
         auto cands = BuildGroupCandidates(hits, static_cast<int>(slotSpecs.size()), retainCap, perInstanceLeafCap);
         std::size_t totalCands = cands.size();
-        std::uint64_t sessionId = GroupScan::SessionManager::Instance().Begin(slotSpecs, std::move(cands));
+        std::uint64_t sessionId = GroupScan::SessionManager::Instance().Begin(
+            slotSpecs, std::move(cands), PipeServer::CurrentClientId());
 
         json rows = json::array();
         std::size_t shown = 0;
@@ -6344,7 +6404,7 @@ void RegisterCoreHandlers() {
             shown = std::min(cs.size(), emitLimit);
             for (std::size_t i = 0; i < shown; ++i)
                 rows.push_back(EmitGroupCandidateRow(cs[i], sl, fmtHex));
-        });
+        }, PipeServer::CurrentClientId());
 
         {
             char line[256];
@@ -6384,11 +6444,11 @@ void RegisterCoreHandlers() {
         if (!args.contains("address") || !parseAddr(args["address"], addr)) {
             return json{{"error", "missing/invalid 'address'"}};
         }
-        // Optional cap on emitted Dictionary<K,V> key/value pairs (default 256).
+        // Optional cap on emitted Dictionary<K,V> key/value pairs (default 256, max 4096, C-L5).
         std::size_t dictPairCap = kDictDefaultPairCap;
         if (args.contains("dictLimit") && args["dictLimit"].is_number()) {
-            const long long dl = args["dictLimit"].get<long long>();
-            if (dl > 0) dictPairCap = static_cast<std::size_t>(dl);
+            dictPairCap = Discrete::ExportHelpers::ClampRpcLimit(
+                args["dictLimit"].get<std::int64_t>(), kDictDefaultPairCap, 4096u);
         }
         std::string err;
         Mono::MonoClass* k = resolveClassFromArgs(args, err);
@@ -6428,15 +6488,17 @@ void RegisterCoreHandlers() {
         // types so member addresses + reported offsets are struct-relative.
         // Reference-type walks: `addr` is the object base (incl header) and
         // offsets are header-inclusive, so addr+offset is already correct → 0.
-        const long structHeaderAdjust =
-            (r.class_is_valuetype != nullptr && r.class_is_valuetype(k) != 0)
-                ? static_cast<long>(ManagedLayout::kObjectHeader) : 0;
-
-        // Walk parent chain (cap at 16 levels — defends against pathological loops).
+        // Walk parent chain (cap at 16 levels — defends against pathological loops)
+        // and query class_is_valuetype under the SAME ThreadAttachGuard (C-L3:
+        // direct Mono r.class_* calls must never run outside an attach guard).
+        long structHeaderAdjust = 0;
         std::vector<Mono::MonoClass*> chain;
         {
             Mono::ThreadAttachGuard guard(domain);
             if (!guard.Attached()) return json{{"error", "mono_thread_attach failed"}};
+            if (r.class_is_valuetype != nullptr && r.class_is_valuetype(k) != 0) {
+                structHeaderAdjust = static_cast<long>(ManagedLayout::kObjectHeader);
+            }
             for (Mono::MonoClass* cur = k; cur != nullptr && chain.size() < 16; ) {
                 chain.push_back(cur);
                 if (r.class_get_parent == nullptr) break;
@@ -6625,29 +6687,37 @@ void RegisterCoreHandlers() {
     });
 
     // Phase 5 segment 3 — getMetadataStats (Mono).
-    // Walks every class across every loaded assembly. Each Mono helper does
-    // its own thread attach, so we deliberately don't hold an outer guard
-    // (nested attach/detach destroyed BongoCat in build #54).
-    PipeServer::RegisterHandler("getMetadataStats",
+    // C-L3: Hold ONE outer ThreadAttachGuard across the whole assembly/class
+    // walk (matching searchSymbols / dumpClassInfo / snapshot) so nested
+    // Mono helpers reuse the thread attachment via ThreadAttachGuard's
+    // thread-local depth counter instead of attach/detaching once per assembly.
+    PipeServer::RegisterHandler(MagicStrings::CmdGetMetadataStats,
         [updateStats, buildStatsJson](const json&) -> json {
         if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
+        Mono::MonoDomain* domain = Mono::GetRootDomain();
+        if (domain == nullptr) return json{{"error", "no mono root domain"}};
 
         NameStats s;
-        auto assemblies = Mono::EnumerateAssemblies();
         std::size_t scanned = 0;
-        for (const auto& a : assemblies) {
-            // Use the image the enumeration already handed back — a per-name
-            // FindImageByName here re-walked the domain 337× per call
-            // (the documented "23K EnumerateAssemblies → freeze" shape).
-            Mono::MonoImage* img = a.image;
-            if (img == nullptr) continue;
-            auto classes = Mono::EnumerateClasses(img);
-            for (const auto& c : classes) updateStats(s, c.ns, c.name);
-            ++scanned;
+        {
+            Mono::ThreadAttachGuard guard(domain);
+            if (!guard.Attached()) return json{{"error", "mono_thread_attach failed"}};
+            auto assemblies = Mono::EnumerateAssemblies();
+            for (const auto& a : assemblies) {
+                // Use the image the enumeration already handed back — a per-name
+                // FindImageByName here re-walked the domain 337× per call
+                // (the documented "23K EnumerateAssemblies → freeze" shape).
+                Mono::MonoImage* img = a.image;
+                if (img == nullptr) continue;
+                auto classes = Mono::EnumerateClasses(img);
+                for (const auto& c : classes) updateStats(s, c.ns, c.name);
+                ++scanned;
+            }
         }
         json out = buildStatsJson(s);
-        out["scope"]              = "all_assemblies";
-        out["assemblies_scanned"] = scanned;
+        out["scope"]               = "all_assemblies";
+        out["assemblies_scanned"]  = scanned;
+        out["typeTablesSupported"] = true;
         return out;
     });
 
@@ -7016,9 +7086,22 @@ void RegisterCoreHandlers() {
               }
               else if (ty == "char")   { out.kind = CallArgKind::Char;
                   if (a.contains("value")) {
-                      if      (a["value"].is_string() && !a["value"].get<std::string>().empty())
-                                                          out.u64 = static_cast<std::uint8_t>(a["value"].get<std::string>()[0]);
-                      else if (a["value"].is_number())     out.u64 = a["value"].get<std::uint64_t>();
+                      if (a["value"].is_string()) {
+                          std::uint16_t ch = 0;
+                          if (!Discrete::ExportHelpers::DecodeFirstUtf16CodeUnit(
+                                  a["value"].get_ref<const std::string&>(), ch)) {
+                              return json{{"error", std::string{"args["} + std::to_string(i) + "].value not a valid UTF-8 char"}};
+                          }
+                          out.u64 = ch;
+                      } else if (a["value"].is_number_unsigned()) {
+                          out.u64 = a["value"].get<std::uint64_t>();
+                      } else if (a["value"].is_number_integer()) {
+                          const std::int64_t iv = a["value"].get<std::int64_t>();
+                          if (iv < 0 || iv > 0xFFFF) {
+                              return json{{"error", std::string{"args["} + std::to_string(i) + "].value out of range for char"}};
+                          }
+                          out.u64 = static_cast<std::uint64_t>(iv);
+                      }
                   }
               }
               else if (ty == "string") {
@@ -7856,14 +7939,6 @@ void RegisterCoreHandlers() {
                     {"kindName", kindName},
                     {"index",    s.tokenIndex},
                 };
-                if (s.tokenKind == static_cast<std::uint8_t>(
-                        IL2CPP::MetadataUsageKind::TypeInfo)) {
-                    if (IL2CPP::Il2CppClass* k =
-                            IL2CPP::ResolveTypeInfoSlotClass(s)) {
-                        tokenJson["resolvedClassPtr"] =
-                            formatHex(reinterpret_cast<std::uintptr_t>(k));
-                    }
-                }
             }
 
             slotsJson.push_back({
@@ -8200,7 +8275,7 @@ void RegisterCoreHandlers() {
         // build appears.
         const ProcessMemorySnapshot memBeforeIl = QueryProcessMemory();
         if (memBeforeIl.pointerSize == 4 &&
-            memBeforeIl.privateUsage >= kX86PrivateUsageRefuseThreshold) {
+            memBeforeIl.privateUsage >= QueryX86PrivateUsageRefuseThreshold()) {
             const double gb = memBeforeIl.privateUsage / (1024.0 * 1024.0 * 1024.0);
             return json{
                 {"error",
@@ -8218,9 +8293,10 @@ void RegisterCoreHandlers() {
         // budget = pre-snapshot private usage + headroom, headroom clamped to
         // a fraction of free RAM. When the game's private usage crosses it the
         // decode stops and the response reports truncatedByMemory.
-        std::uint64_t memHeadroomIl =
-            static_cast<std::uint64_t>(args.value("memHeadroomMB", 0)) * 1024ull * 1024ull;
-        if (memHeadroomIl == 0) memHeadroomIl = kSnapshotDefaultHeadroomBytes;
+        const std::int64_t reqHeadroomIlMB = args.value("memHeadroomMB", std::int64_t{0});
+        std::uint64_t memHeadroomIl = (reqHeadroomIlMB > 0)
+            ? static_cast<std::uint64_t>(reqHeadroomIlMB) * 1024ull * 1024ull
+            : kSnapshotDefaultHeadroomBytes;
         if (const std::uint64_t availIl = QueryAvailablePhysBytes(); availIl > 0) {
             const auto cap = static_cast<std::uint64_t>(availIl * kSnapshotAvailPhysFraction);
             if (memHeadroomIl > cap) memHeadroomIl = cap;
@@ -8297,7 +8373,7 @@ void RegisterCoreHandlers() {
 
         auto session = std::make_unique<Snapshot::Session>();
         session->capturedAt    = Snapshot::CapturedAtUtcNow();
-        session->gameBuildId   = Snapshot::ComputeGameBuildId(MagicStrings::ModuleIL2CPP);
+        session->gameBuildId   = CurrentGameBuildId();
         session->gameSessionId = Snapshot::SessionManager::GameSessionId();
         session->instanceCap   = instanceCap;
         session->arrayCap      = arrayCap;
@@ -8312,8 +8388,8 @@ void RegisterCoreHandlers() {
         // Phase 31-2 (Phase B) — generic value-type struct fan-out (see Mono path).
         // Locals because session is moved before the Begin response is built.
         const bool        effValueStructFields = args.value("valueStructFields", true);
-        const std::size_t effStructMemberCap   = args.value("structMemberCap",
-                                                            static_cast<std::size_t>(32));
+        const std::size_t effStructMemberCap   = Discrete::ExportHelpers::ClampRpcLimit(
+            args.value("structMemberCap", std::int64_t{32}), 32u, 256u);
         session->valueStructFields = effValueStructFields;
         session->structMemberCap   = effStructMemberCap;
         session->plan.reserve(descs.size());
@@ -8403,7 +8479,8 @@ void RegisterCoreHandlers() {
         if (ScanCancel::IsCancelRequested()) {
             return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
         }
-        std::uint64_t sid = Snapshot::SessionManager::Instance().Begin(std::move(session));
+        std::uint64_t sid = Snapshot::SessionManager::Instance().Begin(
+            std::move(session), PipeServer::CurrentClientId());
 
         json scanStats = {
             {"regionsTotal",     bulk.regionsTotal},
@@ -8494,11 +8571,14 @@ void RegisterCoreHandlers() {
         // DropAll() are never blocked, while the local shared_ptr prevents
         // use-after-free if the session is ended or expired mid-chunk.
         std::shared_ptr<Snapshot::ISnapshotStreamDecoder> decoder;
+        std::shared_ptr<const std::vector<Snapshot::ClassPayload>> sharedClasses;
         bool found = Snapshot::SessionManager::Instance().View(sid,
             [&](Snapshot::Session& s) {
                 startCursor = (cursorIn < 0) ? 0 : static_cast<std::size_t>(cursorIn);
                 if (s.streamDecoder) {
                     decoder = s.streamDecoder;
+                } else if (s.sharedClasses) {
+                    sharedClasses = s.sharedClasses;
                 } else {
                     // Legacy decode-in-Begin slicer (pre-built payloads).
                     totalPlan = s.classes.size();
@@ -8510,11 +8590,20 @@ void RegisterCoreHandlers() {
                     nextCursor = startCursor + static_cast<std::size_t>(classes.size());
                     done = (nextCursor >= totalPlan);
                 }
-            });
+            }, PipeServer::CurrentClientId());
         if (!found) {
             return json{{"error", "session_not_found"}, {"snapshotId", sidStr}};
         }
-        if (decoder) {
+        if (sharedClasses) {
+            totalPlan = sharedClasses->size();
+            if (startCursor > totalPlan) startCursor = totalPlan;
+            std::size_t end = std::min(totalPlan, startCursor + limit);
+            for (std::size_t i = startCursor; i < end; ++i) {
+                classes.push_back((*sharedClasses)[i]);
+            }
+            nextCursor = startCursor + static_cast<std::size_t>(classes.size());
+            done = (nextCursor >= totalPlan);
+        } else if (decoder) {
             totalPlan = decoder->PlanSize();
             if (startCursor > totalPlan) startCursor = totalPlan;
             nextCursor = decoder->DecodeRange(startCursor, limit, classes);
@@ -8557,7 +8646,7 @@ void RegisterCoreHandlers() {
         try { sid = std::stoull(sidStr); } catch (...) {
             return json{{"error", "bad 'snapshotId'"}};
         }
-        bool dropped = Snapshot::SessionManager::Instance().End(sid);
+        bool dropped = Snapshot::SessionManager::Instance().End(sid, PipeServer::CurrentClientId());
         return json{
             {"ok",         true},
             {"snapshotId", sidStr},
@@ -8637,7 +8726,7 @@ void RegisterCoreHandlers() {
 
     // Phase 5 segment 2: list metadata fields (including const literals stripped
     // from the runtime field iterator) for a given type.
-    PipeServer::RegisterHandler("il2cppGetMetadataTypeFields",
+    PipeServer::RegisterHandler(MagicStrings::CmdIL2CPPGetMetadataTypeFields,
         [formatHex](const json& args) -> json {
         const auto& mp = IL2CPP::Metadata::Parser::Get();
         if (!mp.loaded()) return json{{"error", "global-metadata.dat not loaded"}};
@@ -8720,7 +8809,7 @@ void RegisterCoreHandlers() {
     // Reads from global-metadata.dat directly — faster than the runtime path
     // and includes literal-only types stripped from the runtime field
     // iterator.
-    PipeServer::RegisterHandler("getMetadataStats",
+    PipeServer::RegisterHandler(MagicStrings::CmdGetMetadataStats,
         [updateStats, buildStatsJson](const json&) -> json {
         const auto& mp = IL2CPP::Metadata::Parser::Get();
         if (!mp.loaded()) return json{{"error", "global-metadata.dat not loaded"}};
@@ -8734,12 +8823,13 @@ void RegisterCoreHandlers() {
         json out = buildStatsJson(s);
         out["scope"] = "metadata_all";
         out["tablesDegraded"] = mp.tablesDegraded();
+        out["typeTablesSupported"] = mp.typeTablesSupported();
         return out;
     });
 
     // Phase 5 segment 2d follow-up — diagnostics for the runtime
     // Il2CppMetadataRegistration AOB scan.
-    PipeServer::RegisterHandler("il2cppGetMetadataRegistration",
+    PipeServer::RegisterHandler(MagicStrings::CmdIL2CPPGetMetadataRegistration,
         [formatHex](const json&) -> json {
         const bool ok = IL2CPP::MetadataRegistration::Find();
         json result = {{"found", ok}};
@@ -8864,6 +8954,12 @@ void RegisterCoreHandlers() {
         // Phase 32 — generic post-scan filter (validate / aliveOnly / sane / fieldFilter).
         // expectedHeader = Il2CppClass* (the first qword of a real IL2CPP object).
         json filterStats = filterMatches(matches, reinterpret_cast<std::uintptr_t>(k), args, refOffsets, boolOffsets);
+        if (args.value("liveOnly", false)) {
+            // C-L3: IL2CPP does not expose a live-heap walk API; report this
+            // explicitly to mirror the Mono handler's filter stats contract.
+            filterStats["live_walk"] = false;
+            filterStats["live_walk_unavailable"] = true;
+        }
         json arr = json::array();
         for (const void* p : matches) {
             arr.push_back(formatHex(reinterpret_cast<std::uintptr_t>(p)));
@@ -8907,7 +9003,7 @@ void RegisterCoreHandlers() {
     //   * heap scan target is the Il2CppClass* (not a VTable).
     //   * `vtable` is not emitted (Mono-specific).
     PipeServer::RegisterHandler(MagicStrings::CmdListFieldValuesAcrossInstances,
-        [resolveClassFromArgs, formatHex, decodeField, computeArenaExclude](const json& args) -> json {
+        [resolveClassFromArgs, formatHex, decodeField, computeArenaExclude, filterMatches](const json& args) -> json {
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
         std::string err;
         IL2CPP::Il2CppClass* k = resolveClassFromArgs(args, err);
@@ -8943,6 +9039,9 @@ void RegisterCoreHandlers() {
         if (ScanCancel::IsCancelRequested()) {
             return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
         }
+        // C-L3: apply the same default post-scan header validation as findInstances
+        // so listing field values across instances matches the instance list.
+        (void)filterMatches(matches, reinterpret_cast<std::uintptr_t>(k), args, {}, {});
 
         json rows = json::array();
         for (const void* p : matches) {
@@ -9512,7 +9611,8 @@ void RegisterCoreHandlers() {
 
         if (ScanCancel::IsCancelRequested())
             return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
-        std::uint64_t sessionId = ValueScan::SessionManager::Instance().Begin(dt, std::move(sessionCands));
+        std::uint64_t sessionId = ValueScan::SessionManager::Instance().Begin(
+            dt, std::move(sessionCands), PipeServer::CurrentClientId());
 
         json rows = json::array();
         std::size_t kept = 0, shown = 0;
@@ -9523,7 +9623,7 @@ void RegisterCoreHandlers() {
             shown = std::min(kept, emitLimit);          // DISPLAYED (sent to UI)
             for (std::size_t i = 0; i < shown; ++i)
                 rows.push_back(EmitCandidateRow(cands[i], d, fmtHex));
-        });
+        }, PipeServer::CurrentClientId());
 
         {
             char line[256];
@@ -9639,8 +9739,8 @@ void RegisterCoreHandlers() {
             ValueScanDefaultRetain(), hardCap);
         const std::size_t rawCapPerSlot = ClampCap(
             static_cast<std::size_t>(args.value("rawCap", hardCap)), hardCap, hardCap);
-        std::size_t emitLimit = static_cast<std::size_t>(args.value("limit", 200));
-        if (emitLimit == 0 || emitLimit > 50000) emitLimit = 200;
+        const std::size_t emitLimit = Discrete::ExportHelpers::ClampRpcLimit(
+            args.value("limit", std::int64_t{200}), 200u, 50000u);
         const std::size_t perInstanceLeafCap = 256;
 
         // Phase 1 — raw scan every task (pure SafeReadBytes; no runtime APIs).
@@ -9716,7 +9816,8 @@ void RegisterCoreHandlers() {
 
         auto cands = BuildGroupCandidates(hits, static_cast<int>(slotSpecs.size()), retainCap, perInstanceLeafCap);
         std::size_t totalCands = cands.size();
-        std::uint64_t sessionId = GroupScan::SessionManager::Instance().Begin(slotSpecs, std::move(cands));
+        std::uint64_t sessionId = GroupScan::SessionManager::Instance().Begin(
+            slotSpecs, std::move(cands), PipeServer::CurrentClientId());
 
         json rows = json::array();
         std::size_t shown = 0;
@@ -9726,7 +9827,7 @@ void RegisterCoreHandlers() {
             shown = std::min(cs.size(), emitLimit);
             for (std::size_t i = 0; i < shown; ++i)
                 rows.push_back(EmitGroupCandidateRow(cs[i], sl, fmtHex));
-        });
+        }, PipeServer::CurrentClientId());
 
         {
             char line[256];
@@ -9763,11 +9864,11 @@ void RegisterCoreHandlers() {
         if (!args.contains("address") || !parseAddr(args["address"], addr)) {
             return json{{"error", "missing/invalid 'address'"}};
         }
-        // Optional cap on emitted Dictionary<K,V> key/value pairs (default 256).
+        // Optional cap on emitted Dictionary<K,V> key/value pairs (default 256, max 4096, C-L5).
         std::size_t dictPairCap = kDictDefaultPairCap;
         if (args.contains("dictLimit") && args["dictLimit"].is_number()) {
-            const long long dl = args["dictLimit"].get<long long>();
-            if (dl > 0) dictPairCap = static_cast<std::size_t>(dl);
+            dictPairCap = Discrete::ExportHelpers::ClampRpcLimit(
+                args["dictLimit"].get<std::int64_t>(), kDictDefaultPairCap, 4096u);
         }
         std::string err;
         IL2CPP::Il2CppClass* k = resolveClassFromArgs(args, err);
@@ -10272,9 +10373,22 @@ void RegisterCoreHandlers() {
               }
               else if (ty == "char")   { out.kind = CallArgKind::Char;
                   if (a.contains("value")) {
-                      if      (a["value"].is_string() && !a["value"].get<std::string>().empty())
-                                                          out.u64 = static_cast<std::uint8_t>(a["value"].get<std::string>()[0]);
-                      else if (a["value"].is_number())     out.u64 = a["value"].get<std::uint64_t>();
+                      if (a["value"].is_string()) {
+                          std::uint16_t ch = 0;
+                          if (!Discrete::ExportHelpers::DecodeFirstUtf16CodeUnit(
+                                  a["value"].get_ref<const std::string&>(), ch)) {
+                              return json{{"error", std::string{"args["} + std::to_string(i) + "].value not a valid UTF-8 char"}};
+                          }
+                          out.u64 = ch;
+                      } else if (a["value"].is_number_unsigned()) {
+                          out.u64 = a["value"].get<std::uint64_t>();
+                      } else if (a["value"].is_number_integer()) {
+                          const std::int64_t iv = a["value"].get<std::int64_t>();
+                          if (iv < 0 || iv > 0xFFFF) {
+                              return json{{"error", std::string{"args["} + std::to_string(i) + "].value out of range for char"}};
+                          }
+                          out.u64 = static_cast<std::uint64_t>(iv);
+                      }
                   }
               }
               else if (ty == "string") {
@@ -10411,6 +10525,25 @@ int Discrete_Init() {
     Discrete::Log::Init("ExportAPI: Discrete_Init");
     RegisterCoreHandlers();
 
+    // A-L20: Mark batch / scan / xref / snapshot commands that allocate heavy
+    // runtime metadata or finalizer garbage so the disconnect GC-drain hook
+    // runs ONLY after clients that actually executed heavy work — preventing
+    // 50-200 ms full-GC stalls on every short CE-bridge burst.
+    Discrete::PipeServer::MarkHeavyCommands({
+        Discrete::MagicStrings::CmdFindFieldReferences,
+        Discrete::MagicStrings::CmdSearchSymbols,
+        Discrete::MagicStrings::CmdSnapshotBegin,
+        Discrete::MagicStrings::CmdDumpClassInfo,
+        Discrete::MagicStrings::CmdDumpIl2cppSymbols,
+        Discrete::MagicStrings::CmdBeginValueScan,
+        Discrete::MagicStrings::CmdBeginGroupScan,
+        Discrete::MagicStrings::CmdScanFieldValue,
+        Discrete::MagicStrings::CmdFindInstances,
+        Discrete::MagicStrings::CmdListFieldValuesAcrossInstances,
+        Discrete::MagicStrings::CmdDiagnoseClassReferences,
+        Discrete::MagicStrings::CmdDumpLazyInitSlots,
+    });
+
     // Build #547 follow-up — disconnect-time GC drain.
     // Long-running batch RPCs (Phase 28 findFieldReferences walking 2000+
     // method headers, Phase 27 value scans, Phase 25 multi-asm searchSymbols)
@@ -10419,21 +10552,20 @@ int Discrete_Init() {
     // queue at process shutdown rather than incrementally — observed live:
     // BongoCat post-findFieldReferences game-shutdown latency tens of
     // seconds (user reported 2026-05-25). Draining at the disconnect
-    // boundary (after EVERY client disconnects, while DiscreteUI / the
-    // bridge is still attached) keeps the user-perceptible game shutdown
-    // back at ~1s.
+    // boundary (gated on CurrentClientRanHeavyRpc() so lightweight short
+    // bursts pay zero stall — A-L20) keeps game shutdown back at ~1s.
     //
     // The hook runs on the per-client worker thread that's about to exit,
     // AFTER ::DisconnectNamedPipe + ::CloseHandle — so the pipe slot is
     // already returned to the OS and the next client can connect
-    // concurrently with this drain. Safe to be slow (~50-200ms on
-    // BongoCat-sized images).
+    // concurrently with this drain.
     //
     // Bound under both compile branches — the resolver `gc_collect` slot
     // is optional, so a runtime that doesn't export `mono_gc_collect` /
     // `il2cpp_gc_collect` (legacy / stripped) silently no-ops.
 #if defined(DISCRETE_BACKEND_MONO)
-    Discrete::PipeServer::RegisterDisconnectHook([]() {
+    Discrete::PipeServer::RegisterDisconnectHook("gc-drain", []() {
+        if (!Discrete::PipeServer::CurrentClientRanHeavyRpc()) return;
         const auto& r = Discrete::Mono::GetResolver();
         if (!r.resolved || r.gc_collect == nullptr) return;
         Discrete::Mono::MonoDomain* domain =
@@ -10457,7 +10589,8 @@ int Discrete_Init() {
     Discrete::Log::Init(
         "ExportAPI: registered Mono GC-drain disconnect hook");
 #elif defined(DISCRETE_BACKEND_IL2CPP)
-    Discrete::PipeServer::RegisterDisconnectHook([]() {
+    Discrete::PipeServer::RegisterDisconnectHook("gc-drain", []() {
+        if (!Discrete::PipeServer::CurrentClientRanHeavyRpc()) return;
         const auto& r = Discrete::IL2CPP::GetResolver();
         if (!r.resolved || r.gc_collect == nullptr) return;
         Discrete::IL2CPP::Il2CppDomain* domain =
@@ -10479,27 +10612,25 @@ int Discrete_Init() {
         "ExportAPI: registered IL2CPP GC-drain disconnect hook");
 #endif
 
-    // Release retained scan/snapshot state when the LAST client goes away.
-    // Sessions are only pruned by ExpireOldSessions(), which runs from Begin()
-    // — so if a client disconnects (or force-quits) and nothing ever begins
-    // another session, whatever it had live at that moment stays resident in
-    // the game's address space until the process exits. A snapshot plan is tens
-    // of MB, which is a lot to hold in a 32-bit game for nothing.
-    //
-    // Gated on being the last client because sessions carry no owner id: with
-    // up to kMaxPipeInstances clients, dropping unconditionally would destroy a
-    // concurrent client's session. Inside a disconnect hook the calling worker
-    // still counts itself, so 1 == "I am the last". A client that connects and
-    // begins a session inside the resulting window would lose it and have to
-    // re-run — the same collateral-cancel trade ScanCancel already documents,
-    // and far cheaper than the retention it prevents.
-    Discrete::PipeServer::RegisterDisconnectHook([]() {
-        if (Discrete::PipeServer::ActiveClientCount() > 1) return;
-        Discrete::Snapshot::SessionManager::Instance().DropAll();
-        Discrete::ValueScan::SessionManager::Instance().DropAll();
-        Discrete::GroupScan::SessionManager::Instance().DropAll();
-        Discrete::Log::Write(Discrete::MagicStrings::LogCategoryPipe,
-            "last client disconnected — dropped snapshot / value-scan / group-scan sessions");
+    // C-L6: Drop ONLY sessions owned by the disconnecting client (eliminating
+    // the concurrent-disconnect ActiveClientCount() > 1 race and preventing one
+    // client from wiping another client's active sessions), and run a lazy
+    // expiry sweep across all three session managers.
+    Discrete::PipeServer::RegisterDisconnectHook("session-cleanup", []() {
+        const std::uint64_t cid = Discrete::PipeServer::CurrentClientId();
+        const std::size_t dSnap = Discrete::Snapshot::SessionManager::Instance().DropForOwner(cid);
+        const std::size_t dVal  = Discrete::ValueScan::SessionManager::Instance().DropForOwner(cid);
+        const std::size_t dGrp  = Discrete::GroupScan::SessionManager::Instance().DropForOwner(cid);
+        Discrete::Snapshot::SessionManager::Instance().ExpireOldSessions();
+        Discrete::ValueScan::SessionManager::Instance().ExpireOldSessions();
+        Discrete::GroupScan::SessionManager::Instance().ExpireOldSessions();
+        if (dSnap + dVal + dGrp > 0) {
+            Discrete::Log::Write(Discrete::MagicStrings::LogCategoryPipe,
+                "client " + std::to_string(cid) + " disconnected — dropped sessions"
+                " snap=" + std::to_string(dSnap) +
+                " val=" + std::to_string(dVal) +
+                " grp=" + std::to_string(dGrp));
+        }
     });
 
     return 0;

@@ -25,11 +25,13 @@ class Parser {
 public:
     // Lazily-initialised singleton. First call probes the host process's
     // <gameDataDir>/il2cpp_data/Metadata/global-metadata.dat, validates magic,
-    // and caches the file in memory. Subsequent calls are O(1).
+    // and maps/caches the file. Retries on subsequent calls if an earlier load
+    // failed; once loaded, steady-state calls are lock-free O(1) (D-L4).
     static const Parser& Get();
 
     bool         loaded() const noexcept  { return loaded_; }
     bool         tablesDegraded() const noexcept;
+    bool         typeTablesSupported() const noexcept;
     std::int32_t version() const noexcept { return version_; }
 
     // For v24 metadata, returns the auto-detected sub-version label

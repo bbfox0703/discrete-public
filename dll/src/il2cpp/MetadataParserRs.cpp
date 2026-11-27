@@ -186,6 +186,10 @@ bool Parser::tablesDegraded() const noexcept {
     return dc_md_tables_degraded(rs_) != 0;
 }
 
+bool Parser::typeTablesSupported() const noexcept {
+    return dc_md_type_tables_supported(rs_) != 0;
+}
+
 std::string Parser::v24SubVersionLabel() const {
     return ToString(dc_md_v24_sub_version_label(rs_));
 }

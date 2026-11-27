@@ -92,7 +92,7 @@ Il2CppClass* FindNestedByName(Il2CppClass* outer, const std::string& nestedName)
     for (;;) {
         Il2CppClass* k = SehNextNested(r.class_get_nested_types, outer, &iter);
         if (k == nullptr) return nullptr;
-        const char* n = r.class_get_name(k);
+        const char* n = SehCall(r.class_get_name, k);
         if (n != nullptr && nestedName == n) return k;
     }
 }
@@ -495,7 +495,7 @@ ClassInfoResult ReadClassInfo(Il2CppClass* klass) {
             if (r.method_get_token != nullptr)   me.token = SehCall(r.method_get_token, m);
             if (r.method_get_flags != nullptr) {
                 std::uint32_t iflags = 0;
-                me.flags = r.method_get_flags(m, &iflags);
+                me.flags = SehMethodFlags(r.method_get_flags, m, &iflags);
             }
             me.pointer = ReadMethodPointer(m);  // works on Unity 2021.3+ via direct struct read
             result.info.methods.push_back(std::move(me));
@@ -532,17 +532,18 @@ StaticFieldAddress ResolveStaticFieldAddress(Il2CppClass* klass, const std::stri
     for (;;) {
         FieldInfo* f = SehNextField(r.class_get_fields, klass, &iter);
         if (f == nullptr) break;
-        const char* n = (r.field_get_name != nullptr) ? r.field_get_name(f) : nullptr;
+        const char* n = (r.field_get_name != nullptr) ? SehCall(r.field_get_name, f) : nullptr;
         if (n != nullptr && fieldName == n) { match = f; break; }
     }
     if (match == nullptr) return out;
 
     std::uint32_t flags = (r.field_get_flags != nullptr)
-                          ? static_cast<std::uint32_t>(r.field_get_flags(match)) : 0u;
+                          ? static_cast<std::uint32_t>(SehCall(r.field_get_flags, match)) : 0u;
     std::int32_t offset = (r.field_get_offset != nullptr)
-                          ? Discrete::ManagedLayout::NormalizeFieldOffset32(r.field_get_offset(match))
+                          ? Discrete::ManagedLayout::NormalizeFieldOffset32(SehCall(r.field_get_offset, match))
                           : -1;
-    std::string typeName = (r.field_get_type != nullptr) ? TypeName(r.field_get_type(match)) : std::string{};
+    const Il2CppType* matchType = (r.field_get_type != nullptr) ? SehCall(r.field_get_type, match) : nullptr;
+    std::string typeName = (matchType != nullptr) ? TypeName(matchType) : std::string{};
     out.offset   = offset;
     out.flags    = flags;
     out.typeName = typeName;
@@ -581,6 +582,13 @@ void* ResolveStaticBaseAddress(Il2CppClass* klass) {
     if (klass == nullptr) return nullptr;
     const auto& r = GetResolver();
     if (!r.resolved || r.class_get_static_data == nullptr) return nullptr;
+    // B-L8: Mirror MonoClassWalker::ResolveStaticBaseAddress — acquire a
+    // reentrant ThreadAttachGuard so direct callers outside an outer guard stay
+    // attached to the IL2CPP domain.
+    Il2CppDomain* domain = GetDomain();
+    if (domain == nullptr) return nullptr;
+    ThreadAttachGuard guard(domain);
+    if (!guard.Attached()) return nullptr;
     return SehStaticData(r.class_get_static_data, klass);
 }
 
@@ -600,18 +608,27 @@ MethodPointer GetMethodPointerByName(Il2CppClass* klass, const std::string& meth
     ThreadAttachGuard guard(domain);
     if (!guard.Attached()) return out;
 
+    // B-L9: scan all matching overloads and surface ambiguity rather than
+    // silently returning the first overload.
     const MethodInfo* match = nullptr;
+    std::size_t matchCount = 0;
     void* iter = nullptr;
     for (;;) {
         const MethodInfo* m = SehNextMethod(r.class_get_methods, klass, &iter);
         if (m == nullptr) break;
-        const char* n = (r.method_get_name != nullptr) ? r.method_get_name(m) : nullptr;
-        if (n != nullptr && methodName == n) { match = m; break; }
+        const char* n = (r.method_get_name != nullptr) ? SehMethodName(r.method_get_name, m) : nullptr;
+        if (n != nullptr && methodName == n) {
+            if (match == nullptr) match = m;
+            ++matchCount;
+        }
     }
+    out.matchCount = matchCount;
+    out.ambiguous  = (matchCount > 1u);
     if (match == nullptr) return out;
 
     out.name  = methodName;
-    out.token = (r.method_get_token != nullptr) ? r.method_get_token(match) : 0u;
+    out.token = (r.method_get_token != nullptr) ? SehMethodToken(r.method_get_token, match) : 0u;
+    if (out.ambiguous) return out;
     out.address = ReadMethodPointer(match);
     out.ok = (out.address != nullptr);
     return out;

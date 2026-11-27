@@ -135,6 +135,7 @@ void        dc_md_free(DcMetadata* md);  // NULL is a no-op
 
 int32_t  dc_md_loaded(const DcMetadata* md);   // 0 / 1
 int32_t  dc_md_tables_degraded(const DcMetadata* md);  // 0 / 1 (D-M3)
+int32_t  dc_md_type_tables_supported(const DcMetadata* md);  // 0 / 1 (D-L2)
 int32_t  dc_md_version(const DcMetadata* md);
 // "v24.0" / "v24.1" / "v24" for v24 metadata, empty otherwise. Static memory.
 DcBytes  dc_md_v24_sub_version_label(const DcMetadata* md);
@@ -181,6 +182,11 @@ int32_t  dc_md_find_image_containing_method(const DcMetadata* md, int32_t global
 // 1 when all `len` bytes were copied into `dst`, 0 otherwise (dst contents
 // unspecified). `ctx` is passed through untouched.
 typedef int32_t (*dc_read_fn)(void* ctx, uintptr_t addr, uint8_t* dst, size_t len);
+
+// Optional cooperative cancellation callback (D-L6). Polled by long Rust scans
+// at chunk / method boundaries; non-zero stops the scan early and marks the
+// returned handle as cancelled.
+typedef int32_t (*dc_cancel_fn)(void* ctx);
 
 // --- Phase R2: AOB pattern builder (port of shared/AobPattern.cpp) -----------
 
@@ -278,9 +284,17 @@ DcChainResult* dc_chain_detect(uintptr_t module_base, dc_read_fn read, void* rea
                                const uintptr_t* slots, size_t n_slots,
                                size_t static_fields_offset, size_t target_field_offset,
                                size_t match_limit);
+// D-L6: Same as dc_chain_detect with an optional cooperative cancel callback.
+DcChainResult* dc_chain_detect_cancellable(uintptr_t module_base, dc_read_fn read, void* read_ctx,
+                                           const uintptr_t* slots, size_t n_slots,
+                                           size_t static_fields_offset, size_t target_field_offset,
+                                           size_t match_limit,
+                                           dc_cancel_fn cancel, void* cancel_ctx);
 size_t  dc_chain_result_len(const DcChainResult* r);                // 0 for NULL
 int32_t dc_chain_result_get(const DcChainResult* r, size_t i, DcChainMatch* out);  // 1 / 0
 void    dc_chain_result_stats(const DcChainResult* r, DcChainStats* out);         // zeroes for NULL
+int32_t dc_chain_result_cancelled(const DcChainResult* r);          // 0 / 1 (D-L6)
+int32_t dc_chain_result_truncated(const DcChainResult* r);          // 0 / 1 (D-L3)
 void    dc_chain_result_free(DcChainResult* r);                                    // NULL ok
 
 // --- Phase R2: IL2CPP field-xref scan kernels ---------------------------------
@@ -320,11 +334,18 @@ typedef struct DcXrefInstResult DcXrefInstResult;
 
 // ScanRipRelative: every REX? {8B,8D,89} ModRM(00,101) disp32 whose RIP-relative
 // target == `target`, all of them, in scan order (1 MiB chunks + 16-byte
-// overlap; an unreadable chunk skips 4 KiB).
+// overlap; an unreadable page is skipped via 4 KiB fallback).
 DcXrefRipResult* dc_xref_rip_scan(const DcXrefSection* sections, size_t n, uintptr_t target,
                                   dc_read_fn read, void* read_ctx);
+// D-L6: Same as dc_xref_rip_scan with an optional cooperative cancel callback.
+DcXrefRipResult* dc_xref_rip_scan_cancellable(const DcXrefSection* sections, size_t n,
+                                              uintptr_t target,
+                                              dc_read_fn read, void* read_ctx,
+                                              dc_cancel_fn cancel, void* cancel_ctx);
 size_t  dc_xref_rip_result_len(const DcXrefRipResult* r);                        // 0 for NULL
 int32_t dc_xref_rip_result_get(const DcXrefRipResult* r, size_t i, DcXrefRipHit* out);  // 1 / 0
+int32_t dc_xref_rip_result_cancelled(const DcXrefRipResult* r);                  // 0 / 1 (D-L6)
+int32_t dc_xref_rip_result_truncated(const DcXrefRipResult* r);                  // 0 / 1 (D-L3)
 void    dc_xref_rip_result_free(DcXrefRipResult* r);                             // NULL ok
 
 // ScanInstanceAccesses: linear-decodes each range (stops at the first 0xCC or
@@ -334,8 +355,15 @@ void    dc_xref_rip_result_free(DcXrefRipResult* r);                            
 // operand.
 DcXrefInstResult* dc_xref_inst_scan(const DcXrefRange* ranges, size_t n, size_t field_offset,
                                     dc_read_fn read, void* read_ctx);
+// D-L6: Same as dc_xref_inst_scan with an optional cooperative cancel callback.
+DcXrefInstResult* dc_xref_inst_scan_cancellable(const DcXrefRange* ranges, size_t n,
+                                                size_t field_offset,
+                                                dc_read_fn read, void* read_ctx,
+                                                dc_cancel_fn cancel, void* cancel_ctx);
 size_t  dc_xref_inst_result_len(const DcXrefInstResult* r);                         // 0 for NULL
 int32_t dc_xref_inst_result_get(const DcXrefInstResult* r, size_t i, DcXrefInstHit* out);  // 1 / 0
+int32_t dc_xref_inst_result_cancelled(const DcXrefInstResult* r);                   // 0 / 1 (D-L6)
+int32_t dc_xref_inst_result_truncated(const DcXrefInstResult* r);                   // 0 / 1 (D-L3)
 void    dc_xref_inst_result_free(DcXrefInstResult* r);                              // NULL ok
 
 #ifdef __cplusplus

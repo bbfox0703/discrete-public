@@ -22,31 +22,51 @@ SessionManager& SessionManager::Instance() {
     return *inst;
 }
 
-std::uint64_t SessionManager::Begin(std::unique_ptr<Session> session) {
-    ExpireOldSessions();
+std::uint64_t SessionManager::Begin(std::unique_ptr<Session> session,
+                                    std::uint64_t ownerClientId) {
+    auto now = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> lk(mu_);
-    std::uint64_t id = nextId_++;
-    session->id      = id;
-    session->lastUse = std::chrono::steady_clock::now();
+    ExpireOldSessionsLocked(now);
+    std::uint64_t id       = nextId_++;
+    session->id            = id;
+    session->ownerClientId = ownerClientId;
+    session->lastUse       = now;
     sessions_.emplace(id, std::move(session));
     return id;
 }
 
-bool SessionManager::End(std::uint64_t sessionId) {
+bool SessionManager::End(std::uint64_t sessionId, std::uint64_t callerClientId) {
     std::lock_guard<std::mutex> lk(mu_);
-    return sessions_.erase(sessionId) > 0;
+    ExpireOldSessionsLocked(std::chrono::steady_clock::now());
+    auto it = sessions_.find(sessionId);
+    if (it == sessions_.end()) return false;
+    if (it->second->ownerClientId != 0 && callerClientId != 0 &&
+        it->second->ownerClientId != callerClientId) {
+        return false;
+    }
+    sessions_.erase(it);
+    return true;
+}
+
+std::size_t SessionManager::DropForOwner(std::uint64_t ownerClientId) {
+    if (ownerClientId == 0) return 0;
+    std::lock_guard<std::mutex> lk(mu_);
+    std::size_t dropped = 0;
+    for (auto it = sessions_.begin(); it != sessions_.end(); ) {
+        if (it->second->ownerClientId == ownerClientId) {
+            it = sessions_.erase(it);
+            ++dropped;
+        } else {
+            ++it;
+        }
+    }
+    return dropped;
 }
 
 void SessionManager::ExpireOldSessions() {
     auto now = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> lk(mu_);
-    for (auto it = sessions_.begin(); it != sessions_.end(); ) {
-        if (now - it->second->lastUse > kExpirySeconds) {
-            it = sessions_.erase(it);
-        } else {
-            ++it;
-        }
-    }
+    ExpireOldSessionsLocked(now);
 }
 
 void SessionManager::DropAll() {
@@ -97,10 +117,12 @@ std::string ComputeGameBuildId(const wchar_t* moduleName) {
     // Resolve module → on-disk path → (size, write_time). FNV-1a over the
     // path+metadata triple gives us a stable per-build hash without paying
     // SHA256 cost.
-    HMODULE mod = (moduleName != nullptr) ? ::GetModuleHandleW(moduleName) : nullptr;
+    // C-L7: When an explicit moduleName is requested and not loaded, return an
+    // empty string so callers can fall through to a secondary module (e.g.
+    // legacy mono.dll) before explicitly requesting the host EXE (nullptr).
+    HMODULE mod = ::GetModuleHandleW(moduleName);
     if (mod == nullptr) {
-        // Fallback to host EXE so we still emit something usable.
-        mod = ::GetModuleHandleW(nullptr);
+        return {};
     }
 
     wchar_t pathBuf[MAX_PATH] = {};

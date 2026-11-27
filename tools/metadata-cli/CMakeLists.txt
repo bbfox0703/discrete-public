@@ -28,9 +28,8 @@ function(add_metadata_cli TARGET_NAME)
     target_include_directories(${TARGET_NAME} PRIVATE
         ../../dll/src
     )
-    # Phase 28b-v2 follow-up: nlohmann + generated/ used to come from root-scope
-    # include_directories(SYSTEM). Plumb per-target now to avoid the MSVC
-    # /external:I leak into Zydis's vendor subdir compiles.
+    # Plumb nlohmann + generated/ per-target instead of root-scope
+    # include_directories(SYSTEM) so /external:I doesn't bleed into vendor subdirs.
     target_include_directories(${TARGET_NAME} SYSTEM PRIVATE
         ${DISCRETE_NLOHMANN_INCLUDE_DIR}
     )

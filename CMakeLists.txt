@@ -141,15 +141,9 @@ message(STATUS "Version: ${VER_MAJOR}.${VER_MINOR}.${VER_PATCH}.${BUILD_NUMBER} 
 # Path was `dll/vendor/nlohmann_json/` until the submodule was retired in
 # favour of the sync-script approach.
 #
-# Phase 28b-v2 follow-up: these used to be `include_directories(SYSTEM ...)`
-# at root scope, which leaked the `-external:I` flag onto every vendor
-# subdirectory CMake target (MinHook + Zydis + Zycore). On MSVC that
-# caused a subtle interaction where Zydis's `SharedData.c` couldn't find
-# `<assert.h>` — the external-search list partially shadowed the env-INCLUDE
-# lookup for some translation units while leaving others intact (MinHook
-# worked, Zydis didn't — same compiler invocation pattern). Exposing the
-# headers as CMake variables instead lets `add_backend_dll` / `add_cli` /
-# etc add them per-target, keeping vendor subdirs free of the bleed.
+# Expose vendored / generated headers as CMake variables rather than root-scope
+# `include_directories(SYSTEM ...)` so `/external:I` does not leak into third-
+# party vendor subdirs (dll/vendor/minihook). Each target adds what it needs.
 set(DISCRETE_NLOHMANN_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/dll/vendor/nlohmann/single_include
     CACHE INTERNAL "")
 set(DISCRETE_GENERATED_INCLUDE_DIR ${CMAKE_BINARY_DIR}/generated

@@ -33,9 +33,9 @@ int SetKeepForeground(bool enable);
 int IsKeepForegroundEnabled();
 
 // Full teardown for DLL shutdown: soft-disable + release any masked cursor
-// confinement + MH_DisableHook our own targets (the WndProc subclass is left in
-// place as a passive pass-through — restoring it mid-chain is riskier than
-// leaving it, and the DLL only unloads at game exit). Safe when never enabled.
+// confinement + MH_DisableHook our own targets + restore the original WNDPROC
+// on every subclassed window (via UnsubclassAllGameWindows) so no subclass
+// callback can outlive the module. Safe when never enabled.
 void Shutdown();
 
 }  // namespace Discrete::ForegroundHook

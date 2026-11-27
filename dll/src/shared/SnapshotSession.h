@@ -106,6 +106,9 @@ struct ISnapshotStreamDecoder {
 
 struct Session {
     std::uint64_t                          id              = 0;
+    // C-L6: PipeServer worker connection id that created this session (0 =
+    // legacy/unscoped, e.g. unit tests calling SessionManager directly).
+    std::uint64_t                          ownerClientId   = 0;
     std::string                            capturedAt;     // ISO-8601 UTC
     std::string                            gameBuildId;    // (file_size, write_time) FNV-1a hash hex
     std::string                            gameSessionId;  // per-DLL-load random hex
@@ -158,6 +161,13 @@ struct Session {
     // session (see `streamDecoder`).
     std::vector<ClassPayload>              classes;
 
+    // C-L6: Shared immutable view of `classes`, populated right before
+    // SessionManager::Begin so snapshotChunk can copy only the shared_ptr
+    // inside SessionManager::View and perform the JSON slice copy outside the
+    // global SessionManager mutex without blocking concurrent snapshotEnd /
+    // DropForOwner / snapshotBegin calls.
+    std::shared_ptr<const std::vector<ClassPayload>> sharedClasses;
+
     // Phase 30b — game-side streaming decode (IL2CPP). When set, snapshotChunk
     // decodes plan rows on demand via this decoder instead of slicing the
     // pre-built `classes`; `classes`/`plan` stay empty (the decoder owns the
@@ -180,21 +190,32 @@ public:
 
     // Allocate a new session, take ownership of the plan, return sessionId.
     // Triggers a lazy expiry pass so abandoned sessions don't pile up.
-    std::uint64_t Begin(std::unique_ptr<Session> session);
+    std::uint64_t Begin(std::unique_ptr<Session> session,
+                        std::uint64_t ownerClientId = 0);
 
     // View a session under the manager lock. Callers use this to walk
-    // the plan during chunk emit. Returns false on unknown sessionId.
+    // the plan during chunk emit. Returns false on unknown sessionId,
+    // expired session, or owner mismatch (when both ownerClientId and
+    // callerClientId are non-zero).
     template <typename Fn>
-    bool View(std::uint64_t sessionId, Fn&& fn) {
+    bool View(std::uint64_t sessionId, Fn&& fn,
+              std::uint64_t callerClientId = 0) {
+        auto now = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> lk(mu_);
+        ExpireOldSessionsLocked(now);
         auto it = sessions_.find(sessionId);
         if (it == sessions_.end()) return false;
-        it->second->lastUse = std::chrono::steady_clock::now();
+        if (it->second->ownerClientId != 0 && callerClientId != 0 &&
+            it->second->ownerClientId != callerClientId) {
+            return false;
+        }
+        it->second->lastUse = now;
         fn(*it->second);
         return true;
     }
 
-    bool End(std::uint64_t sessionId);
+    bool End(std::uint64_t sessionId, std::uint64_t callerClientId = 0);
+    std::size_t DropForOwner(std::uint64_t ownerClientId);
     void ExpireOldSessions();
     void DropAll();
 
@@ -216,6 +237,16 @@ private:
     SessionManager(const SessionManager&) = delete;
     SessionManager& operator=(const SessionManager&) = delete;
 
+    void ExpireOldSessionsLocked(std::chrono::steady_clock::time_point now) {
+        for (auto it = sessions_.begin(); it != sessions_.end(); ) {
+            if (now - it->second->lastUse > kExpirySeconds) {
+                it = sessions_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
     static constexpr std::chrono::seconds kExpirySeconds{300};
 
     std::mutex                                                    mu_;
@@ -228,8 +259,10 @@ private:
 // may not match" without paying SHA256 cost on every snapshot. Returns
 // hex string from FNV-1a hash of (module path + size + last-write-time).
 // `moduleName` is the OS module name (e.g. "GameAssembly.dll" for IL2CPP,
-// "mono-2.0-bdwgc.dll" / "mono.dll" for Mono); falls back to host EXE
-// name when the module isn't loaded.
+// "mono-2.0-bdwgc.dll" / "mono.dll" for Mono). Returns an empty string when a
+// non-null `moduleName` is not loaded so callers can try secondary module names
+// (e.g. legacy mono.dll) before explicitly requesting the host EXE with nullptr
+// (C-L7).
 std::string ComputeGameBuildId(const wchar_t* moduleName);
 
 // Compute / cached: the current ISO-8601 UTC timestamp string. Called

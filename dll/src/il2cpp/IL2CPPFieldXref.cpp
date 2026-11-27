@@ -562,8 +562,9 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
     // candidate, in scan order. The kind filter, method attribution and limit
     // cut-off are applied here in that same order, so the result (and the
     // counters logged below) match the original inline loop exactly.
-    for (const auto& c : XrefScan::ScanRipRelative(sections, targetAddr)) {
-        if (ScanCancel::IsCancelRequested()) {
+    bool ripCancelled = false;
+    for (const auto& c : XrefScan::ScanRipRelative(sections, targetAddr, &ripCancelled)) {
+        if (ripCancelled || ScanCancel::IsCancelRequested()) {
             result.cancelled = true;
             result.ok = false;
             result.matches.clear();
@@ -574,7 +575,7 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
             break;
         }
     }
-    if (ScanCancel::IsCancelRequested()) {
+    if (ripCancelled || ScanCancel::IsCancelRequested()) {
         result.cancelled = true;
         result.ok = false;
         result.matches.clear();
@@ -654,7 +655,6 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                 // Both paths union into the chain detector's input set.
                 std::size_t v3CandidateSlots   = 0;
                 std::size_t v3MatchingRuntime  = 0;  // v3.0 hits
-                std::size_t v3MatchingStatic   = 0;  // v3.1 hits
                 {
                     const std::uintptr_t targetClassVal =
                         reinterpret_cast<std::uintptr_t>(target.klass);
@@ -679,36 +679,17 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                         }
                         if (slotAlreadyKnown(ls.slotAddress)) continue;
 
-                        bool matched     = false;
-                        bool matchedHow  = false;  // false=runtime, true=static
-                        (void)matchedHow;
-
-                        // v3.0 — runtime value match
+                        // v3.0 — runtime value match (B-L3: removed dead v3.1
+                        // ResolveTypeInfoSlotClass fallback which only re-read
+                        // the same slot after v3.0 had already checked it).
                         std::uintptr_t slotValue = 0;
-                        if (Memory::SafeReadBytes(
+                        if (!Memory::SafeReadBytes(
                                 reinterpret_cast<const void*>(ls.slotAddress),
-                                &slotValue, sizeof(slotValue))) {
-                            if (slotValue == targetClassVal) {
-                                matched = true;
-                                ++v3MatchingRuntime;
-                            }
+                                &slotValue, sizeof(slotValue)) ||
+                            slotValue != targetClassVal) {
+                            continue;
                         }
-
-                        // v3.1 — static token decode (only if v3.0 didn't match)
-                        if (!matched && ls.tokenKind ==
-                                static_cast<std::uint8_t>(MetadataUsageKind::TypeInfo)) {
-                            if (Il2CppClass* staticClass =
-                                    ResolveTypeInfoSlotClass(ls)) {
-                                if (reinterpret_cast<std::uintptr_t>(staticClass)
-                                        == targetClassVal) {
-                                    matched = true;
-                                    matchedHow = true;
-                                    ++v3MatchingStatic;
-                                }
-                            }
-                        }
-
-                        if (!matched) continue;
+                        ++v3MatchingRuntime;
 
                         ClassPointerSlot extra{};
                         extra.address   = ls.slotAddress;
@@ -716,8 +697,7 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                         slots.push_back(extra);
                     }
                 }
-                const std::size_t v3MatchingSlots =
-                    v3MatchingRuntime + v3MatchingStatic;
+                const std::size_t v3MatchingSlots = v3MatchingRuntime;
 
                 Log::Write(MagicStrings::LogCategoryWalk,
                     "FieldXref: v2 starting — staticFieldsOffset=" +
@@ -726,7 +706,6 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                     " v2DirectSlots=" + std::to_string(v2SlotCount) +
                     " v3LazyInitCandidates=" + std::to_string(v3CandidateSlots) +
                     " v3MatchingRuntime=" + std::to_string(v3MatchingRuntime) +
-                    " v3MatchingStatic=" + std::to_string(v3MatchingStatic) +
                     " totalSlots=" + std::to_string(slots.size()));
 
                 if (!slots.empty()) {
@@ -737,9 +716,10 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                         return result;
                     }
                     ChainScanStats v2stats{};
+                    bool chainCancelled = false;
                     auto chains = DetectFieldAccessChains(
-                        slots, sfo, target.offset, limit, &v2stats);
-                    if (ScanCancel::IsCancelRequested()) {
+                        slots, sfo, target.offset, limit, &v2stats, &chainCancelled);
+                    if (chainCancelled || ScanCancel::IsCancelRequested()) {
                         result.cancelled = true;
                         result.ok = false;
                         result.matches.clear();
@@ -1060,8 +1040,9 @@ FindFieldRefsResult FindInstanceFieldReferences(const Il2CppImage* image,
     // Scan kernel (IL2CPPFieldXrefScan): every `[gpr + fieldOffset]` memory
     // operand in those ranges, in decode order. Kind filter and limit apply
     // here in the same order as the original inline loop.
-    for (const auto& h : XrefScan::ScanInstanceAccesses(ranges, fieldOffset)) {
-        if (ScanCancel::IsCancelRequested()) {
+    bool instCancelled = false;
+    for (const auto& h : XrefScan::ScanInstanceAccesses(ranges, fieldOffset, &instCancelled)) {
+        if (instCancelled || ScanCancel::IsCancelRequested()) {
             result.cancelled = true;
             result.ok = false;
             result.matches.clear();

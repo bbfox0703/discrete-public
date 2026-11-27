@@ -21,6 +21,8 @@ public partial class ProxyDeployWindow : Window
         // AOT-safe DataGrid sort — see DataGridSortComparers.cs.
         Loaded += (_, _) =>
             this.FindControl<DataGrid>("GamesGrid")?.WireSortComparers(SortComparers);
+        // A-L17: cancel & dispose any in-flight scan CTS when the window closes.
+        Closed += (_, _) => (DataContext as System.IDisposable)?.Dispose();
     }
 
     public ProxyDeployWindow(ProxyDeployViewModel vm) : this()

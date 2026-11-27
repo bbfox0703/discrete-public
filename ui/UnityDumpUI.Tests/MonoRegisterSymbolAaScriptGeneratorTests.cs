@@ -81,10 +81,11 @@ public class MonoRegisterSymbolAaScriptGeneratorTests
         Assert.Contains("ss.destroy()", s);
         Assert.Contains("chunk()", s);
 
-        // Missing-file path must surface a clear instruction — silent
-        // no-op was the worst failure mode in Phase 22 live smoke.
-        Assert.Contains("missing from CT", s);
+        // Missing-file path must abort via error() (E-L2) so CE rejects enabling
+        // the entry instead of ticking the checkbox as enabled.
+        Assert.Contains("error('[Discrete] mono_registersymbol_helpers.lua missing from CT", s);
         Assert.Contains("Inject Discrete Bridge", s);
+        Assert.Contains("error('[Discrete] parse error in mono_registersymbol_helpers.lua", s);
     }
 
     [Fact]

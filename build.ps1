@@ -110,7 +110,6 @@ $DIST_DIR  = Join-Path $RepoRoot 'dist'
 $UI_DIR    = Join-Path $RepoRoot 'ui'
 $UI_PROJ   = Join-Path $UI_DIR   'UnityDumpUI\UnityDumpUI.csproj'
 $TEST_PROJ = Join-Path $UI_DIR   'UnityDumpUI.Tests\UnityDumpUI.Tests.csproj'
-$SLN       = Join-Path $UI_DIR   'Discrete.sln'
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -450,10 +449,15 @@ if ($Clean) {
 New-Item -ItemType Directory -Path $DIST_DIR  -Force | Out-Null
 New-Item -ItemType Directory -Path $BUILD_DIR -Force | Out-Null
 
-if ($NoBumpBuildNumber) {
+# D-L7: Only targets that actually compile binaries bump build_number.txt.
+# Non-build targets (Test, CppTest, Deploy, DeployScripts) leave it alone so
+# dist\build_number.txt stays aligned with the shipped binaries in dist\.
+$buildTargets = @('DLL', 'ProxyDLL', 'MetadataCli', 'UI', 'All')
+if ($NoBumpBuildNumber -or ($Target -notin $buildTargets)) {
     $bnPath   = Join-Path $RepoRoot 'build_number.txt'
     $buildNum = if (Test-Path $bnPath) { [int](Get-Content -Path $bnPath -TotalCount 1) } else { 0 }
-    Write-Info "Build#: $buildNum (not bumped)"
+    $reason   = if ($NoBumpBuildNumber) { 'not bumped' } else { "not bumped for -Target $Target" }
+    Write-Info "Build#: $buildNum ($reason)"
 } else {
     $buildNum = Bump-BuildNumber
     Write-Info "Build#: $buildNum"

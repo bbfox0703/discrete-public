@@ -11,6 +11,7 @@
 #include "../shared/RuntimeHealth.h"
 #include "../shared/ScanCancel.h"
 #include "../shared/SehFilter.h"
+#include "../shared/ThrottledRetry.h"
 #include "IL2CPPClassWalker.h"
 #include "IL2CPPDomain.h"
 #include "IL2CPPResolver.h"
@@ -146,13 +147,50 @@ std::uint32_t SehObjectGetSizeProbe(fn_object_get_size fn, Il2CppObject* o) {
     __try { return fn(o); }
     __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
 }
-// Phase 27c — array element class lookup. Non-null result means klass is
-// an array type.
+// Phase 27c — array element class lookup + B-L2 rank/enum checks.
 Il2CppClass* SehElementClassProbe(fn_class_get_element_class fn, Il2CppClass* k) {
     __try { return fn(k); }
     __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
+int SehClassRankProbe(fn_class_get_rank fn, const Il2CppClass* k) {
+    __try { return fn(k); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
+}
+bool SehIsEnumProbe(fn_class_is_enum fn, const Il2CppClass* k) {
+    __try { return fn(k); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return false; }
+}
 #pragma warning(pop)
+
+// B-L2: Distinguish genuine managed arrays from enums (IL2CPP sets an enum's
+// element_class to its underlying integer type, so element_class != k alone
+// misclassifies boxed enums as arrays). Caller holds a ThreadAttachGuard.
+bool IsIl2CppArrayClass(Il2CppClass* k, Il2CppClass*& outElemClass) {
+    outElemClass = nullptr;
+    if (k == nullptr) return false;
+    const auto& r = GetResolver();
+    if (r.class_get_element_class == nullptr) return false;
+    if (r.class_get_rank != nullptr) {
+        if (SehClassRankProbe(r.class_get_rank, k) <= 0) return false;
+    } else if (r.class_is_enum != nullptr) {
+        if (SehIsEnumProbe(r.class_is_enum, k)) return false;
+    } else if (r.class_get_parent != nullptr && r.class_get_name != nullptr) {
+        if (Il2CppClass* parent = SehParentLookup(r.class_get_parent, k)) {
+            const char* pn  = SehClassNameProbe(r.class_get_name, parent);
+            const char* pns = (r.class_get_namespace != nullptr)
+                ? SehClassNamespaceProbe(r.class_get_namespace, parent) : nullptr;
+            if (pn != nullptr && std::strcmp(pn, "Enum") == 0 &&
+                (r.class_get_namespace == nullptr ||
+                 (pns != nullptr && std::strcmp(pns, "System") == 0))) {
+                return false;
+            }
+        }
+    }
+    Il2CppClass* elem = SehElementClassProbe(r.class_get_element_class, k);
+    if (elem == nullptr || elem == k) return false;
+    outElemClass = elem;
+    return true;
+}
 
 // B-H2: calibrate Il2CppClass::{image, element_class, name} offsets from known
 // TypeDef classes so dynamic generic/array klasses can be validated purely via
@@ -285,17 +323,15 @@ ClassExtentInfo GetIl2CppClassExtentInfo(Il2CppClass* k) {
 
     ClassExtentInfo info;
     const auto& r = GetResolver();
-    if (r.class_get_element_class != nullptr) {
-        Il2CppClass* elem = SehElementClassProbe(r.class_get_element_class, k);
-        if (elem != nullptr && elem != k) {
-            info.isArray = true;
-            info.arrayElemSize = ManagedLayout::kPointerSize;
-            if (r.class_is_valuetype != nullptr &&
-                SehIsValueTypeProbe(r.class_is_valuetype, elem) != 0 &&
-                r.class_value_size != nullptr) {
-                int sz = SehValueSizeProbe(r.class_value_size, elem);
-                if (sz > 0) info.arrayElemSize = static_cast<std::size_t>(sz);
-            }
+    Il2CppClass* elem = nullptr;
+    if (IsIl2CppArrayClass(k, elem)) {
+        info.isArray = true;
+        info.arrayElemSize = ManagedLayout::kPointerSize;
+        if (r.class_is_valuetype != nullptr &&
+            SehIsValueTypeProbe(r.class_is_valuetype, elem) != 0 &&
+            r.class_value_size != nullptr) {
+            int sz = SehValueSizeProbe(r.class_value_size, elem);
+            if (sz > 0) info.arrayElemSize = static_cast<std::size_t>(sz);
         }
     }
     if (!info.isArray) {
@@ -725,8 +761,11 @@ void ResolveFieldAt(Il2CppClass* klass, std::ptrdiff_t fieldOffset,
 //       never on the array klass itself.
 // ---------------------------------------------------------------------------
 
-std::once_flag g_ecOnce;
-std::size_t    g_ecOffset = 0;   // offsetof(Il2CppClass, element_class); 0 = failed
+// B-L1: Latch permanently on first discovered non-zero offset; on failure
+// (e.g. runtime / class cache not ready yet), retry at most once per second.
+std::atomic<std::size_t> g_ecOffset{0};   // offsetof(Il2CppClass, element_class); 0 = unset
+std::mutex               g_ecMu;
+std::uint64_t            g_ecLastFailTickMs = 0;
 
 // Discover offsetof(Il2CppClass, element_class) by the same brute-force-find +
 // cache recipe as IL2CPPStaticFieldsOffset.cpp. For a NON-array class libil2cpp
@@ -735,14 +774,14 @@ std::size_t    g_ecOffset = 0;   // offsetof(Il2CppClass, element_class); 0 = fa
 // lowest stable offset is element_class (castClass sits one slot higher and,
 // for szarrays, equals element_class anyway — so either is safe; lowest is
 // canonical). All API calls here are on classSet-validated pointers.
-void DiscoverElementClassOffset() {
+std::size_t DiscoverElementClassOffset() {
     const auto& r = GetResolver();
-    if (!r.resolved || r.class_get_element_class == nullptr) return;
-    if (!BuildClassRangeCache()) return;
+    if (!r.resolved || r.class_get_element_class == nullptr) return 0;
+    if (!BuildClassRangeCache()) return 0;
     Il2CppDomain* domain = GetDomain();
-    if (domain == nullptr) return;
+    if (domain == nullptr) return 0;
     ThreadAttachGuard guard(domain);
-    if (!guard.Attached()) return;
+    if (!guard.Attached()) return 0;
 
     constexpr std::size_t kScanLimit     = 512;
     constexpr std::size_t kStep          = sizeof(void*);
@@ -779,7 +818,7 @@ void DiscoverElementClassOffset() {
             if (seeded && candidates.empty()) {  // inconsistent — give up safely
                 Log::Write(MagicStrings::LogCategoryWalk,
                     "AddrFinder: element_class offset discovery inconsistent — array reverse-lookup disabled");
-                return;
+                return 0;
             }
             if (++sampled >= kSamplesWanted) break;
         }
@@ -787,71 +826,109 @@ void DiscoverElementClassOffset() {
     }
 
     if (!candidates.empty()) {
-        g_ecOffset = candidates.front();   // lowest = element_class
+        const std::size_t foundOff = candidates.front();   // lowest = element_class
         Log::Write(MagicStrings::LogCategoryWalk,
-            "AddrFinder: discovered element_class offset = " + std::to_string(g_ecOffset) +
+            "AddrFinder: discovered element_class offset = " + std::to_string(foundOff) +
             " (from " + std::to_string(sampled) + " samples)");
-    } else {
-        Log::Write(MagicStrings::LogCategoryWalk,
-            "AddrFinder: element_class offset discovery failed — array reverse-lookup disabled");
+        return foundOff;
     }
+    Log::Write(MagicStrings::LogCategoryWalk,
+        "AddrFinder: element_class offset discovery failed — array reverse-lookup disabled");
+    return 0;
 }
 
 std::size_t GetElementClassOffset() {
-    std::call_once(g_ecOnce, DiscoverElementClassOffset);
-    return g_ecOffset;
+    if (const std::size_t cached = g_ecOffset.load(std::memory_order_acquire); cached != 0) {
+        return cached;
+    }
+    std::lock_guard<std::mutex> lk(g_ecMu);
+    if (const std::size_t cached = g_ecOffset.load(std::memory_order_relaxed); cached != 0) {
+        return cached;
+    }
+    const std::uint64_t now = ::GetTickCount64();
+    if (!RetryPolicy::CanRetryNow(g_ecLastFailTickMs, now)) {
+        return 0;
+    }
+    const std::size_t off = DiscoverElementClassOffset();
+    if (off != 0) {
+        g_ecOffset.store(off, std::memory_order_release);
+        return off;
+    }
+    g_ecLastFailTickMs = RetryPolicy::NonZeroTick(::GetTickCount64());
+    return 0;
 }
 
-// Memo of confirmed value-type-element array klasses → their element class.
+// Memo of confirmed value-type-element array klasses → their element class,
+// plus NEGATIVE memo of header qword values proven NOT to be value-type-element
+// array klasses.
+//
+// B-L4: Heap-leaked singleton (matching `cache()`) so process exit doesn't walk
+// up to 524K hash-set nodes during shutdown, and `notArrayFull` is enforced in
+// LooksLikeValueTypeElementArray so hitting the cap genuinely degrades to
+// already-known array klasses instead of re-probing unknowns on every call.
 struct ArrayKlassEntry { std::uintptr_t arrayKlass; std::uintptr_t elemKlass; };
-std::mutex                    g_arrayKlassMu;
-std::vector<ArrayKlassEntry>  g_arrayKlassSet;   // sorted by arrayKlass
+constexpr std::size_t kNotArrayCap = 1u << 19;   // 524288 distinct values
+
+struct ArrayMemoState {
+    std::mutex                         arrayKlassMu;
+    std::vector<ArrayKlassEntry>       arrayKlassSet;   // sorted by arrayKlass
+    std::mutex                         notArrayMu;
+    std::unordered_set<std::uintptr_t> notArrayKlass;
+    std::atomic<bool>                  notArrayFull{false};
+};
+
+ArrayMemoState& arrayMemos() {
+    static ArrayMemoState* inst = new ArrayMemoState();
+    return *inst;
+}
 
 bool LookupArrayKlassMemo(std::uintptr_t k, std::uintptr_t& elemOut) {
-    std::lock_guard<std::mutex> lk(g_arrayKlassMu);
-    auto it = std::lower_bound(g_arrayKlassSet.begin(), g_arrayKlassSet.end(), k,
+    auto& m = arrayMemos();
+    std::lock_guard<std::mutex> lk(m.arrayKlassMu);
+    auto it = std::lower_bound(m.arrayKlassSet.begin(), m.arrayKlassSet.end(), k,
         [](const ArrayKlassEntry& e, std::uintptr_t v) { return e.arrayKlass < v; });
-    if (it != g_arrayKlassSet.end() && it->arrayKlass == k) { elemOut = it->elemKlass; return true; }
+    if (it != m.arrayKlassSet.end() && it->arrayKlass == k) { elemOut = it->elemKlass; return true; }
     return false;
 }
 void RememberArrayKlass(std::uintptr_t k, std::uintptr_t elem) {
-    std::lock_guard<std::mutex> lk(g_arrayKlassMu);
-    auto it = std::lower_bound(g_arrayKlassSet.begin(), g_arrayKlassSet.end(), k,
+    auto& m = arrayMemos();
+    std::lock_guard<std::mutex> lk(m.arrayKlassMu);
+    auto it = std::lower_bound(m.arrayKlassSet.begin(), m.arrayKlassSet.end(), k,
         [](const ArrayKlassEntry& e, std::uintptr_t v) { return e.arrayKlass < v; });
-    if (it == g_arrayKlassSet.end() || it->arrayKlass != k)
-        g_arrayKlassSet.insert(it, ArrayKlassEntry{k, elem});
+    if (it == m.arrayKlassSet.end() || it->arrayKlass != k)
+        m.arrayKlassSet.insert(it, ArrayKlassEntry{k, elem});
 }
 
-// NEGATIVE memo — header qword values proven NOT to be value-type-element array
-// klasses. This is the perf-critical lever: the array fallback runs a backward
-// scan per index-dropped candidate (tens of thousands), and adjacent candidates'
-// windows overlap heavily, so the SAME header values recur constantly. Without a
-// negative memo every recurrence re-pays the VirtualQuery-backed element_class
-// read → a 300s scan. Keyed by VALUE (hash set, O(1)); shared across the whole
-// scan so each distinct value is probed at most once. Hard-capped so total probes
-// are bounded: once full, unknowns are treated as non-arrays (feature degrades to
-// already-known array klasses only — never hangs).
-constexpr std::size_t        kNotArrayCap = 1u << 19;   // 524288 distinct values
-std::mutex                   g_notArrayMu;
-std::unordered_set<std::uintptr_t> g_notArrayKlass;
-
 bool IsKnownNotArray(std::uintptr_t k) {
-    std::lock_guard<std::mutex> lk(g_notArrayMu);
-    return g_notArrayKlass.find(k) != g_notArrayKlass.end();
+    auto& m = arrayMemos();
+    std::lock_guard<std::mutex> lk(m.notArrayMu);
+    return m.notArrayKlass.find(k) != m.notArrayKlass.end();
 }
 // Returns false once the cap is hit (signals "stop probing unknowns").
 bool RememberNotArray(std::uintptr_t k) {
-    std::lock_guard<std::mutex> lk(g_notArrayMu);
-    if (g_notArrayKlass.size() >= kNotArrayCap) return false;
-    g_notArrayKlass.insert(k);
+    auto& m = arrayMemos();
+    std::lock_guard<std::mutex> lk(m.notArrayMu);
+    if (m.notArrayKlass.size() >= kNotArrayCap) {
+        m.notArrayFull.store(true, std::memory_order_release);
+        return false;
+    }
+    m.notArrayKlass.insert(k);
+    if (m.notArrayKlass.size() >= kNotArrayCap) {
+        m.notArrayFull.store(true, std::memory_order_release);
+    }
     return true;
 }
 
 // Discard the array-klass memos (called from InvalidateClassRangeCache so a
 // `scan` RPC that loads new assemblies doesn't keep stale verdicts).
 void ResetArrayKlassMemos() {
-    { std::lock_guard<std::mutex> lk(g_arrayKlassMu); g_arrayKlassSet.clear(); }
-    { std::lock_guard<std::mutex> lk(g_notArrayMu);   g_notArrayKlass.clear(); }
+    auto& m = arrayMemos();
+    { std::lock_guard<std::mutex> lk(m.arrayKlassMu); m.arrayKlassSet.clear(); }
+    {
+        std::lock_guard<std::mutex> lk(m.notArrayMu);
+        m.notArrayKlass.clear();
+        m.notArrayFull.store(false, std::memory_order_release);
+    }
 }
 
 // SAFE array-klass test: decide whether `candidate` is an array klass whose
@@ -864,6 +941,9 @@ bool LooksLikeValueTypeElementArray(std::uintptr_t candidate, Il2CppClass*& elem
     if (LookupArrayKlassMemo(candidate, memoElem)) {      // known array → O(log n)
         elemOut = reinterpret_cast<Il2CppClass*>(memoElem);
         return true;
+    }
+    if (arrayMemos().notArrayFull.load(std::memory_order_acquire)) {
+        return false;                                      // B-L4: cap hit → treat unknowns as non-arrays
     }
     if (IsKnownNotArray(candidate)) return false;          // known non-array → O(1), no probe
     const std::size_t O = GetElementClassOffset();
@@ -1103,9 +1183,9 @@ void ResolveInstanceLookup(std::uintptr_t addr, std::uintptr_t instance,
     // misclassifies every plain object as an array. Only treat it as an array
     // when the element class is genuinely a DIFFERENT class.
     bool resolvedAsArray = false;
-    if (r.class_get_element_class != nullptr) {
-        Il2CppClass* elemClass = SehElementClassProbe(r.class_get_element_class, k);
-        if (elemClass != nullptr && elemClass != k) {
+    Il2CppClass* elemClass = nullptr;
+    if (IsIl2CppArrayClass(k, elemClass)) {
+        {
             std::ptrdiff_t dataOff = static_cast<std::ptrdiff_t>(ManagedLayout::kArrayDataOffset);
             if (out.fieldOffset >= dataOff) {
                 std::uintptr_t arrayLength = 0;
@@ -1175,16 +1255,17 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
     if (maxBackwardScan > 16 * 1024) maxBackwardScan = 16 * 1024;
 
     // Round down to 8-byte boundary. Object headers are pointer-aligned.
+    // B-L11: unified near-zero clamp so scannedFrom == rangeStart and
+    // bufIdx == (p - rangeStart) for every step i in [0, maxSteps).
     constexpr std::size_t kStride = 8;
-    std::uintptr_t start = addr & ~static_cast<std::uintptr_t>(kStride - 1);
-
-    // scannedFrom is the lowest address we'll try; scannedTo is `start + 8`
-    // (one past the highest, exclusive) so the range matches the spec's
-    // {from, to} convention.
-    std::size_t maxSteps = maxBackwardScan / kStride;
-    if (maxSteps == 0) maxSteps = 1;
-    out.scannedFrom = (start >= maxSteps * kStride) ? (start - (maxSteps - 1) * kStride) : 0;
-    out.scannedTo   = start + kStride;
+    const auto scanRange = Discrete::AddressBounds::ComputeBackwardScanRange(
+        addr, maxBackwardScan, kStride);
+    const std::uintptr_t start      = scanRange.start;
+    const std::size_t    maxSteps   = scanRange.maxSteps;
+    const std::size_t    bulkBytes  = scanRange.bulkBytes;
+    const std::uintptr_t rangeStart = scanRange.rangeStart;
+    out.scannedFrom = rangeStart;
+    out.scannedTo   = scanRange.scannedTo;
 
     const auto& r = GetResolver();
 
@@ -1206,10 +1287,6 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
     // instead of one SafeReadBytes per 8-byte step. Cuts ~2K VirtualQuery
     // syscalls down to ~4 per WhatIsAt call. On a 500-result global
     // scan, end-to-end goes from ~16s to ~4-5s.
-    const std::size_t bulkBytes = maxSteps * kStride;
-    const std::uintptr_t rangeStart = start >= (maxSteps - 1) * kStride
-        ? start - (maxSteps - 1) * kStride
-        : 0;
     std::vector<std::uint8_t> bulkBuf(bulkBytes, 0);
     {
         constexpr std::size_t kPageBytes = 4096;
@@ -1298,11 +1375,16 @@ AddressLookup WhatIsAtAcceptingArrays(std::uintptr_t addr, std::size_t maxBackwa
 
     constexpr std::size_t  kStride = 8;
     constexpr std::uintptr_t kMaxPlausibleArrayLen = 0x4000000;  // 64M elements
-    std::uintptr_t start = addr & ~static_cast<std::uintptr_t>(kStride - 1);
-    std::size_t maxSteps = maxBackwardScan / kStride;
-    if (maxSteps == 0) maxSteps = 1;
-    out.scannedFrom = (start >= maxSteps * kStride) ? (start - (maxSteps - 1) * kStride) : 0;
-    out.scannedTo   = start + kStride;
+    // B-L11: unified near-zero clamp so scannedFrom == rangeStart and
+    // bufIdx == (p - rangeStart) for every step i in [0, maxSteps).
+    const auto scanRange = Discrete::AddressBounds::ComputeBackwardScanRange(
+        addr, maxBackwardScan, kStride);
+    const std::uintptr_t start      = scanRange.start;
+    const std::size_t    maxSteps   = scanRange.maxSteps;
+    const std::size_t    bulkBytes  = scanRange.bulkBytes;
+    const std::uintptr_t rangeStart = scanRange.rangeStart;
+    out.scannedFrom = rangeStart;
+    out.scannedTo   = scanRange.scannedTo;
 
     const auto& r = GetResolver();
     Il2CppDomain* domain = GetDomain();
@@ -1310,9 +1392,6 @@ AddressLookup WhatIsAtAcceptingArrays(std::uintptr_t addr, std::size_t maxBackwa
     ThreadAttachGuard guard(domain);
     if (!guard.Attached()) { out.reason = "il2cpp_thread_attach_failed"; return out; }
 
-    const std::size_t bulkBytes = maxSteps * kStride;
-    const std::uintptr_t rangeStart = start >= (maxSteps - 1) * kStride
-        ? start - (maxSteps - 1) * kStride : 0;
     std::vector<std::uint8_t> bulkBuf(bulkBytes, 0);
     {
         constexpr std::size_t kPageBytes = 4096;

@@ -26,15 +26,21 @@ internal static class AaLuaLoader
     /// <param name="fileName">CT table-file name, e.g. <c>unity_invoke.lua</c>.</param>
     /// <param name="sentinelGlobal">A global the file defines (e.g.
     /// <c>callUnityMethod</c>); when already present the load is skipped.</param>
-    public static void AppendSelfLoad(StringBuilder sb, string fileName, string sentinelGlobal)
+    public static void AppendSelfLoad(
+        StringBuilder sb,
+        string fileName,
+        string sentinelGlobal,
+        string? missingHint = null)
     {
+        string hint = string.IsNullOrEmpty(missingHint)
+            ? "re-run the DiscreteUI action that pushed this entry."
+            : missingHint!;
         sb.Append("if _G.").Append(sentinelGlobal).AppendLine(" == nil then");
         sb.Append("  local f = findTableFile('").Append(fileName).AppendLine("')");
         sb.AppendLine("  if not f then");
         sb.AppendLine("    _G.DISCRETE_HAD_ERROR = true");
-        sb.Append("    print('[discrete] ").Append(fileName)
-          .AppendLine(" missing from CT — re-run the DiscreteUI action that pushed this entry.')");
-        sb.AppendLine("    return");
+        sb.Append("    error('[Discrete] ").Append(fileName)
+          .Append(" missing from CT — ").Append(hint).AppendLine("')");
         sb.AppendLine("  end");
         sb.AppendLine("  local ss = createStringStream()");
         sb.AppendLine("  ss.copyFrom(f.Stream, f.Stream.Size)");
@@ -42,9 +48,8 @@ internal static class AaLuaLoader
         sb.AppendLine("  ss.destroy()");
         sb.AppendLine("  if not chunk then");
         sb.AppendLine("    _G.DISCRETE_HAD_ERROR = true");
-        sb.Append("    print('[discrete] parse error in ").Append(fileName)
+        sb.Append("    error('[Discrete] parse error in ").Append(fileName)
           .AppendLine(": ' .. tostring(err))");
-        sb.AppendLine("    return");
         sb.AppendLine("  end");
         sb.AppendLine("  chunk()");
         sb.AppendLine("end");

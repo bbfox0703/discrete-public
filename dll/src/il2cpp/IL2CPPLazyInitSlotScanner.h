@@ -125,27 +125,8 @@ enum class MetadataUsageKind : std::uint8_t {
 ///
 /// Returns a deduplicated list of LazyInitSlots sorted by slotAddress.
 ///
-/// Internally cached via `std::call_once` — first call pays the
-/// ~50-200 ms scan cost on a typical IL2CPP module, every subsequent
-/// call is a `const&` return.
+/// Internally cached on first successful scan (B-L1: throttled retry on
+/// early failure) — subsequent calls are a lock-free `const&` return.
 const std::vector<LazyInitSlot>& EnumerateLazyInitSlots();
-
-/// v3.1 — given a kind=TypeInfo slot's captured token, resolve to the
-/// `Il2CppClass*` it would point to after init. Looks up the type
-/// index in `IL2CPPMetadataRegistration::TypesArray()`, then calls
-/// `il2cpp_class_from_il2cpp_type` to bridge `Il2CppType*` → `Il2CppClass*`.
-///
-/// Returns nullptr when:
-///   * slot has no token (was already initialised at scan time, or
-///     was never token-shaped to begin with),
-///   * slot kind is not `TypeInfo`,
-///   * the `Il2CppMetadataRegistration` finder hasn't located the
-///     types[] array (rare — usually located at startup),
-///   * the index is out of bounds, or
-///   * the `il2cpp_class_from_il2cpp_type` resolver export is unbound.
-///
-/// Tries both 1-based and 0-based index encodings (IL2CPP versions
-/// differ on whether `tokenIndex` needs `-1`).
-Il2CppClass* ResolveTypeInfoSlotClass(const LazyInitSlot& slot);
 
 }  // namespace Discrete::IL2CPP

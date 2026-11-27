@@ -63,6 +63,15 @@ const char* SehClassName(fn_class_get_name fn, MonoClass* k) {
 const char* SehClassNs(fn_class_get_namespace fn, MonoClass* k) {
     __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
+MonoClass* SehClassNestingType(fn_class_get_nesting_type fn, MonoClass* k) {
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+int SehClassIsGeneric(fn_class_is_generic fn, MonoClass* k) {
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
+}
+int SehMethodIsGeneric(fn_method_is_generic fn, MonoMethod* m) {
+    __try { return fn(m); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
+}
 #pragma warning(pop)
 
 // ECMA-335 §I.10.5.4 — relevant MethodAttributes bits.
@@ -102,15 +111,44 @@ FindMethodResult FindMethodInstances(MonoClass* klass,
         return result;
     }
 
-    // Capture the class's display name + namespace once. Used for every match
-    // so the caller doesn't need to look it up separately.
+    // Capture the class's Outer/Inner display name + outermost namespace once
+    // (B-L12) so nested types round-trip cleanly back into FindClass.
     std::string classDisplay;
     std::string classNs;
-    if (r.class_get_name != nullptr) {
-        if (const char* nm = SehClassName(r.class_get_name, klass)) classDisplay = nm;
+    {
+        std::vector<MonoClass*> chain;
+        MonoClass* cur = klass;
+        for (int depth = 0; cur != nullptr && depth < 16; ++depth) {
+            chain.push_back(cur);
+            cur = (r.class_get_nesting_type != nullptr)
+                ? SehClassNestingType(r.class_get_nesting_type, cur)
+                : nullptr;
+        }
+        if (r.class_get_name != nullptr) {
+            for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+                const char* nm = SehClassName(r.class_get_name, *it);
+                if (nm == nullptr || *nm == '\0') continue;
+                if (!classDisplay.empty()) classDisplay += '/';
+                classDisplay += nm;
+            }
+        }
+        if (r.class_get_namespace != nullptr && !chain.empty()) {
+            if (const char* ns = SehClassNs(r.class_get_namespace, chain.back())) {
+                classNs = ns;
+            }
+        }
     }
-    if (r.class_get_namespace != nullptr) {
-        if (const char* ns = SehClassNs(r.class_get_namespace, klass)) classNs = ns;
+
+    // B-L9: Open generic type definitions cannot be JIT-compiled without
+    // concrete type arguments (and older Mono builds may raise a managed
+    // exception inside mono_compile_method).
+    bool classIsOpenGeneric = false;
+    if (r.class_is_generic != nullptr) {
+        classIsOpenGeneric = (SehClassIsGeneric(r.class_is_generic, klass) != 0);
+    } else if (classDisplay.find('`') != std::string::npos &&
+               classDisplay.find('<') == std::string::npos &&
+               classDisplay.find('[') == std::string::npos) {
+        classIsOpenGeneric = true;
     }
 
     void* iter = nullptr;
@@ -186,10 +224,12 @@ FindMethodResult FindMethodInstances(MonoClass* klass,
         }
 
         // JIT-compile so callers can register a CE symbol or AOB-scan the
-        // resulting bytes. A failed compile (abstract / generic-without-args)
-        // leaves address=nullptr; we still ship the overload so the UI can
-        // show the user what's there.
-        if (r.compile_method != nullptr && !ov.isAbstract) {
+        // resulting bytes. Skip abstract methods and open generic definitions
+        // (B-L9); leave address=nullptr so the UI still shows the overload.
+        const bool methodIsOpenGeneric =
+            (r.method_is_generic != nullptr && SehMethodIsGeneric(r.method_is_generic, m) != 0);
+        if (r.compile_method != nullptr && !ov.isAbstract &&
+            !classIsOpenGeneric && !methodIsOpenGeneric) {
             void* p = SehCompile(r.compile_method, m);
             if (p != nullptr) {
                 ov.address  = p;

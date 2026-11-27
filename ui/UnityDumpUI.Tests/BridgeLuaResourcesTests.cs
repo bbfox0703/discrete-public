@@ -264,4 +264,40 @@ public class BridgeLuaResourcesTests
         Assert.Contains("math.max(kDefaultRpcTimeoutMs, (mt or 5000) + 5000)", content);
         Assert.Contains("rpc(\"callMethod\", body, rpcTimeoutMs)", content);
     }
+
+    [Fact]
+    public void LuaErrorPaths_AlwaysUseUnconditionalErr_AndRejectAmbiguousSigFilter()
+    {
+        // E-L8: per docs/lua-logging.md, errors must ALWAYS print (never DEBUG-gated
+        // warn) and set DISCRETE_HAD_ERROR. Verify both unity_dump.lua's
+        // discreteShutdown failure and unity_symbols.lua's ambiguous sigFilter path.
+        string dump = BridgeLuaResources.Read("unity_dump.lua");
+        Assert.DoesNotContain("\r", dump);
+        Assert.Contains("U.err(\"discreteShutdown failed: %s\", tostring(err))", dump);
+        Assert.DoesNotContain("U.warn(\"discreteShutdown failed:", dump);
+
+        string symbols = BridgeLuaResources.Read("unity_symbols.lua");
+        Assert.DoesNotContain("\r", symbols);
+        Assert.Contains("err(\"%s: sigFilter '%s' is ambiguous", symbols);
+        Assert.Contains("refusing to pick first", symbols);
+        Assert.DoesNotContain("matched %d overloads; using first", symbols);
+    }
+
+    [Fact]
+    public void LuaJsonCodecs_HandleSurrogatePairs_ControlEscapes_AndNonFiniteNumbers()
+    {
+        // E-L7: both unity_symbols.lua and unity_invoke.lua must decode UTF-16
+        // surrogate pairs into 4-byte UTF-8 (never CESU-8), escape backslashes/
+        // control chars in outgoing requests, and encode NaN/Infinity as JSON null.
+        foreach (string file in new[] { "unity_symbols.lua", "unity_invoke.lua" })
+        {
+            string src = BridgeLuaResources.Read(file);
+            Assert.DoesNotContain("\r", src);
+            Assert.Contains("0xD800", src);
+            Assert.Contains("0xDC00", src);
+            Assert.Contains("0xF0 + (cp >> 18)", src);
+            Assert.Contains("math.huge", src);
+            Assert.Contains("escapeStr", src);
+        }
+    }
 }

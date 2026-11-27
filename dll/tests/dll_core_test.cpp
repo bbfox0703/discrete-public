@@ -15,10 +15,13 @@
 #include "AddressBounds.h"
 #include "ExportHelpers.h"
 #include "FieldXrefHelpers.h"
+#include "GroupScanSession.h"
+#include "Logger.h"
 #include "MainThreadDispatcher.h"
 #include "ManagedLayout.h"
 #include "Memory.h"
 #include "MethodInvokeValidation.h"
+#include "MethodSignatureFormat.h"
 #include "MethodTokenIndex.h"
 #include "ModuleLifecycle.h"
 #include "MonoVtableFilter.h"
@@ -30,6 +33,8 @@
 #include "ScanCancel.h"
 #include "SehFilter.h"
 #include "SnapshotSession.h"
+#include "ThrottledRetry.h"
+#include "ValueScanSession.h"
 
 #include <windows.h>
 
@@ -2432,6 +2437,413 @@ void Test_DM6_MethodTokenPointerIndex() {
     }
 }
 
+// ============================================================================
+// C-L4 + C-L5 + C-L7 — Strict address parser, UTF-16 char decode, RPC limit
+// clamp, 32-bit dynamic OOM threshold, and ComputeGameBuildId missing-module
+// empty return
+// ============================================================================
+void Test_CL4_CL5_CL7_ValidationAndBuildId() {
+    using Discrete::ExportHelpers::ClampRpcLimit;
+    using Discrete::ExportHelpers::ComputeX86PrivateUsageRefuseThreshold;
+    using Discrete::ExportHelpers::DecodeFirstUtf16CodeUnit;
+    using Discrete::ExportHelpers::ParseAddress;
+    using Discrete::ExportHelpers::ParseAddressStrict;
+
+    // 1. C-L4: Strict address parsing (hex strings + non-negative integers)
+    {
+        std::uint64_t out = 0;
+        CHECK(ParseAddressStrict(nlohmann::json("0x1234ABCD"), out, 0xFFFFFFFFULL) && out == 0x1234ABCDULL);
+        CHECK(ParseAddressStrict(nlohmann::json("0Xdeadbeef"), out, 0xFFFFFFFFULL) && out == 0xDEADBEEFULL);
+        CHECK(ParseAddressStrict(nlohmann::json("CAFE"), out, 0xFFFFFFFFULL) && out == 0xCAFEULL);
+        CHECK(ParseAddressStrict(nlohmann::json(0), out, 0xFFFFFFFFULL) && out == 0ULL);
+        CHECK(ParseAddressStrict(nlohmann::json(4096), out, 0xFFFFFFFFULL) && out == 4096ULL);
+
+        // Trailing garbage, empty, prefix-only, leading sign/space, overflow, x86 truncation, negative int
+        CHECK(!ParseAddressStrict(nlohmann::json("0x1234zz"), out, 0xFFFFFFFFFFFFFFFFULL));
+        CHECK(!ParseAddressStrict(nlohmann::json("1234 "), out, 0xFFFFFFFFFFFFFFFFULL));
+        CHECK(!ParseAddressStrict(nlohmann::json(" 0x1234"), out, 0xFFFFFFFFFFFFFFFFULL));
+        CHECK(!ParseAddressStrict(nlohmann::json(""), out, 0xFFFFFFFFFFFFFFFFULL));
+        CHECK(!ParseAddressStrict(nlohmann::json("0x"), out, 0xFFFFFFFFFFFFFFFFULL));
+        CHECK(!ParseAddressStrict(nlohmann::json("-0x10"), out, 0xFFFFFFFFFFFFFFFFULL));
+        CHECK(!ParseAddressStrict(nlohmann::json("+0x10"), out, 0xFFFFFFFFFFFFFFFFULL));
+        CHECK(!ParseAddressStrict(nlohmann::json("0x10000000000000000"), out, 0xFFFFFFFFFFFFFFFFULL));
+        CHECK(!ParseAddressStrict(nlohmann::json("0x123456789"), out, 0xFFFFFFFFULL));  // x86 ceiling
+        CHECK(!ParseAddressStrict(nlohmann::json(-1), out, 0xFFFFFFFFFFFFFFFFULL));
+        CHECK(!ParseAddressStrict(nlohmann::json(1.5), out, 0xFFFFFFFFFFFFFFFFULL));
+        CHECK(!ParseAddressStrict(nlohmann::json(true), out, 0xFFFFFFFFFFFFFFFFULL));
+        CHECK(!ParseAddressStrict(nlohmann::json(nullptr), out, 0xFFFFFFFFFFFFFFFFULL));
+
+        std::uintptr_t nativeOut = 0;
+        CHECK(ParseAddress(nlohmann::json("0x1000"), nativeOut) && nativeOut == 0x1000u);
+        if constexpr (sizeof(std::uintptr_t) == 4) {
+            CHECK(!ParseAddress(nlohmann::json("0x100000000"), nativeOut));
+        } else {
+            CHECK(ParseAddress(nlohmann::json("0x100000000"), nativeOut) && nativeOut == 0x100000000ULL);
+        }
+    }
+
+    // 2. C-L5: UTF-8 -> first UTF-16 code unit (System.Char)
+    {
+        std::uint16_t ch = 0;
+        CHECK(DecodeFirstUtf16CodeUnit("A", ch) && ch == 0x0041u);
+        // 2-byte UTF-8: U+00E9 ('é') = C3 A9
+        CHECK(DecodeFirstUtf16CodeUnit("\xC3\xA9", ch) && ch == 0x00E9u);
+        // 3-byte UTF-8: U+4E2D ('中') = E4 B8 AD
+        CHECK(DecodeFirstUtf16CodeUnit("\xE4\xB8\xAD", ch) && ch == 0x4E2Du);
+        // 4-byte UTF-8: U+1F600 ('😀') = F0 9F 98 80 -> high surrogate 0xD83D
+        CHECK(DecodeFirstUtf16CodeUnit("\xF0\x9F\x98\x80", ch) && ch == 0xD83Du);
+        // Reject empty, truncated, overlong, and surrogate code points
+        CHECK(!DecodeFirstUtf16CodeUnit("", ch));
+        CHECK(!DecodeFirstUtf16CodeUnit("\xC3", ch));
+        CHECK(!DecodeFirstUtf16CodeUnit("\xC0\xAF", ch));
+        CHECK(!DecodeFirstUtf16CodeUnit("\xED\xA0\x80", ch));
+    }
+
+    // 3. C-L5: ClampRpcLimit clamps above max to max (not reset to default)
+    {
+        CHECK(ClampRpcLimit(0, 5000u, 50000u) == 5000u);
+        CHECK(ClampRpcLimit(-10, 5000u, 50000u) == 5000u);
+        CHECK(ClampRpcLimit(1234, 5000u, 50000u) == 1234u);
+        CHECK(ClampRpcLimit(50000, 5000u, 50000u) == 50000u);
+        CHECK(ClampRpcLimit(99999, 5000u, 50000u) == 50000u);
+    }
+
+    // 4. C-L7: 32-bit OOM threshold scales with total virtual address space
+    {
+        constexpr std::uint64_t kGiB = 1024ULL * 1024 * 1024;
+        CHECK(ComputeX86PrivateUsageRefuseThreshold(2ULL * kGiB) == (1536ULL * 1024 * 1024));
+        CHECK(ComputeX86PrivateUsageRefuseThreshold(4ULL * kGiB) == (3ULL * kGiB));
+        CHECK(ComputeX86PrivateUsageRefuseThreshold(0ULL) == (1536ULL * 1024 * 1024));
+    }
+
+    // 5. C-L7: ComputeGameBuildId returns empty for a non-loaded module, non-empty for nullptr (host EXE)
+    {
+        CHECK(Discrete::Snapshot::ComputeGameBuildId(L"definitely_not_loaded_discrete_probe_12345.dll").empty());
+        const std::string hostId = Discrete::Snapshot::ComputeGameBuildId(nullptr);
+        CHECK(hostId.size() == 16u);
+    }
+}
+
+// ============================================================================
+// C-L6 — Session ownership isolation, per-owner DropForOwner cleanup, and
+// Snapshot sharedClasses off-lock payload lifetime
+// ============================================================================
+void Test_CL6_SessionOwnershipAndSharedClasses() {
+    // 1. Snapshot::SessionManager owner enforcement + DropForOwner + sharedClasses survival
+    {
+        auto& mgr = Discrete::Snapshot::SessionManager::Instance();
+        mgr.DropAll();
+
+        auto s1 = std::make_unique<Discrete::Snapshot::Session>();
+        std::vector<Discrete::Snapshot::ClassPayload> payloads;
+        payloads.push_back(nlohmann::json{{"name", "Hero"}});
+        payloads.push_back(nlohmann::json{{"name", "Enemy"}});
+        s1->sharedClasses = std::make_shared<const std::vector<Discrete::Snapshot::ClassPayload>>(
+            std::move(payloads));
+        const std::uint64_t id1 = mgr.Begin(std::move(s1), /*ownerClientId=*/101u);
+
+        auto s2 = std::make_unique<Discrete::Snapshot::Session>();
+        const std::uint64_t id2 = mgr.Begin(std::move(s2), /*ownerClientId=*/202u);
+
+        // Wrong owner cannot View or End session 1
+        bool viewedWrong = mgr.View(id1, [](Discrete::Snapshot::Session&) {}, /*callerClientId=*/202u);
+        CHECK(!viewedWrong);
+        CHECK(!mgr.End(id1, /*callerClientId=*/202u));
+
+        // Right owner grabs sharedClasses, then session is ended; local shared_ptr stays valid
+        std::shared_ptr<const std::vector<Discrete::Snapshot::ClassPayload>> held;
+        bool viewedRight = mgr.View(id1, [&](Discrete::Snapshot::Session& s) {
+            held = s.sharedClasses;
+        }, /*callerClientId=*/101u);
+        CHECK(viewedRight);
+        CHECK(held && held->size() == 2u);
+
+        // DropForOwner(101) drops only id1, leaving id2 intact
+        CHECK(mgr.DropForOwner(101u) == 1u);
+        CHECK(mgr.DropForOwner(101u) == 0u);
+        CHECK(held->at(0).at("name") == "Hero");
+        CHECK(held->at(1).at("name") == "Enemy");
+        CHECK(!mgr.View(id1, [](Discrete::Snapshot::Session&) {}, 101u));
+        CHECK(mgr.View(id2, [](Discrete::Snapshot::Session&) {}, 202u));
+        CHECK(mgr.End(id2, 202u));
+        mgr.DropAll();
+    }
+
+    // 2. ValueScan::SessionManager owner enforcement + DropForOwner
+    {
+        auto& mgr = Discrete::ValueScan::SessionManager::Instance();
+        mgr.DropAll();
+
+        std::vector<Discrete::ValueScan::Candidate> c1(1);
+        c1[0].addr = 0x1000u;
+        const std::uint64_t id1 = mgr.Begin(Discrete::Memory::ValueDataType::Int32, std::move(c1), 11u);
+        const std::uint64_t id2 = mgr.Begin(Discrete::Memory::ValueDataType::Int32, {}, 22u);
+
+        CHECK(!mgr.RefineWith(id1, [](Discrete::Memory::ValueDataType, std::vector<Discrete::ValueScan::Candidate>&) {}, 22u));
+        CHECK(!mgr.ViewWith(id1, [](Discrete::Memory::ValueDataType, const std::vector<Discrete::ValueScan::Candidate>&) {}, 22u));
+        CHECK(!mgr.End(id1, 22u));
+
+        std::size_t seen = 0;
+        CHECK(mgr.ViewWith(id1, [&](Discrete::Memory::ValueDataType, const std::vector<Discrete::ValueScan::Candidate>& v) {
+            seen = v.size();
+        }, 11u));
+        CHECK(seen == 1u);
+
+        CHECK(mgr.DropForOwner(11u) == 1u);
+        CHECK(!mgr.End(id1, 11u));
+        CHECK(mgr.End(id2, 22u));
+        mgr.DropAll();
+    }
+
+    // 3. GroupScan::SessionManager owner enforcement + DropForOwner
+    {
+        auto& mgr = Discrete::GroupScan::SessionManager::Instance();
+        mgr.DropAll();
+
+        std::vector<Discrete::GroupScan::SlotSpec> slots(2);
+        const std::uint64_t id1 = mgr.Begin(slots, {}, 33u);
+        const std::uint64_t id2 = mgr.Begin(slots, {}, 44u);
+
+        CHECK(!mgr.RefineWith(id1, [](std::vector<Discrete::GroupScan::SlotSpec>&, std::vector<Discrete::GroupScan::Candidate>&) {}, 44u));
+        CHECK(!mgr.ViewWith(id1, [](std::vector<Discrete::GroupScan::SlotSpec>&, std::vector<Discrete::GroupScan::Candidate>&) {}, 44u));
+        CHECK(!mgr.End(id1, 44u));
+        CHECK(mgr.ViewWith(id1, [](std::vector<Discrete::GroupScan::SlotSpec>&, std::vector<Discrete::GroupScan::Candidate>&) {}, 33u));
+
+        CHECK(mgr.DropForOwner(33u) == 1u);
+        CHECK(!mgr.End(id1, 33u));
+        CHECK(mgr.End(id2, 44u));
+        mgr.DropAll();
+    }
+}
+
+// ============================================================================
+// B-L1 + B-L5 — RetryPolicy throttle & SafePeScan::ScanReadableSpans page
+// fallback preserving readable pages before AND after a PAGE_NOACCESS page
+// ============================================================================
+void Test_BL1_BL5_RetryThrottleAndPageFallback() {
+    // 1. B-L1: RetryPolicy::CanRetryNow & NonZeroTick
+    {
+        using Discrete::RetryPolicy::CanRetryNow;
+        using Discrete::RetryPolicy::NonZeroTick;
+        CHECK(NonZeroTick(0u) == 1u);
+        CHECK(NonZeroTick(42u) == 42u);
+        CHECK(CanRetryNow(0u, 100u, 1000u));
+        CHECK(!CanRetryNow(1000u, 1000u, 1000u));
+        CHECK(!CanRetryNow(1000u, 1999u, 1000u));
+        CHECK(CanRetryNow(1000u, 2000u, 1000u));
+        // Unsigned wraparound safety
+        const std::uint64_t nearMax = (std::numeric_limits<std::uint64_t>::max)() - 100u;
+        CHECK(!CanRetryNow(nearMax, 500u, 1000u));
+        CHECK(CanRetryNow(nearMax, 950u, 1000u));
+    }
+
+    // 2. B-L5: 4-page region with page 2 set to PAGE_NOACCESS; single 16 KiB
+    //    chunk fails whole-chunk read, falls back to 4 KiB pages, visits
+    //    pages 0+1 (8 KiB coalesced BEFORE bad page) and page 3 (4 KiB AFTER),
+    //    and reports failedPages == 1.
+    {
+        constexpr std::size_t kPage = 4096u;
+        constexpr std::size_t kTotal = 4u * kPage;
+        auto* mem = static_cast<std::uint8_t*>(
+            ::VirtualAlloc(nullptr, kTotal, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        CHECK(mem != nullptr);
+        if (mem != nullptr) {
+            std::memset(mem, 0, kTotal);
+            const std::uintptr_t needle = static_cast<std::uintptr_t>(0x12345678u);
+            // Place needle in page 0, page 1 (before bad page), and page 3 (after bad page)
+            std::memcpy(mem + 64u, &needle, sizeof(needle));
+            std::memcpy(mem + kPage + 128u, &needle, sizeof(needle));
+            std::memcpy(mem + 3u * kPage + 256u, &needle, sizeof(needle));
+
+            DWORD oldProt = 0;
+            CHECK(::VirtualProtect(mem + 2u * kPage, kPage, PAGE_NOACCESS, &oldProt) != FALSE);
+
+            std::vector<std::uint8_t> scratch;
+            std::size_t failedPages = 0;
+            std::size_t spanCount = 0;
+            std::size_t totalReadBytes = 0;
+            std::size_t needleHits = 0;
+            Discrete::SafePeScan::ScanReadableSpans(
+                mem, kTotal, /*chunkBytes=*/kTotal, /*overlapBytes=*/0u, scratch,
+                [&](const std::uint8_t* local, const std::uint8_t*, std::size_t len) -> bool {
+                    ++spanCount;
+                    totalReadBytes += len;
+                    for (std::size_t i = 0; i + sizeof(needle) <= len; i += sizeof(needle)) {
+                        std::uintptr_t v = 0;
+                        std::memcpy(&v, local + i, sizeof(v));
+                        if (v == needle) ++needleHits;
+                    }
+                    return true;
+                },
+                &failedPages);
+
+            CHECK(failedPages == 1u);
+            CHECK(spanCount == 2u);
+            CHECK(totalReadBytes == 3u * kPage);
+            CHECK(needleHits == 3u);
+
+            ::VirtualProtect(mem + 2u * kPage, kPage, PAGE_READWRITE, &oldProt);
+            ::VirtualFree(mem, 0, MEM_RELEASE);
+        }
+    }
+}
+
+// ============================================================================
+// B-L10 + B-L11 — MethodSignatureFormat humanSuffix disambiguation &
+// ComputeBackwardScanRange near-zero clamping
+// ============================================================================
+void Test_BL10_BL11_MethodSignatureAndScanRange() {
+    // 1. B-L10: ShortenManagedTypeName + MakeHumanSuffix
+    {
+        using Discrete::Shared::ShortenManagedTypeName;
+        using Discrete::Shared::MakeHumanSuffix;
+
+        // Primitives + primitive arrays (strip [] BEFORE kMap lookup)
+        CHECK(ShortenManagedTypeName("System.Int32") == "int");
+        CHECK(ShortenManagedTypeName("System.Int32[]") == "intArr");
+        CHECK(ShortenManagedTypeName("System.Single[,]") == "floatArr");
+        CHECK(ShortenManagedTypeName("System.String[][]") == "stringArrArr");
+        CHECK(ShortenManagedTypeName("UnityEngine.Vector3") == "Vector3");
+        CHECK(ShortenManagedTypeName("") == "T");
+
+        // Nested types under generic outer class must not collide on Outer
+        CHECK(ShortenManagedTypeName("Ns.Outer`1/Inner") == "Inner");
+        CHECK(ShortenManagedTypeName("Ns.Outer`1/Other") == "Other");
+        CHECK(ShortenManagedTypeName("Ns.Outer`1<System.Int32>/Inner<System.String>") == "Inner_string");
+
+        // Generic instantiations preserve shortened type arguments (both <...> and Mono [...])
+        CHECK(ShortenManagedTypeName("System.Collections.Generic.List`1<System.Int32>") == "List_int");
+        CHECK(ShortenManagedTypeName("System.Collections.Generic.List`1<System.String>") == "List_string");
+        CHECK(ShortenManagedTypeName("System.Collections.Generic.List`1[System.Int32]") == "List_int");
+        CHECK(ShortenManagedTypeName("System.Collections.Generic.List`1[System.Int32][]") == "List_intArr");
+        CHECK(ShortenManagedTypeName("System.Collections.Generic.Dictionary`2<System.String, System.Int32>")
+              == "Dictionary_string_int");
+        CHECK(ShortenManagedTypeName(
+                  "System.Collections.Generic.Dictionary`2<System.String, System.Collections.Generic.List`1<System.Single>>")
+              == "Dictionary_string_List_float");
+
+        // MakeHumanSuffix distinguishes overloaded generic parameters
+        CHECK(MakeHumanSuffix({"System.Collections.Generic.List`1<System.Int32>"}) == "List_int");
+        CHECK(MakeHumanSuffix({"System.Collections.Generic.List`1<System.String>"}) == "List_string");
+        CHECK(MakeHumanSuffix({"System.Int32[]", "System.Single"}) == "intArr_float");
+        CHECK(MakeHumanSuffix({"System.Single", "System.Single", "System.Single"}) == "3float");
+        CHECK(MakeHumanSuffix({}) == "noargs");
+    }
+
+    // 2. B-L11: ComputeBackwardScanRange never underflows near address 0 and keeps
+    //    rangeStart == start - (maxSteps - 1) * stride and bufIdx == p - rangeStart.
+    {
+        using Discrete::AddressBounds::ComputeBackwardScanRange;
+        constexpr std::size_t kStride = 8u;
+
+        // Normal high address
+        const auto hi = ComputeBackwardScanRange(0x100004u, 4096u, kStride);
+        CHECK(hi.start == 0x100000u);
+        CHECK(hi.maxSteps == 512u);
+        CHECK(hi.bulkBytes == 4096u);
+        CHECK(hi.rangeStart == hi.start - (hi.maxSteps - 1u) * kStride);
+        CHECK(hi.scannedTo == hi.start + kStride);
+
+        // Near-zero addresses: 0x0, 0x4, 0x8, 0x18, 0x24
+        const std::uintptr_t nearZeroAddrs[] = {0x0u, 0x4u, 0x8u, 0x18u, 0x24u};
+        for (std::uintptr_t a : nearZeroAddrs) {
+            const auto r = ComputeBackwardScanRange(a, 4096u, kStride);
+            CHECK(r.rangeStart == 0u);
+            CHECK(r.maxSteps == static_cast<std::size_t>(r.start / kStride) + 1u);
+            CHECK(r.bulkBytes == r.maxSteps * kStride);
+            CHECK(r.start >= (r.maxSteps - 1u) * kStride);
+            CHECK(r.rangeStart == r.start - (r.maxSteps - 1u) * kStride);
+            for (std::size_t i = 0; i < r.maxSteps; ++i) {
+                const std::uintptr_t p = r.start - i * kStride;
+                const std::size_t bufIdx = (r.maxSteps - 1u - i) * kStride;
+                CHECK(p >= r.rangeStart);
+                CHECK(bufIdx == static_cast<std::size_t>(p - r.rangeStart));
+                CHECK(bufIdx + kStride <= r.bulkBytes);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// A-L11 — Logger atomic FILE_APPEND_DATA writes + FILE_SHARE_DELETE rotation
+// ============================================================================
+void Test_AL11_LoggerAtomicAppendAndConcurrentRename() {
+    wchar_t prevLocalAppData[MAX_PATH * 2] = {};
+    const DWORD prevLen = ::GetEnvironmentVariableW(
+        L"LOCALAPPDATA", prevLocalAppData, static_cast<DWORD>(std::size(prevLocalAppData)));
+
+    wchar_t tempDir[MAX_PATH] = {};
+    const DWORD tmpLen = ::GetTempPathW(static_cast<DWORD>(std::size(tempDir)), tempDir);
+    CHECK(tmpLen > 0 && tmpLen < std::size(tempDir));
+    if (tmpLen == 0) return;
+
+    const std::wstring pidStr = std::to_wstring(::GetCurrentProcessId());
+    const std::wstring sandboxRoot = std::wstring(tempDir) + L"discrete_al11_test_" + pidStr;
+    ::CreateDirectoryW(sandboxRoot.c_str(), nullptr);
+    CHECK(::SetEnvironmentVariableW(L"LOCALAPPDATA", sandboxRoot.c_str()) != FALSE);
+
+    Discrete::Log::Init();
+    Discrete::Log::Write(L"init", "al11-line-alpha");
+    Discrete::Log::Write(L"init", "al11-line-beta");
+
+    const std::wstring logDir = sandboxRoot + L"\\discrete\\Logs\\" + pidStr + L"\\init";
+    const std::wstring currentPath = logDir + L"\\current.log";
+    const std::wstring rotatedPath = logDir + L"\\rotated.log";
+
+    auto readAllUtf8 = [](const std::wstring& path) -> std::string {
+        HANDLE h = ::CreateFileW(path.c_str(), GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return {};
+        std::string out;
+        char buf[1024];
+        DWORD got = 0;
+        while (::ReadFile(h, buf, sizeof(buf), &got, nullptr) && got > 0) {
+            out.append(buf, got);
+        }
+        ::CloseHandle(h);
+        return out;
+    };
+
+    const std::string beforeRotate = readAllUtf8(currentPath);
+    CHECK(beforeRotate.find("al11-line-alpha\n") != std::string::npos);
+    CHECK(beforeRotate.find("al11-line-beta\n") != std::string::npos);
+
+    // Simulate a second module holding an append handle with FILE_SHARE_DELETE
+    // while another module rotates current.log -> rotated.log.
+    HANDLE secondWriter = ::CreateFileW(
+        currentPath.c_str(),
+        FILE_APPEND_DATA,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    CHECK(secondWriter != INVALID_HANDLE_VALUE);
+    if (secondWriter != INVALID_HANDLE_VALUE) {
+        CHECK(::MoveFileExW(currentPath.c_str(), rotatedPath.c_str(), MOVEFILE_REPLACE_EXISTING) != FALSE);
+        // Subsequent Log::Write must create a fresh current.log without failing.
+        Discrete::Log::Write(L"init", "al11-line-gamma");
+        ::CloseHandle(secondWriter);
+    }
+
+    const std::string afterRotate = readAllUtf8(currentPath);
+    CHECK(afterRotate.find("al11-line-gamma\n") != std::string::npos);
+    CHECK(afterRotate.find("al11-line-alpha\n") == std::string::npos);
+
+    Discrete::Log::Shutdown();
+
+    // Restore environment & clean up sandbox files/directories.
+    ::SetEnvironmentVariableW(L"LOCALAPPDATA", prevLen > 0 ? prevLocalAppData : nullptr);
+    ::DeleteFileW(currentPath.c_str());
+    ::DeleteFileW(rotatedPath.c_str());
+    ::RemoveDirectoryW(logDir.c_str());
+    ::RemoveDirectoryW((sandboxRoot + L"\\discrete\\Logs\\" + pidStr).c_str());
+    ::RemoveDirectoryW((sandboxRoot + L"\\discrete\\Logs").c_str());
+    ::RemoveDirectoryW((sandboxRoot + L"\\discrete").c_str());
+    ::RemoveDirectoryW(sandboxRoot.c_str());
+}
+
 }  // namespace
 
 int main() {
@@ -2457,6 +2869,11 @@ int main() {
     Test_CM6_CM8_SearchSymbolsTruncAndStrictJsonNumerics();
     Test_CM4_CM5_SnapshotArrayLayoutAndStreamingSafety();
     Test_DM6_MethodTokenPointerIndex();
+    Test_CL4_CL5_CL7_ValidationAndBuildId();
+    Test_CL6_SessionOwnershipAndSharedClasses();
+    Test_BL1_BL5_RetryThrottleAndPageFallback();
+    Test_BL10_BL11_MethodSignatureAndScanRange();
+    Test_AL11_LoggerAtomicAppendAndConcurrentRename();
 
     const char* arch = (sizeof(void*) == 4) ? "x86" : "x64";
     if (g_failures == 0) {

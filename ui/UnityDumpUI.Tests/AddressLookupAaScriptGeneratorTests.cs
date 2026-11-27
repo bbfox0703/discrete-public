@@ -33,12 +33,14 @@ public class AddressLookupAaScriptGeneratorTests
         };
 
     [Fact]
-    public void Build_ParentScript_HasBridgeGuard_AndAaSymbolPlumbing()
+    public void Build_ParentScript_IsPureAsm_WithoutRedundantBridgeGuard()
     {
+        // E-L2: AddressLookup only uses {$asm} alloc/registersymbol/dq, so it
+        // must not gate on the Lua bridge or emit an unnecessary {$lua} block.
         var p = AddressLookupAaScriptGenerator.Build(BasicReq());
 
-        // Bridge-loaded guard at the top of [ENABLE].
-        Assert.Contains("if not _G.discrete_bridgeLoaded then", p.ParentScript);
+        Assert.DoesNotContain("discrete_bridgeLoaded", p.ParentScript);
+        Assert.DoesNotContain("{$lua}", p.ParentScript);
         // alloc + registersymbol + dq + matching unregister/dealloc on DISABLE.
         Assert.Contains("alloc(DiscreteAt_PLY_WORK_000002201761E3D0, 8)", p.ParentScript);
         Assert.Contains("registersymbol(DiscreteAt_PLY_WORK_000002201761E3D0)", p.ParentScript);
@@ -207,24 +209,15 @@ public class AddressLookupAaScriptGeneratorTests
     }
 
     [Fact]
-    public void Build_EmitsHadErrorReset_AndCloseLuaEngineTail_PerLuaLogging()
+    public void Build_DoesNotEmitLuaBlock_SoLuaEngineNeverPops()
     {
-        // docs/lua-logging.md: the parent [ENABLE] {$lua} resets the shared
-        // did-anything-fail flag after the syntaxcheck guard, flags the error
-        // before the bridge-guard print, and closes CE's Lua Engine on the clean
-        // path (the following {$asm} prints nothing, and CE runs {$lua} first).
+        // E-L2: pure-{$asm} AA script runs no Lua, so it never opens CE's Lua
+        // Engine and needs neither DISCRETE_HAD_ERROR reset nor close-tail.
         var p = AddressLookupAaScriptGenerator.Build(BasicReq());
 
-        Assert.Contains("_G.DISCRETE_HAD_ERROR = false", p.ParentScript);
-        Assert.Contains("_G.DISCRETE_HAD_ERROR = true", p.ParentScript);
-        Assert.Contains("if _G.DISCRETE_DEBUG ~= 1 and not _G.DISCRETE_HAD_ERROR then",
-                        p.ParentScript);
-        Assert.Contains(
-            "synchronize(function() local e = getLuaEngine(); if e then e.Close() end end)",
-            p.ParentScript);
-        // Close-tail sits inside the {$lua} block — BEFORE the {$asm} directive.
-        Assert.True(p.ParentScript.IndexOf("if e then e.Close() end", StringComparison.Ordinal)
-                  < p.ParentScript.IndexOf("{$asm}", StringComparison.Ordinal));
+        Assert.DoesNotContain("{$lua}", p.ParentScript);
+        Assert.DoesNotContain("getLuaEngine()", p.ParentScript);
+        Assert.Contains("{$asm}", p.ParentScript);
     }
 
     [Fact]

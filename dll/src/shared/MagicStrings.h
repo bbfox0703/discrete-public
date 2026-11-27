@@ -1,6 +1,8 @@
 // MagicStrings.h
 // Single source of truth for all literal strings shared across the DLL.
-// Keep every magic string here so the DLL and UI stay in sync (mirror in C# UI/Constants.cs).
+// Keep every magic string here so the DLL and UI stay in sync (mirror in C#
+// ui/UnityDumpUI.Core/Constants.cs and ui/UnityDumpUI.Core/PipeCommands.cs).
+// Full wire contracts live in docs/pipe-protocol.md.
 #pragma once
 
 namespace Discrete::MagicStrings {
@@ -38,7 +40,8 @@ inline constexpr const wchar_t* ModuleMonoBdwgc   = L"mono-2.0-bdwgc.dll";
 inline constexpr const wchar_t* ModuleMonoLegacy  = L"mono.dll";
 inline constexpr const wchar_t* ModuleIL2CPP      = L"GameAssembly.dll";
 
-// Pipe protocol commands (mirror in C# UI)
+// Pipe protocol commands (mirror in C# ui/UnityDumpUI.Core/PipeCommands.cs)
+inline constexpr const char* CmdPing               = "ping";
 inline constexpr const char* CmdHandshake          = "handshake";
 inline constexpr const char* CmdScan               = "scan";
 inline constexpr const char* CmdGetAssemblies      = "getAssemblies";
@@ -47,21 +50,22 @@ inline constexpr const char* CmdGetClassInfo       = "getClassInfo";
 inline constexpr const char* CmdGetFieldInfo       = "getFieldInfo";
 inline constexpr const char* CmdGetMethodInfo      = "getMethodInfo";
 inline constexpr const char* CmdGetStaticFieldData = "getStaticFieldData";
+inline constexpr const char* CmdGetMetadataStats   = "getMetadataStats";
 inline constexpr const char* CmdFindInstances      = "findInstances";
 inline constexpr const char* CmdReadMemory         = "readMemory";
 inline constexpr const char* CmdWriteMemory        = "writeMemory";
 inline constexpr const char* CmdRegisterSymbol     = "registerSymbol";
-inline constexpr const char* CmdExportCeXml        = "exportCeXml";
-inline constexpr const char* CmdExportCsx          = "exportCsx";
-inline constexpr const char* CmdExportSdkHeader    = "exportSdkHeader";
+inline constexpr const char* CmdLookupSymbol       = "lookupSymbol";
+inline constexpr const char* CmdListSymbols        = "listSymbols";
 inline constexpr const char* CmdGetEnumValues      = "getEnumValues";
 inline constexpr const char* CmdResolvePointer     = "resolvePointer";
 inline constexpr const char* CmdWalkInstance       = "walkInstance";
 inline constexpr const char* CmdWalkArray          = "walkArray";
 inline constexpr const char* CmdMonoCompileMethod  = "monoCompileMethod";
 inline constexpr const char* CmdMonoGetVTable      = "monoGetVTable";
-inline constexpr const char* CmdIL2CPPGetMetadataStrings = "il2cppGetMetadataStrings";
-inline constexpr const char* CmdIL2CPPGetGenericInstances = "il2cppGetGenericInstances";
+inline constexpr const char* CmdIL2CPPGetMetadataStrings      = "il2cppGetMetadataStrings";
+inline constexpr const char* CmdIL2CPPGetMetadataTypeFields   = "il2cppGetMetadataTypeFields";
+inline constexpr const char* CmdIL2CPPGetMetadataRegistration = "il2cppGetMetadataRegistration";
 
 // Phase 17a — address finder (reverse lookup): identify which managed
 // instance + class an arbitrary process address belongs to. Inverse of
@@ -91,12 +95,11 @@ inline constexpr const char* CmdGetMethodAobPattern   = "getMethodAobPattern";
 
 // Phase 19 — Lua-callable Unity methods (managed invocation).
 // callMethod resolves a method by class + name (+ optional signatureMatch
-// to disambiguate overloads), marshals primitive / null / address args
-// into a void** params array, calls the runtime invoke entry point, and
-// returns the unboxed primitive return value (or raw address for
-// reference-type returns) plus any captured managed exception.
-// 19a scope: IL2CPP, static methods only, primitive + null + address
-// args, primitive + address returns, no string args/returns.
+// to disambiguate overloads), marshals primitive / null / address / string /
+// value-struct args into a void** params array, calls the runtime invoke entry
+// point on either IL2CPP or Mono (static and instance methods, with optional
+// main-thread marshaling), and returns the decoded return value plus any
+// captured managed exception. See docs/pipe-protocol.md and docs/lua-invoke.md.
 inline constexpr const char* CmdCallMethod            = "callMethod";
 
 // Phase 21a — Inspector field write-back. Given an instance address,
@@ -231,10 +234,10 @@ inline constexpr const char* CmdDumpLazyInitSlots       = "dumpLazyInitSlots";
 //   tolerance : number (float/double epsilon match; default 0.0001
 //               matches CE's default float epsilon)
 //   classScope: bool (true = class-scoped mode — requires assembly +
-//               ns + class)
+//               namespace + name, matching resolveClassFromArgs)
 //   assembly  : string (class-scoped mode only)
-//   ns        : string (class-scoped mode only — empty allowed)
-//   class     : string (class-scoped mode only)
+//   namespace : string (class-scoped mode only — empty allowed)
+//   name      : string (class-scoped mode only)
 //   alignment : int (1/2/4/8 — defaults to sizeof(dataType); set to
 //               1 for "fast scan" misaligned search)
 //   limit     : int (default 50_000, hard-cap 50_000 — applies AFTER
@@ -282,9 +285,9 @@ inline constexpr const char* CmdScanFieldValue        = "scanFieldValue";
 //
 // `endValueScan` request: { sessionId }. Response: { ok, sessionId, dropped }.
 //
-// Sessions auto-expire 5 minutes after last use (cap on memory leaks
-// from clients that crash without calling End). Auto-cleanup on pipe
-// disconnect via the existing Phase 14a teardown hook.
+// Sessions are scoped to the creating pipe client (ownerClientId), drop
+// immediately when that client disconnects (DropForOwner), and auto-expire
+// 5 minutes after last use. See docs/pipe-protocol.md.
 inline constexpr const char* CmdBeginValueScan        = "beginValueScan";
 inline constexpr const char* CmdRefineValueScan       = "refineValueScan";
 inline constexpr const char* CmdEndValueScan          = "endValueScan";

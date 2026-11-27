@@ -78,17 +78,74 @@ end
 
 local nextId = 0
 
+local escapeMap = {
+    ['\\'] = '\\\\', ['"']  = '\\"',  ['\n'] = '\\n',
+    ['\r'] = '\\r',  ['\t'] = '\\t',  ['\b'] = '\\b',
+    ['\f'] = '\\f',
+}
+
+local function escapeStr(s)
+    local out = tostring(s):gsub('[\\"%c]', function(c)
+        local m = escapeMap[c]
+        if m then return m end
+        return string.format('\\u%04X', string.byte(c))
+    end)
+    return '"' .. out .. '"'
+end
+
+-- E-L7: Full JSON value parser with proper escape decoding (\n/\r/\t/\b/\f/
+-- \uXXXX including UTF-16 surrogate pairs to valid UTF-8) and strict error
+-- reporting on malformed tokens instead of `#m` on nil.
 local function parseValue(s, i)
+    if type(s) ~= "string" then error("expected JSON string") end
     local c = s:sub(i, i)
     if c == '"' then
         local out, j = {}, i + 1
         while j <= #s do
             local ch = s:sub(j, j)
-            if ch == '\\' then out[#out + 1] = s:sub(j + 1, j + 1); j = j + 2
+            if ch == '\\' then
+                local nx = s:sub(j + 1, j + 1)
+                if     nx == '"' or nx == '\\' or nx == '/' then out[#out + 1] = nx
+                elseif nx == 'n' then out[#out + 1] = '\n'
+                elseif nx == 'r' then out[#out + 1] = '\r'
+                elseif nx == 't' then out[#out + 1] = '\t'
+                elseif nx == 'b' then out[#out + 1] = '\b'
+                elseif nx == 'f' then out[#out + 1] = '\f'
+                elseif nx == 'u' then
+                    local hex = s:sub(j + 2, j + 5)
+                    local cp = tonumber(hex, 16) or 0xFFFD
+                    if cp >= 0xD800 and cp <= 0xDBFF and s:sub(j + 6, j + 7) == '\\u' then
+                        local low = tonumber(s:sub(j + 8, j + 11), 16)
+                        if low and low >= 0xDC00 and low <= 0xDFFF then
+                            cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00)
+                            j = j + 6
+                        end
+                    end
+                    if     cp < 0x80 then
+                        out[#out + 1] = string.char(cp)
+                    elseif cp < 0x800 then
+                        out[#out + 1] = string.char(
+                            0xC0 + (cp >> 6),
+                            0x80 + (cp & 0x3F))
+                    elseif cp < 0x10000 then
+                        out[#out + 1] = string.char(
+                            0xE0 + (cp >> 12),
+                            0x80 + ((cp >> 6) & 0x3F),
+                            0x80 + (cp & 0x3F))
+                    else
+                        out[#out + 1] = string.char(
+                            0xF0 + (cp >> 18),
+                            0x80 + ((cp >> 12) & 0x3F),
+                            0x80 + ((cp >> 6) & 0x3F),
+                            0x80 + (cp & 0x3F))
+                    end
+                    j = j + 4
+                else                  out[#out + 1] = nx end
+                j = j + 2
             elseif ch == '"' then return table.concat(out), j + 1
             else out[#out + 1] = ch; j = j + 1 end
         end
-        error("string")
+        error("unterminated string at " .. tostring(i))
     elseif c == '{' then
         local t, j = {}, i + 1
         j = j + #(s:sub(j):match("^%s*") or "")
@@ -101,7 +158,8 @@ local function parseValue(s, i)
             j = j + #(s:sub(j):match("^%s*") or "")
             local sep = s:sub(j, j)
             if sep == ',' then j = j + 1
-            elseif sep == '}' then return t, j + 1 end
+            elseif sep == '}' then return t, j + 1
+            else error("expected , or } at " .. tostring(j)) end
         end
     elseif c == '[' then
         local t, j = {}, i + 1
@@ -113,13 +171,15 @@ local function parseValue(s, i)
             j = j + #(s:sub(j):match("^%s*") or "")
             local sep = s:sub(j, j)
             if sep == ',' then j = j + 1
-            elseif sep == ']' then return t, j + 1 end
+            elseif sep == ']' then return t, j + 1
+            else error("expected , or ] at " .. tostring(j)) end
         end
     elseif c == 't' then return true,  i + 4
     elseif c == 'f' then return false, i + 5
     elseif c == 'n' then return nil,   i + 4
     else
         local m = s:match("^%-?%d+%.?%d*[eE]?[%+%-]?%d*", i)
+        if m == nil then error("bad value at " .. tostring(i)) end
         return tonumber(m), i + #m
     end
 end
@@ -270,21 +330,31 @@ local function rpc(cmd, args, timeoutMs)
     pump()
     if sleep then sleep(1) end
     nextId = nextId + 1
-    local function quote(x) return '"' .. tostring(x):gsub('"', '\\"') .. '"' end
     local parts = {}
     for k, v in pairs(args or {}) do
-        local val = (type(v) == "number") and tostring(v)
-                 or (type(v) == "boolean") and (v and "true" or "false")
-                 or quote(v)
-        parts[#parts + 1] = quote(k) .. ":" .. val
+        local val
+        if type(v) == "number" then
+            if v ~= v or v == math.huge or v == -math.huge then val = "null"
+            else val = tostring(v) end
+        elseif type(v) == "boolean" then
+            val = v and "true" or "false"
+        else
+            val = escapeStr(v)
+        end
+        parts[#parts + 1] = escapeStr(k) .. ":" .. val
     end
     local argsJson = next(parts) and ("{" .. table.concat(parts, ",") .. "}") or "{}"
-    local line = string.format('{"id":%d,"cmd":%s,"args":%s}', nextId, quote(cmd), argsJson)
+    local line = string.format('{"id":%d,"cmd":%s,"args":%s}', nextId, escapeStr(cmd), argsJson)
     local resp, rerr = pipeTransact(line, timeoutMs)
-    if resp == nil then
-        error(TAG .. " rpc(" .. tostring(cmd) .. "): " .. tostring(rerr))
+    if resp == nil or resp == "" then
+        error(TAG .. " rpc(" .. tostring(cmd) .. "): " .. tostring(rerr or "empty response"))
     end
-    return parseValue(resp, 1)
+    local trimmed = resp:match("^%s*(.-)%s*$")
+    local okP, parsed = pcall(parseValue, trimmed, 1)
+    if not okP then
+        error(TAG .. " rpc(" .. tostring(cmd) .. ") JSON parse error: " .. tostring(parsed))
+    end
+    return parsed
 end
 
 -- ---------- Symbol registration ---------------------------------------
@@ -531,17 +601,18 @@ function registerMethodSymbol(symbolName, assembly, ns, className, methodName, s
         return false
     end
 
-    -- Pick the first compiled overload. Multiple matches with a non-
-    -- empty sigFilter usually means the filter wasn't unique — log
-    -- both addresses so the user can tighten it. With nil filter,
-    -- the first match is by design.
+    -- E-L8: Multiple matches with a non-empty sigFilter means the filter was
+    -- ambiguous — always surface via err() (unconditional, sets
+    -- DISCRETE_HAD_ERROR) and refuse to silently pick the first overload.
+    -- With nil/empty filter, the first compiled match is by design.
     if #r.matches > 1 and sigFilter and sigFilter ~= "" then
-        warn("%s: sigFilter '%s' matched %d overloads; using first.",
+        err("%s: sigFilter '%s' is ambiguous — matched %d overloads (refusing to pick first):",
             symbolName, sigFilter, #r.matches)
         for i, m in ipairs(r.matches) do
-            warn("  [%d] %s%s  @ %s", i, methodName,
+            err("  [%d] %s%s  @ %s", i, methodName,
                 m.signature or "", tostring(m.address))
         end
+        return false
     end
 
     for _, m in ipairs(r.matches) do

@@ -70,6 +70,10 @@ Fn ResolveExport(const char* name) noexcept {
 struct HWAVEOUT__   { int unused; }; using HWAVEOUT   = HWAVEOUT__*;
 struct HWAVEIN__    { int unused; }; using HWAVEIN    = HWAVEIN__*;
 struct HMIDIOUT__   { int unused; }; using HMIDIOUT   = HMIDIOUT__*;
+struct HMIDIIN__    { int unused; }; using HMIDIIN    = HMIDIIN__*;
+struct HMIDISTRM__  { int unused; }; using HMIDISTRM  = HMIDISTRM__*;
+struct HMIXER__     { int unused; }; using HMIXER     = HMIXER__*;
+struct HMIXEROBJ__  { int unused; }; using HMIXEROBJ  = HMIXEROBJ__*;
 struct HMMIO__      { int unused; }; using HMMIO      = HMMIO__*;
 using MMRESULT    = UINT;
 using MCIERROR    = DWORD;
@@ -119,24 +123,26 @@ constexpr MCIERROR kMciFail  = 257;
 //                      silent stub here would hide a broken proxy behind a
 //                      plausible return value.
 //
-// `static fn_t fn = nullptr` must stay a CONSTANT initialiser, never
-// `static auto fn = ResolveExport<fn_t>(...)`. A magic static evaluates its
-// initialiser exactly once and latches the result forever, so a pre-CRT first
-// call would latch null and leave the export dead for the life of the process —
-// worse than the crash the gate removes. It also drags in the CRT's
-// `_Init_thread_header` machinery, onto a path that must not need the CRT.
+// `static std::atomic<fn_t> fn{nullptr}` stays CONSTANT-initialised (C++20
+// constexpr atomic constructor: zero-filled .bss, zero `_Init_thread_header`
+// CRT machinery) while eliminating the formal data race across concurrent
+// callers on first resolution (A-L10). Never replace with
+// `static auto fn = ResolveExport<fn_t>(...)` — a magic static would latch
+// null on a pre-CRT call and drag in CRT guard variables.
 #define PROXY_THUNK(ret, conv, name, params, args, failval)               \
     extern "C" ret conv Proxy_##name params {                             \
         using fn_t = ret (conv*) params;                                  \
-        static fn_t fn = nullptr;                                         \
-        if (fn == nullptr) {                                              \
+        static std::atomic<fn_t> fn{nullptr};                             \
+        fn_t resolvedFn = fn.load(std::memory_order_acquire);             \
+        if (resolvedFn == nullptr) {                                      \
             if (!Discrete::Proxy::Proxy_CrtReady()) {                     \
                 Discrete::Proxy::Proxy_NotePreCrtCall();                  \
                 return failval;                                           \
             }                                                             \
-            fn = ResolveExport<fn_t>(#name);                              \
+            resolvedFn = ResolveExport<fn_t>(#name);                      \
+            fn.store(resolvedFn, std::memory_order_release);              \
         }                                                                 \
-        return fn args;                                                   \
+        return resolvedFn args;                                           \
     }
 
 // time* — Unity uses timeGetTime + timeBeginPeriod for frame timing.
@@ -189,9 +195,20 @@ PROXY_THUNK(MMRESULT, WINAPI, waveOutGetDevCapsW,
     (UINT_PTR a, void* b, UINT c), (a, b, c), kMmFail)
 PROXY_THUNK(MMRESULT, WINAPI, waveOutGetPosition,
     (HWAVEOUT a, void* b, UINT c), (a, b, c), kMmFail)
-// SDL2.dll (bundled by many Unity games) imports this one.
+// SDL2.dll + common audio middleware (CRI / Wwise / FMOD / OpenAL / NAudio)
+// imports (A-L10). Arities verified against Windows SDK 10.0.26100.0 headers
+// for exact x86 __stdcall stack cleanup.
+PROXY_THUNK(MMRESULT, WINAPI, waveOutGetErrorTextA,
+    (MMRESULT a, LPSTR b, UINT c), (a, b, c), kMmFail)
 PROXY_THUNK(MMRESULT, WINAPI, waveOutGetErrorTextW,
     (MMRESULT a, LPWSTR b, UINT c), (a, b, c), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, waveOutPause, (HWAVEOUT a), (a), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, waveOutRestart, (HWAVEOUT a), (a), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, waveOutGetVolume, (HWAVEOUT a, LPDWORD b), (a, b), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, waveOutSetVolume, (HWAVEOUT a, DWORD b), (a, b), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, waveOutGetID, (HWAVEOUT a, LPUINT b), (a, b), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, waveOutMessage,
+    (HWAVEOUT a, UINT b, DWORD_PTR c, DWORD_PTR d), (a, b, c, d), kMmFail)
 
 // waveIn* — microphone capture. UnityPlayer.dll statically imports this whole
 // family (FMOD's recording path) even in games that never record, so omitting
@@ -212,9 +229,23 @@ PROXY_THUNK(MMRESULT, WINAPI, waveInUnprepareHeader,
 PROXY_THUNK(MMRESULT, WINAPI, waveInAddBuffer,
     (HWAVEIN a, void* b, UINT c), (a, b, c), kMmFail)
 PROXY_THUNK(MMRESULT, WINAPI, waveInStart, (HWAVEIN a), (a), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, waveInStop, (HWAVEIN a), (a), kMmFail)
 PROXY_THUNK(MMRESULT, WINAPI, waveInReset, (HWAVEIN a), (a), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, waveInGetPosition,
+    (HWAVEIN a, void* b, UINT c), (a, b, c), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, waveInGetErrorTextA,
+    (MMRESULT a, LPSTR b, UINT c), (a, b, c), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, waveInGetErrorTextW,
+    (MMRESULT a, LPWSTR b, UINT c), (a, b, c), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, waveInMessage,
+    (HWAVEIN a, UINT b, DWORD_PTR c, DWORD_PTR d), (a, b, c, d), kMmFail)
 
-// midiOut* — old MIDI playback path.
+// midiOut* / midiIn* / midiStream* — MIDI playback & capture.
+PROXY_THUNK(UINT, WINAPI, midiOutGetNumDevs, (), (), 0)
+PROXY_THUNK(MMRESULT, WINAPI, midiOutGetDevCapsA,
+    (UINT_PTR a, void* b, UINT c), (a, b, c), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, midiOutGetDevCapsW,
+    (UINT_PTR a, void* b, UINT c), (a, b, c), kMmFail)
 PROXY_THUNK(MMRESULT, WINAPI, midiOutOpen,
     (HMIDIOUT* a, UINT b, DWORD_PTR c, DWORD_PTR d, DWORD e), (a, b, c, d, e), kMmFail)
 PROXY_THUNK(MMRESULT, WINAPI, midiOutClose, (HMIDIOUT a), (a), kMmFail)
@@ -227,15 +258,71 @@ PROXY_THUNK(MMRESULT, WINAPI, midiOutUnprepareHeader,
     (HMIDIOUT a, void* b, UINT c), (a, b, c), kMmFail)
 PROXY_THUNK(MMRESULT, WINAPI, midiOutReset, (HMIDIOUT a), (a), kMmFail)
 
+PROXY_THUNK(UINT, WINAPI, midiInGetNumDevs, (), (), 0)
+PROXY_THUNK(MMRESULT, WINAPI, midiInGetDevCapsA,
+    (UINT_PTR a, void* b, UINT c), (a, b, c), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, midiInGetDevCapsW,
+    (UINT_PTR a, void* b, UINT c), (a, b, c), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, midiInOpen,
+    (HMIDIIN* a, UINT b, DWORD_PTR c, DWORD_PTR d, DWORD e), (a, b, c, d, e), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, midiInClose, (HMIDIIN a), (a), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, midiInStart, (HMIDIIN a), (a), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, midiInStop, (HMIDIIN a), (a), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, midiInReset, (HMIDIIN a), (a), kMmFail)
+
+PROXY_THUNK(MMRESULT, WINAPI, midiStreamOpen,
+    (HMIDISTRM* a, LPUINT b, DWORD c, DWORD_PTR d, DWORD_PTR e, DWORD f),
+    (a, b, c, d, e, f), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, midiStreamClose, (HMIDISTRM a), (a), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, midiStreamOut,
+    (HMIDISTRM a, void* b, UINT c), (a, b, c), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, midiStreamPause, (HMIDISTRM a), (a), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, midiStreamRestart, (HMIDISTRM a), (a), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, midiStreamStop, (HMIDISTRM a), (a), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, midiStreamProperty,
+    (HMIDISTRM a, LPBYTE b, DWORD c), (a, b, c), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, midiStreamPosition,
+    (HMIDISTRM a, void* b, UINT c), (a, b, c), kMmFail)
+
 // joy* — legacy joystick.
 PROXY_THUNK(UINT, WINAPI, joyGetNumDevs, (), (), 0)
+PROXY_THUNK(MMRESULT, WINAPI, joyGetPos, (UINT a, void* b), (a, b), kJoyFail)
 PROXY_THUNK(MMRESULT, WINAPI, joyGetPosEx, (UINT a, void* b), (a, b), kJoyFail)
+PROXY_THUNK(MMRESULT, WINAPI, joyGetDevCapsA,
+    (UINT_PTR a, void* b, UINT c), (a, b, c), kJoyFail)
 PROXY_THUNK(MMRESULT, WINAPI, joyGetDevCapsW,
     (UINT_PTR a, void* b, UINT c), (a, b, c), kJoyFail)
 
+// mixer* — legacy audio mixer API (imported by older FMOD / DirectShow / middleware).
+PROXY_THUNK(UINT, WINAPI, mixerGetNumDevs, (), (), 0)
+PROXY_THUNK(MMRESULT, WINAPI, mixerOpen,
+    (HMIXER* a, UINT b, DWORD_PTR c, DWORD_PTR d, DWORD e), (a, b, c, d, e), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, mixerClose, (HMIXER a), (a), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, mixerGetLineInfoA,
+    (HMIXEROBJ a, void* b, DWORD c), (a, b, c), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, mixerGetLineInfoW,
+    (HMIXEROBJ a, void* b, DWORD c), (a, b, c), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, mixerGetLineControlsA,
+    (HMIXEROBJ a, void* b, DWORD c), (a, b, c), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, mixerGetLineControlsW,
+    (HMIXEROBJ a, void* b, DWORD c), (a, b, c), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, mixerGetControlDetailsA,
+    (HMIXEROBJ a, void* b, DWORD c), (a, b, c), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, mixerGetControlDetailsW,
+    (HMIXEROBJ a, void* b, DWORD c), (a, b, c), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, mixerSetControlDetails,
+    (HMIXEROBJ a, void* b, DWORD c), (a, b, c), kMmFail)
+
 // mmio* — multimedia file IO.
+PROXY_THUNK(HMMIO, WINAPI, mmioOpenA, (LPSTR a, void* b, DWORD c), (a, b, c), nullptr)
 PROXY_THUNK(HMMIO, WINAPI, mmioOpenW, (LPWSTR a, void* b, DWORD c), (a, b, c), nullptr)
 PROXY_THUNK(MMRESULT, WINAPI, mmioClose, (HMMIO a, UINT b), (a, b), kMmFail)
+PROXY_THUNK(LONG, WINAPI, mmioRead, (HMMIO a, char* b, LONG c), (a, b, c), -1)
+PROXY_THUNK(LONG, WINAPI, mmioWrite, (HMMIO a, const char* b, LONG c), (a, b, c), -1)
+PROXY_THUNK(LONG, WINAPI, mmioSeek, (HMMIO a, LONG b, int c), (a, b, c), -1)
+PROXY_THUNK(MMRESULT, WINAPI, mmioDescend,
+    (HMMIO a, void* b, const void* c, UINT d), (a, b, c, d), kMmFail)
+PROXY_THUNK(MMRESULT, WINAPI, mmioAscend, (HMMIO a, void* b, UINT c), (a, b, c), kMmFail)
 
 // PlaySound — high-level audio.
 PROXY_THUNK(BOOL, WINAPI, PlaySoundA, (LPCSTR a, HMODULE b, DWORD c), (a, b, c), FALSE)

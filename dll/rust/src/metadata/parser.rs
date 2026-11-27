@@ -18,6 +18,8 @@
 //! parser's owned file buffer.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::ops::Deref;
 use std::sync::OnceLock;
 
 use super::layout::{
@@ -28,7 +30,7 @@ use super::layout::{
     parameter_definition_v38, section, string_literal, string_literal_v35, type_definition_tail,
     type_definition_v38,
 };
-use crate::ffi::{LogCategory, log};
+use crate::ffi::{LogCategory, log, try_push};
 
 /// Upper bound on the file size `ReadEntireFile` accepts (256 MiB).
 const MAX_FILE_SIZE: u64 = 256 * 1024 * 1024;
@@ -196,6 +198,7 @@ fn log_md_truncated(cap: usize, msg: &[u8]) {
 /// Mirrors `ReadEntireFile`: fails on open error, size <= 0, size > 256 MiB,
 /// or a short read. The path is UTF-16; like `CreateFileW(path.c_str())` it
 /// ends at the first embedded NUL.
+#[cfg(test)]
 pub(super) fn read_entire_file(path: &[u16]) -> Option<Vec<u8>> {
     let end = path.iter().position(|&c| c == 0).unwrap_or(path.len());
     read_file_impl(&path[..end])
@@ -230,6 +233,8 @@ mod win32 {
     pub const FILE_SHARE_WRITE: u32 = 0x2;
     pub const OPEN_EXISTING: u32 = 3;
     pub const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+    pub const PAGE_READONLY: u32 = 0x02;
+    pub const FILE_MAP_READ: u32 = 0x0004;
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -252,6 +257,22 @@ mod win32 {
             bytes_read: *mut u32,
             overlapped: *mut c_void,
         ) -> i32;
+        pub fn CreateFileMappingW(
+            file: Handle,
+            attributes: *mut c_void,
+            protect: u32,
+            max_size_high: u32,
+            max_size_low: u32,
+            name: *const u16,
+        ) -> Handle;
+        pub fn MapViewOfFile(
+            file_mapping_object: Handle,
+            desired_access: u32,
+            file_offset_high: u32,
+            file_offset_low: u32,
+            bytes_to_map: usize,
+        ) -> *mut c_void;
+        pub fn UnmapViewOfFile(base_address: *const c_void) -> i32;
         pub fn CloseHandle(object: Handle) -> i32;
     }
 
@@ -261,15 +282,108 @@ mod win32 {
 
     impl Drop for OwnedHandle {
         fn drop(&mut self) {
-            // SAFETY: self.0 is a valid handle returned by CreateFileW and is
-            // closed exactly once.
+            // SAFETY: self.0 is a valid handle returned by CreateFileW /
+            // CreateFileMappingW and is closed exactly once.
             unsafe { CloseHandle(self.0) };
         }
     }
 }
 
 #[cfg(windows)]
-fn read_file_impl(path: &[u16]) -> Option<Vec<u8>> {
+struct MappedFile {
+    ptr: *const u8,
+    len: usize,
+}
+
+// SAFETY: MappedFile owns a read-only (PAGE_READONLY / FILE_MAP_READ)
+// view that is never mutated and is unmapped exactly once on Drop.
+#[cfg(windows)]
+unsafe impl Send for MappedFile {}
+#[cfg(windows)]
+unsafe impl Sync for MappedFile {}
+
+#[cfg(windows)]
+impl Drop for MappedFile {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            // SAFETY: self.ptr was returned by MapViewOfFile.
+            unsafe { win32::UnmapViewOfFile(self.ptr.cast()) };
+        }
+    }
+}
+
+#[cfg(windows)]
+impl std::fmt::Debug for MappedFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MappedFile")
+            .field("len", &self.len)
+            .finish()
+    }
+}
+
+/// Backing storage for `global-metadata.dat`: read-only file mapping when
+/// loaded from disk on Windows (D-L4, avoids duplicating up to 256 MiB into
+/// the game's private working set), or an owned `Vec<u8>` for in-memory
+/// buffers / fallback reads.
+#[derive(Debug, Default)]
+enum MetadataBacking {
+    #[default]
+    Empty,
+    Owned(Vec<u8>),
+    #[cfg(windows)]
+    Mapped(MappedFile),
+}
+
+impl Deref for MetadataBacking {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Empty => &[],
+            Self::Owned(v) => v.as_slice(),
+            #[cfg(windows)]
+            Self::Mapped(m) => {
+                // SAFETY: m.ptr is a live read-only mapping of m.len bytes.
+                unsafe { std::slice::from_raw_parts(m.ptr, m.len) }
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn read_handle_bytes(h: win32::Handle, len: usize) -> Option<Vec<u8>> {
+    use win32::*;
+    let mut out = alloc_zeroed(len)?;
+    let mut total: usize = 0;
+    let mut remaining = out.len() as u32;
+    while remaining > 0 {
+        let mut got: u32 = 0;
+        // SAFETY: out[total..] has `remaining` writable bytes (total +
+        // remaining == out.len()); got is a live u32; synchronous handle, so
+        // no OVERLAPPED.
+        let ok = unsafe {
+            ReadFile(
+                h,
+                out.as_mut_ptr().add(total).cast(),
+                remaining,
+                &mut got,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 || got == 0 {
+            return None;
+        }
+        // ReadFile never reports more than requested; min() keeps the
+        // invariant even if it did.
+        let got = got.min(remaining);
+        total += got as usize;
+        remaining -= got;
+    }
+    Some(out)
+}
+
+#[cfg(windows)]
+fn open_and_size(path: &[u16]) -> Option<(win32::OwnedHandle, usize)> {
     use win32::*;
 
     // NUL-terminated copy of the (already truncated) path, passed unchanged.
@@ -302,35 +416,49 @@ fn read_file_impl(path: &[u16]) -> Option<Vec<u8>> {
         return None;
     }
     // size is in (0, 256 MiB], so it fits usize on x86 and x64 and the DWORD
-    // byte count below.
-    let mut out = alloc_zeroed(usize::try_from(size).ok()?)?;
+    // byte count.
+    let len = usize::try_from(size).ok()?;
+    Some((h, len))
+}
 
-    let mut total: usize = 0;
-    let mut remaining = out.len() as u32;
-    while remaining > 0 {
-        let mut got: u32 = 0;
-        // SAFETY: out[total..] has `remaining` writable bytes (total +
-        // remaining == out.len()); got is a live u32; synchronous handle, so
-        // no OVERLAPPED.
-        let ok = unsafe {
-            ReadFile(
-                h.0,
-                out.as_mut_ptr().add(total).cast(),
-                remaining,
-                &mut got,
-                std::ptr::null_mut(),
-            )
-        };
-        if ok == 0 || got == 0 {
-            return None;
+#[cfg(all(windows, test))]
+fn read_file_impl(path: &[u16]) -> Option<Vec<u8>> {
+    let (h, len) = open_and_size(path)?;
+    read_handle_bytes(h.0, len)
+}
+
+#[cfg(windows)]
+fn map_file_impl(path: &[u16]) -> Option<MetadataBacking> {
+    use win32::*;
+
+    let (h, len) = open_and_size(path)?;
+    // SAFETY: h.0 is a valid read-only file handle; NULL attributes & name;
+    // size 0/0 maps the entire file.
+    let map = unsafe {
+        CreateFileMappingW(
+            h.0,
+            std::ptr::null_mut(),
+            PAGE_READONLY,
+            0,
+            0,
+            std::ptr::null(),
+        )
+    };
+    if !map.is_null() {
+        let map = OwnedHandle(map);
+        // SAFETY: map.0 is a valid read-only section covering at least `len` bytes.
+        let view = unsafe { MapViewOfFile(map.0, FILE_MAP_READ, 0, 0, len) };
+        if !view.is_null() {
+            // Both `map` and `h` close on drop; the mapped view holds its own
+            // kernel reference until UnmapViewOfFile runs in MappedFile::drop.
+            return Some(MetadataBacking::Mapped(MappedFile {
+                ptr: view.cast::<u8>(),
+                len,
+            }));
         }
-        // ReadFile never reports more than requested; min() keeps the
-        // invariant even if it did.
-        let got = got.min(remaining);
-        total += got as usize;
-        remaining -= got;
     }
-    Some(out)
+    // Fallback to an owned heap copy if the file cannot be mapped.
+    read_handle_bytes(h.0, len).map(MetadataBacking::Owned)
 }
 
 #[cfg(not(windows))]
@@ -350,18 +478,48 @@ fn read_file_impl(path: &[u16]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+fn map_or_read_file(path: &[u16]) -> Option<MetadataBacking> {
+    let end = path.iter().position(|&c| c == 0).unwrap_or(path.len());
+    #[cfg(windows)]
+    {
+        map_file_impl(&path[..end])
+    }
+    #[cfg(not(windows))]
+    {
+        read_file_impl(&path[..end]).map(MetadataBacking::Owned)
+    }
+}
+
+/// FNV-1a 64-bit hash of `(ns, 0xFF, name)` for the lazy type-by-name index (D-L12).
+fn hash_ns_name(ns: &[u8], name: &[u8]) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut h = OFFSET_BASIS;
+    for &b in ns {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(PRIME);
+    }
+    h ^= 0xFF;
+    h = h.wrapping_mul(PRIME);
+    for &b in name {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(PRIME);
+    }
+    h
+}
+
 // ---------------------------------------------------------------------------
 // Parser
 // ---------------------------------------------------------------------------
 
 /// Port of `Discrete::IL2CPP::Metadata::Parser`. Immutable after load; the
-/// only interior mutability is the `OnceLock` nested-type map.
+/// only interior mutability is the lazy `OnceLock` lookup indices.
 #[derive(Debug, Default)]
 pub struct Parser {
     loaded: bool,
     version: i32,
-    /// Owns the whole file.
-    data: Vec<u8>,
+    /// Owns or maps the whole file (read-only).
+    data: MetadataBacking,
 
     // Cached prefix offsets (v29 layout, also valid for v24 / v27 / v31 /
     // v32-v37; for v38+ populated from the Il2CppSectionMetadata entries).
@@ -406,6 +564,12 @@ pub struct Parser {
 
     /// Lazy child→parent map (C++: `mutable declaringTypeMap_`).
     declaring_type_map: OnceLock<Vec<i32>>,
+    /// D-L12: lazy FNV-1a(ns, 0xFF, name) → ascending TypeDef indices.
+    type_by_name_map: OnceLock<HashMap<u64, Vec<i32>>>,
+    /// D-L12: lazy per-image `(method_start, method_end)` ranges.
+    image_method_ranges: OnceLock<Vec<(i32, i32)>>,
+    /// D-L12: lazy `global_field_index` → first matching FieldDefault row index.
+    field_default_map: OnceLock<HashMap<i32, u32>>,
 }
 
 impl Parser {
@@ -425,7 +589,7 @@ impl Parser {
             log_md("MetadataParser: empty path");
             return p;
         }
-        match read_entire_file(path) {
+        match map_or_read_file(path) {
             Some(data) => {
                 p.load_from_data(data);
             }
@@ -439,14 +603,14 @@ impl Parser {
     /// already holds the bytes.
     pub fn load_from_bytes(data: Vec<u8>) -> Self {
         let mut p = Self::new();
-        p.load_from_data(data);
+        p.load_from_data(MetadataBacking::Owned(data));
         p
     }
 
-    fn load_from_data(&mut self, data: Vec<u8>) -> bool {
+    fn load_from_data(&mut self, data: MetadataBacking) -> bool {
         self.data = data;
         if !self.load_header() {
-            self.data = Vec::new();
+            self.data = MetadataBacking::Empty;
             return false;
         }
         // Mark loaded early so get_heap_string() (called transitively by
@@ -491,6 +655,25 @@ impl Parser {
     /// validation failure (e.g. v38+ variable-width index drift).
     pub fn tables_degraded(&self) -> bool {
         self.tables_degraded
+    }
+
+    /// D-L2: true when the loaded metadata version has a supported
+    /// TypeDefinition table layout (v24/27/29/31-39); false for strings-only
+    /// versions (v16-23/25/26/28/30) or when unloaded.
+    pub fn type_tables_supported(&self) -> bool {
+        self.loaded && self.type_def_sizeof() > 0
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_mapped(&self) -> bool {
+        #[cfg(windows)]
+        {
+            matches!(self.data, MetadataBacking::Mapped(_))
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
     }
 
     /// C++ `v24SubVersionLabel`: "v24.0" / "v24.1" / "v24" for v24 metadata,
@@ -572,7 +755,7 @@ impl Parser {
     fn method_def_sizeof(&self) -> usize {
         match self.version {
             24 => self.method_def_layout_v24().size,
-            27 | 29 | 30 => layout::METHOD_DEFINITION_V29.size,
+            27 | 29 => layout::METHOD_DEFINITION_V29.size,
             31..=37 => layout::METHOD_DEFINITION_V31.size,
             38 => method_definition_v38::V38_FIXED_BYTES + self.tdis() + self.tis() + self.gcis(),
             39 => {
@@ -682,15 +865,23 @@ impl Parser {
         }
 
         // Verified versions: v24 / v27 / v29 / v31 / v35-v39. Others in range
-        // are accepted with a soft warning.
+        // are accepted with a soft warning distinguishing strings-only versions
+        // (no TypeDefinition layout) from unverified v32-v34 (parsed with v31).
         let is_verified = matches!(self.version, 24 | 27 | 29 | 31 | 35..=39);
         if !is_verified {
-            let line = format!(
-                "MetadataParser: version {} shares v31's layout per upstream \
-                 Il2CppDumperV35plus — accepting with soft warning. Report any \
-                 decode anomalies for cross-check.",
-                self.version
-            );
+            let line = if self.type_def_sizeof() == 0 {
+                format!(
+                    "MetadataParser: version {} is strings-only (no TypeDefinition layout \
+                     supported) — string-literal queries work, type tables skipped.",
+                    self.version
+                )
+            } else {
+                format!(
+                    "MetadataParser: version {} is unverified — parsing with v31 layout \
+                     (soft warning). Report any decode anomalies for cross-check.",
+                    self.version
+                )
+            };
             log_md_truncated(200, line.as_bytes());
         }
 
@@ -1105,9 +1296,16 @@ impl Parser {
         } else {
             max_count.min(total)
         };
-        (0..limit)
-            .map(|i| self.get_string_literal(i).unwrap_or(&[]))
-            .collect()
+        let mut out = Vec::new();
+        if out.try_reserve(limit as usize).is_err() {
+            return out;
+        }
+        for i in 0..limit {
+            if !try_push(&mut out, self.get_string_literal(i).unwrap_or(&[])) {
+                break;
+            }
+        }
+        out
     }
 
     /// C++ `GetHeapString`: the ASCIIZ entry at `name_index`, bounded by the
@@ -1218,13 +1416,29 @@ impl Parser {
     }
 
     /// C++ `FindTypeByName`: first type whose name and namespace match.
+    /// D-L12: builds a lazy `OnceLock` hash index preserving exact first-match order.
     pub fn find_type_by_name(&self, ns: &[u8], name: &[u8]) -> Option<TypeDefView<'_>> {
         if !self.tables_loaded {
             return None;
         }
-        let count = self.type_definition_count();
-        (0..count)
-            .filter_map(|i| self.get_type_definition(i as i32))
+        let index = self.type_by_name_map.get_or_init(|| {
+            let count = self.type_definition_count();
+            let mut map: HashMap<u64, Vec<i32>> = HashMap::new();
+            let _ = map.try_reserve(count as usize);
+            for i in 0..count {
+                if let Some(v) = self.get_type_definition(i as i32) {
+                    map.entry(hash_ns_name(v.ns, v.name))
+                        .or_default()
+                        .push(i as i32);
+                }
+            }
+            map
+        });
+        let key = hash_ns_name(ns, name);
+        let candidates = index.get(&key)?;
+        candidates
+            .iter()
+            .filter_map(|&idx| self.get_type_definition(idx))
             .find(|v| v.name == name && v.ns == ns)
     }
 
@@ -1246,7 +1460,7 @@ impl Parser {
         let field_row_count = (self.fields_size as u32) / (row_size as u32);
         let variable_layout = self.version >= 38;
 
-        out.reserve(usize::from(field_count));
+        let _ = out.try_reserve(usize::from(field_count));
         for k in 0..field_count {
             // C++ `type.fieldStart + k` is int32 arithmetic (UB on overflow).
             // Overflow needs fieldStart > INT32_MAX - 65535, which already
@@ -1277,12 +1491,17 @@ impl Parser {
                     rd_u32(row, field_definition_v29::TOKEN),
                 )
             };
-            out.push(FieldDefView {
-                index: global_idx,
-                name: self.get_heap_string(name_index),
-                type_index,
-                token,
-            });
+            if !try_push(
+                &mut out,
+                FieldDefView {
+                    index: global_idx,
+                    name: self.get_heap_string(name_index),
+                    type_index,
+                    token,
+                },
+            ) {
+                break;
+            }
         }
         out
     }
@@ -1329,7 +1548,7 @@ impl Parser {
 
         match self.version {
             24 => Some(self.project_method_def(idx, row, self.method_def_layout_v24())),
-            27..=30 => Some(self.project_method_def(idx, row, layout::METHOD_DEFINITION_V29)),
+            27 | 29 => Some(self.project_method_def(idx, row, layout::METHOD_DEFINITION_V29)),
             31..=37 => Some(self.project_method_def(idx, row, layout::METHOD_DEFINITION_V31)),
             v if v >= 38 => {
                 // v38+: hand-walk; see layout::method_definition_v38.
@@ -1388,7 +1607,7 @@ impl Parser {
             return out;
         }
         let total = self.method_definition_count();
-        out.reserve(usize::from(method_count));
+        let _ = out.try_reserve(usize::from(method_count));
         for k in 0..method_count {
             // C++ int32 `methodStart + k` (UB on overflow): unreachable past
             // the k = 0 bounds check, wrapping keeps it safe regardless.
@@ -1396,8 +1615,10 @@ impl Parser {
             if global_idx < 0 || global_idx as u32 >= total {
                 break;
             }
-            if let Some(md) = self.get_method_definition(global_idx) {
-                out.push(md);
+            if let Some(md) = self.get_method_definition(global_idx)
+                && !try_push(&mut out, md)
+            {
+                break;
             }
         }
         out
@@ -1472,7 +1693,7 @@ impl Parser {
             return out;
         }
         let total = self.parameter_count();
-        out.reserve(usize::from(parameter_count));
+        let _ = out.try_reserve(usize::from(parameter_count));
         for k in 0..parameter_count {
             // C++ int32 `parameterStart + k` (UB on overflow): unreachable
             // past the k = 0 bounds check, wrapping keeps it safe regardless.
@@ -1480,8 +1701,10 @@ impl Parser {
             if global_idx < 0 || global_idx as u32 >= total {
                 break;
             }
-            if let Some(p) = self.get_parameter(global_idx) {
-                out.push(p);
+            if let Some(p) = self.get_parameter(global_idx)
+                && !try_push(&mut out, p)
+            {
+                break;
             }
         }
         out
@@ -1501,20 +1724,12 @@ impl Parser {
         (self.images_size as u32) / (sz as u32)
     }
 
-    /// C++ `GetImage`.
-    pub fn get_image(&self, idx: i32) -> Option<ImageDefView<'_>> {
-        if !self.tables_loaded {
-            return None;
-        }
-        let count = self.image_count();
-        if idx < 0 || idx as u32 >= count {
-            return None;
-        }
+    fn image_row_fields(&self, idx: i32) -> (u32, i32, u32, u32) {
         let sz = self.image_def_sizeof();
         let start = self.images_offset as usize + idx as usize * sz;
         let row = &self.data[start..start + sz];
 
-        let (name_index, type_start, type_count, token) = if self.version >= 38 {
+        if self.version >= 38 {
             // uint nameIndex + int assemblyIndex + TDIS typeStart + uint
             // typeCount + TDIS exportedTypeStart + uint exportedTypeCount +
             // int entryPointIndex + uint token + int caStart + uint caCount.
@@ -1534,76 +1749,119 @@ impl Parser {
                 rd_u32(row, image_definition_v29::TYPE_COUNT),
                 rd_u32(row, image_definition_v29::TOKEN),
             )
-        };
+        }
+    }
 
-        let mut v = ImageDefView {
+    fn compute_image_method_range(&self, type_start: i32, type_count: u32) -> (i32, i32) {
+        // methodStart / methodEnd = min(type.methodStart) /
+        // max(type.methodStart + methodCount) over the image's types.
+        if type_count == 0 {
+            return (0, 0);
+        }
+        let mut lo = i32::MAX;
+        let mut hi = 0i32;
+        let total = self.type_definition_count();
+        // C++ `std::min<int32>(typeStart + (int32)typeCount, (int32)total)`:
+        // the uint32 -> int32 cast is modular and the addition can
+        // overflow (UB). wrapping_add is MSVC's two's-complement result;
+        // the loop only calls the bounds-checked get_type_definition, so
+        // any value is memory-safe.
+        let end = type_start.wrapping_add(type_count as i32).min(total as i32);
+        // Indices below 0 never resolve (get_type_definition rejects them),
+        // so starting at max(typeStart, 0) skips only no-op iterations.
+        for i in type_start.max(0)..end {
+            if let Some(t) = self.get_type_definition(i) {
+                if t.method_count == 0 {
+                    continue;
+                }
+                let ms = t.method_start;
+                // C++ int32 `ms + methodCount` (UB on overflow); the value
+                // is only compared, wrapping is MSVC's result.
+                let me = ms.wrapping_add(i32::from(t.method_count));
+                if ms < lo {
+                    lo = ms;
+                }
+                if me > hi {
+                    hi = me;
+                }
+            }
+        }
+        if lo != i32::MAX && hi > lo {
+            (lo, hi)
+        } else {
+            (0, 0)
+        }
+    }
+
+    fn cached_image_method_ranges(&self) -> &[(i32, i32)] {
+        self.image_method_ranges.get_or_init(|| {
+            let count = self.image_count();
+            let mut ranges = Vec::new();
+            let _ = ranges.try_reserve(count as usize);
+            for i in 0..count {
+                let (_, type_start, type_count, _) = self.image_row_fields(i as i32);
+                if !try_push(&mut ranges, self.compute_image_method_range(type_start, type_count)) {
+                    break;
+                }
+            }
+            ranges
+        })
+    }
+
+    /// C++ `GetImage`.
+    pub fn get_image(&self, idx: i32) -> Option<ImageDefView<'_>> {
+        if !self.tables_loaded {
+            return None;
+        }
+        let count = self.image_count();
+        if idx < 0 || idx as u32 >= count {
+            return None;
+        }
+        let (name_index, type_start, type_count, token) = self.image_row_fields(idx);
+        let (method_start, method_end) = self
+            .cached_image_method_ranges()
+            .get(idx as usize)
+            .copied()
+            .unwrap_or((0, 0));
+        Some(ImageDefView {
             index: idx,
             name: self.get_heap_string(name_index as i32),
             type_start,
             type_count,
             token,
-            method_start: 0,
-            method_end: 0,
-        };
-
-        // methodStart / methodEnd = min(type.methodStart) /
-        // max(type.methodStart + methodCount) over the image's types.
-        if type_count > 0 {
-            let mut lo = i32::MAX;
-            let mut hi = 0i32;
-            let total = self.type_definition_count();
-            // C++ `std::min<int32>(typeStart + (int32)typeCount, (int32)total)`:
-            // the uint32 -> int32 cast is modular and the addition can
-            // overflow (UB). wrapping_add is MSVC's two's-complement result;
-            // the loop only calls the bounds-checked get_type_definition, so
-            // any value is memory-safe.
-            let end = type_start.wrapping_add(type_count as i32).min(total as i32);
-            // Indices below 0 never resolve (get_type_definition rejects them),
-            // so starting at max(typeStart, 0) skips only no-op iterations.
-            for i in type_start.max(0)..end {
-                if let Some(t) = self.get_type_definition(i) {
-                    if t.method_count == 0 {
-                        continue;
-                    }
-                    let ms = t.method_start;
-                    // C++ int32 `ms + methodCount` (UB on overflow); the value
-                    // is only compared, wrapping is MSVC's result.
-                    let me = ms.wrapping_add(i32::from(t.method_count));
-                    if ms < lo {
-                        lo = ms;
-                    }
-                    if me > hi {
-                        hi = me;
-                    }
-                }
-            }
-            if lo != i32::MAX && hi > lo {
-                v.method_start = lo;
-                v.method_end = hi;
-            }
-        }
-        Some(v)
+            method_start,
+            method_end,
+        })
     }
 
     /// C++ `EnumerateImages`.
     pub fn enumerate_images(&self) -> Vec<ImageDefView<'_>> {
         let count = self.image_count();
-        (0..count)
-            .filter_map(|i| self.get_image(i as i32))
-            .collect()
+        let mut out = Vec::new();
+        let _ = out.try_reserve(count as usize);
+        for i in 0..count {
+            if let Some(img) = self.get_image(i as i32)
+                && !try_push(&mut out, img)
+            {
+                break;
+            }
+        }
+        out
     }
 
     /// C++ `FindImageContainingMethod`: first image whose
     /// [methodStart, methodEnd) covers `global_method_idx`.
+    /// D-L12: scans the lazy cached per-image ranges instead of re-walking
+    /// every type in the file on every call.
     pub fn find_image_containing_method(&self, global_method_idx: i32) -> Option<ImageDefView<'_>> {
-        let count = self.image_count();
-        (0..count)
-            .filter_map(|i| self.get_image(i as i32))
-            .find(|v| {
-                v.method_end > v.method_start
-                    && global_method_idx >= v.method_start
-                    && global_method_idx < v.method_end
-            })
+        if !self.tables_loaded || self.image_count() == 0 {
+            return None;
+        }
+        let idx = self
+            .cached_image_method_ranges()
+            .iter()
+            .position(|&(ms, me)| me > ms && global_method_idx >= ms && global_method_idx < me)?;
+        self.get_image(idx as i32)
     }
 
     // --- nested types -------------------------------------------------------------
@@ -1622,11 +1880,15 @@ impl Parser {
         let map = self
             .declaring_type_map
             .get_or_init(|| self.build_declaring_type_map(total));
-        map[type_def_idx as usize]
+        map.get(type_def_idx as usize).copied().unwrap_or(-1)
     }
 
     fn build_declaring_type_map(&self, total: u32) -> Vec<i32> {
-        let mut map = vec![-1i32; total as usize];
+        let mut map = Vec::new();
+        if map.try_reserve_exact(total as usize).is_err() {
+            return map;
+        }
+        map.resize(total as usize, -1i32);
         let nto = self.nested_types_offset;
         let nts = self.nested_types_size;
         if !(nto > 0 && nts > 0 && nto as u64 + nts as u64 <= self.data.len() as u64) {
@@ -1759,8 +2021,27 @@ impl Parser {
         }
     }
 
+    fn read_field_default_row(&self, row_idx: u32, row_size: usize) -> (i32, i32, i32) {
+        let start = self.field_defaults_offset as usize + row_idx as usize * row_size;
+        let row = &self.data[start..start + row_size];
+        if self.version >= 38 {
+            let tis = self.tis();
+            (
+                rd_i32(row, 0),
+                rd_uint_n(row, 4, tis) as i32,
+                rd_i32(row, 4 + tis),
+            )
+        } else {
+            (
+                rd_i32(row, field_default_value_v29::FIELD_INDEX),
+                rd_i32(row, field_default_value_v29::TYPE_INDEX),
+                rd_i32(row, field_default_value_v29::DATA_INDEX),
+            )
+        }
+    }
+
     /// C++ `FindFieldDefault`: the FieldDefault row for a global field index
-    /// (linear scan, first match).
+    /// (first match). D-L12: builds a lazy `OnceLock` index for O(1) lookup.
     pub fn find_field_default(&self, global_field_index: i32) -> Option<FieldDefaultBlob<'_>> {
         if !self.tables_loaded {
             return None;
@@ -1773,44 +2054,35 @@ impl Parser {
         if row_count == 0 {
             return None;
         }
-        let variable_layout = self.version >= 38;
 
-        for i in 0..row_count {
-            let start = self.field_defaults_offset as usize + i as usize * row_size;
-            let row = &self.data[start..start + row_size];
-            let (field_index, type_index, data_index) = if variable_layout {
-                let tis = self.tis();
-                (
-                    rd_i32(row, 0),
-                    rd_uint_n(row, 4, tis) as i32,
-                    rd_i32(row, 4 + tis),
-                )
-            } else {
-                (
-                    rd_i32(row, field_default_value_v29::FIELD_INDEX),
-                    rd_i32(row, field_default_value_v29::TYPE_INDEX),
-                    rd_i32(row, field_default_value_v29::DATA_INDEX),
-                )
-            };
-            if field_index != global_field_index {
-                continue;
+        let index = self.field_default_map.get_or_init(|| {
+            let mut map = HashMap::new();
+            let _ = map.try_reserve(row_count as usize);
+            for i in 0..row_count {
+                let (field_index, _, _) = self.read_field_default_row(i, row_size);
+                // Preserve exact linear-scan first-match semantics on duplicates.
+                map.entry(field_index).or_insert(i);
             }
-            let mut data: &[u8] = &[];
-            if data_index >= 0 && data_index < self.field_default_data_size {
-                // Up to the blob end or 256 bytes, whichever is smaller.
-                let max_avail = self.field_default_data_size - data_index;
-                let take = max_avail.min(256) as usize;
-                let p = self.field_default_data_offset as usize + data_index as usize;
-                data = &self.data[p..p + take];
-            }
-            return Some(FieldDefaultBlob {
-                field_index,
-                type_index,
-                data_index,
-                data,
-            });
+            map
+        });
+
+        let &row_idx = index.get(&global_field_index)?;
+        let (field_index, type_index, data_index) =
+            self.read_field_default_row(row_idx, row_size);
+        let mut data: &[u8] = &[];
+        if data_index >= 0 && data_index < self.field_default_data_size {
+            // Up to the blob end or 256 bytes, whichever is smaller.
+            let max_avail = self.field_default_data_size - data_index;
+            let take = max_avail.min(256) as usize;
+            let p = self.field_default_data_offset as usize + data_index as usize;
+            data = &self.data[p..p + take];
         }
-        None
+        Some(FieldDefaultBlob {
+            field_index,
+            type_index,
+            data_index,
+            data,
+        })
     }
 
     /// v38 parameters.count (C++ `parametersCount_`); 0 before v38.

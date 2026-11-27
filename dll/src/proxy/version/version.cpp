@@ -56,24 +56,26 @@ Fn ResolveExport(const char* name) noexcept {
 //                      silent stub here would hide a broken proxy behind a
 //                      plausible return value.
 //
-// `static fn_t fn = nullptr` must stay a CONSTANT initialiser, never
-// `static auto fn = ResolveExport<fn_t>(...)`. A magic static evaluates its
-// initialiser exactly once and latches the result forever, so a pre-CRT first
-// call would latch null and leave the export dead for the life of the process —
-// worse than the crash the gate removes. It also drags in the CRT's
-// `_Init_thread_header` machinery, onto a path that must not need the CRT.
+// `static std::atomic<fn_t> fn{nullptr}` stays CONSTANT-initialised (C++20
+// constexpr atomic constructor: zero-filled .bss, zero `_Init_thread_header`
+// CRT machinery) while eliminating the formal data race across concurrent
+// callers on first resolution (A-L10). Never replace with
+// `static auto fn = ResolveExport<fn_t>(...)` — a magic static would latch
+// null on a pre-CRT call and drag in CRT guard variables.
 #define PROXY_THUNK(ret, conv, name, params, args, failval)               \
     extern "C" ret conv Proxy_##name params {                             \
         using fn_t = ret (conv*) params;                                  \
-        static fn_t fn = nullptr;                                         \
-        if (fn == nullptr) {                                              \
+        static std::atomic<fn_t> fn{nullptr};                             \
+        fn_t resolvedFn = fn.load(std::memory_order_acquire);             \
+        if (resolvedFn == nullptr) {                                      \
             if (!Discrete::Proxy::Proxy_CrtReady()) {                     \
                 Discrete::Proxy::Proxy_NotePreCrtCall();                  \
                 return failval;                                           \
             }                                                             \
-            fn = ResolveExport<fn_t>(#name);                              \
+            resolvedFn = ResolveExport<fn_t>(#name);                      \
+            fn.store(resolvedFn, std::memory_order_release);              \
         }                                                                 \
-        return fn args;                                                   \
+        return resolvedFn args;                                           \
     }
 
 PROXY_THUNK(BOOL, WINAPI, GetFileVersionInfoA,

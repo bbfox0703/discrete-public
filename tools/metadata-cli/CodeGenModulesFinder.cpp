@@ -82,13 +82,15 @@ std::optional<Module> ProbeCodeGenModule(
     auto modFileOff = VaToFileOffset(img, modulePtrVa);
     if (!modFileOff) return std::nullopt;
 
-    // First three fields: moduleName / methodPointerCount / methodPointers.
+    // First three fields: moduleName (ptr) / methodPointerCount (u32 + 4B pad) / methodPointers (ptr).
+    // D-L11: read only the 4-byte uint32_t count so non-zero padding bytes never corrupt it.
     std::uint64_t moduleNameVa  = 0;
-    std::uint64_t methodCount   = 0;
+    std::uint32_t methodCount32 = 0;
     std::uint64_t methodPtrsVa  = 0;
-    if (!ReadAt(bytes, size, *modFileOff + 0x00, &moduleNameVa, 8)) return std::nullopt;
-    if (!ReadAt(bytes, size, *modFileOff + 0x08, &methodCount,  8)) return std::nullopt;
-    if (!ReadAt(bytes, size, *modFileOff + 0x10, &methodPtrsVa, 8)) return std::nullopt;
+    if (!ReadAt(bytes, size, *modFileOff + 0x00, &moduleNameVa,  8)) return std::nullopt;
+    if (!ReadAt(bytes, size, *modFileOff + 0x08, &methodCount32, 4)) return std::nullopt;
+    if (!ReadAt(bytes, size, *modFileOff + 0x10, &methodPtrsVa,  8)) return std::nullopt;
+    const std::uint64_t methodCount = methodCount32;
 
     // moduleName must point to a ".dll" string in some readable section.
     auto nameFileOff = VaToFileOffset(img, moduleNameVa);
@@ -124,7 +126,7 @@ std::optional<Module> ProbeCodeGenModule(
     m.modulePtrVa       = modulePtrVa;
     if (auto rva = img.FileOffsetToRva(*modFileOff); rva) m.modulePtrRva = *rva;
     m.methodPointersVa  = methodPtrsVa;
-    m.methodPointersRva = methodPtrsVa - img.imageBase;
+    m.methodPointersRva = (methodPtrsVa >= img.imageBase) ? (methodPtrsVa - img.imageBase) : 0;
     m.methodCount       = methodCount;
     return m;
 }
@@ -178,15 +180,19 @@ std::optional<Found> FindOffline(const std::uint8_t* bytes,
         std::uint64_t endFileOff   = std::min<std::uint64_t>(
             startFileOff + sec->rawSize, size);
 
-        for (std::uint64_t off = startFileOff;
-             off + 8 <= endFileOff;
-             off += 8) {
+        std::uint64_t off = startFileOff;
+        while (off + 8 <= endFileOff) {
             std::uint64_t firstPtr = 0;
-            if (!ReadAt(bytes, size, off, &firstPtr, 8)) continue;
-            if (firstPtr == 0 || (firstPtr & 7ull) != 0) continue;
+            if (!ReadAt(bytes, size, off, &firstPtr, 8) || firstPtr == 0 || (firstPtr & 7ull) != 0) {
+                off += 8;
+                continue;
+            }
 
             auto firstModule = ProbeCodeGenModule(bytes, size, img, firstPtr);
-            if (!firstModule) continue;
+            if (!firstModule) {
+                off += 8;
+                continue;
+            }
 
             // Extend the run. v0.2 fix: allow nulls within the run.
             // Real codeGenModules arrays carry null entries for assemblies
@@ -195,7 +201,7 @@ std::optional<Found> FindOffline(const std::uint8_t* bytes,
             // entries per game (87/253 on Songs of Silence). Keep extending
             // through any number of nulls; stop only when we hit a non-null
             // pointer that does NOT probe as a codeGenModule (= we've fallen
-            // off the array end into something else in .data). Cap of 64
+            // off the array end into something else in .data). Cap of 512
             // consecutive nulls as a safety net against runs that disappear
             // into a BSS region.
             std::vector<Module> run;
@@ -203,12 +209,6 @@ std::optional<Found> FindOffline(const std::uint8_t* bytes,
             run.push_back(*firstModule);
             std::uint64_t cursor = off + 8;
             std::size_t   consecutiveNulls = 0;
-            // v0.2.1: 64 was too restrictive for large games (Songs of
-            // Silence with 253 codeGenModules had clusters of null
-            // entries past the cap). 512 is a safer bound — the array
-            // can't be larger than that in practice because the
-            // codeGenModulesCount in CodeRegistration is also bounded
-            // by `maxModules` (default 1024).
             constexpr std::size_t kMaxConsecutiveNulls = 512;
             while (run.size() + nullIndices.size() < maxModules && cursor + 8 <= endFileOff) {
                 std::uint64_t nextPtr = 0;
@@ -228,16 +228,16 @@ std::optional<Found> FindOffline(const std::uint8_t* bytes,
                 consecutiveNulls = 0;
                 cursor += 8;
             }
-            // We don't keep the trailing nulls — only the entries up to
-            // the LAST non-null module count toward the run length. This
-            // avoids "fake" extension into the BSS gap after the array.
-            // The intermediate nulls (those followed by a real module
-            // later) ARE preserved as null slots in the per-image lookup
-            // by SymbolPipeline (which keys by name, so nulls just don't
-            // contribute names — correct).
+            // Trailing nulls after the last real module are not part of the
+            // array; intermediate nulls between real modules ARE counted in
+            // arraySlots (D-L11).
+            const std::size_t trailingNulls = std::min(consecutiveNulls, nullIndices.size());
+            const std::size_t intermediateNulls = nullIndices.size() - trailingNulls;
+            const std::size_t totalSlots = run.size() + intermediateNulls;
 
             if (run.size() < minModules) {
-                // Skip past the failed run so we don't re-probe its members.
+                // D-L11: while-loop advance to `cursor` does not skip the slot
+                // at `cursor` (guaranteed >= off + 8 so forward progress holds).
                 off = cursor;
                 continue;
             }
@@ -250,10 +250,11 @@ std::optional<Found> FindOffline(const std::uint8_t* bytes,
                 if (auto rva = img.FileOffsetToRva(off); rva) best.arrayRva = *rva;
                 best.arrayVa     = img.imageBase + best.arrayRva;
                 best.moduleCount = run.size();
+                best.arraySlots  = totalSlots;
                 best.modules     = std::move(run);
                 best.sectionName = sec->name;
             }
-            // Skip past the consumed run.
+            // Advance directly to cursor (guaranteed >= off + 8).
             off = cursor;
         }
     }

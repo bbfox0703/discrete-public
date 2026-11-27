@@ -26,6 +26,11 @@ using System.Threading.Tasks;
 
 namespace UnityDumpUI.Core.Services;
 
+/// <summary>C-L8: Per-call round-trip telemetry returned directly alongside
+/// the RPC envelope so concurrent callers on a shared <see cref="PipeClient"/>
+/// never race on mutable instance properties.</summary>
+public readonly record struct RpcTelemetry(long ReadMs, long ParseMs, int ResponseChars);
+
 public sealed class PipeClient : IAsyncDisposable
 {
     private readonly string         _pipeName;
@@ -73,8 +78,10 @@ public sealed class PipeClient : IAsyncDisposable
     /// round-trip: <see cref="LastReadMs"/> = ReadLineAsync wall-time (it blocks until
     /// the DLL writes the WHOLE response, so it also covers the server-side handler +
     /// pipe transfer); <see cref="LastParseMs"/> = JSON deserialize; and
-    /// <see cref="LastResponseChars"/> = the raw response length. Single-flight via
-    /// <c>_gate</c>, so plain fields are safe for a caller to read right after the call.</summary>
+    /// <see cref="LastResponseChars"/> = the raw response length. Prefer
+    /// <see cref="SendWithTelemetryAsync{TResult}"/> when concurrent callers may share
+    /// the same <see cref="PipeClient"/> so each caller observes its own call's
+    /// telemetry without racing on these properties.</summary>
     public long LastReadMs        { get; private set; }
     public long LastParseMs       { get; private set; }
     public int  LastResponseChars { get; private set; }
@@ -171,6 +178,25 @@ public sealed class PipeClient : IAsyncDisposable
         TimeSpan? readTimeout = null)
         where TResult : class
     {
+        var (envelope, _) = await SendWithTelemetryAsync(
+            cmd, args, envelopeType, ct, readTimeout).ConfigureAwait(false);
+        return envelope;
+    }
+
+    /// <summary>
+    /// C-L8: Send a typed request and return both the parsed envelope and this
+    /// specific call's <see cref="RpcTelemetry"/> captured inside the
+    /// single-flight <c>_gate</c>, avoiding any race with another caller
+    /// interleaving before the properties are read.
+    /// </summary>
+    public async Task<(RpcEnvelope<TResult> Envelope, RpcTelemetry Telemetry)> SendWithTelemetryAsync<TResult>(
+        string cmd,
+        Dictionary<string, JsonElement>? args,
+        System.Text.Json.Serialization.Metadata.JsonTypeInfo<RpcEnvelope<TResult>> envelopeType,
+        CancellationToken ct = default,
+        TimeSpan? readTimeout = null)
+        where TResult : class
+    {
         ArgumentNullException.ThrowIfNull(cmd);
         ArgumentNullException.ThrowIfNull(envelopeType);
 
@@ -254,8 +280,10 @@ public sealed class PipeClient : IAsyncDisposable
             // Phase 30d telemetry — record the read-wait (covers DLL handler + transfer)
             // and response size, then time the deserialize separately, so a caller can
             // split a slow round-trip into wire/server vs JSON-parse vs payload size.
-            LastReadMs        = readSw.ElapsedMilliseconds;
-            LastResponseChars = responseLine.Length;
+            long readMs = readSw.ElapsedMilliseconds;
+            int responseChars = responseLine.Length;
+            LastReadMs        = readMs;
+            LastResponseChars = responseChars;
             var parseSw = Stopwatch.StartNew();
             RpcEnvelope<TResult>? envelope;
             try
@@ -267,7 +295,9 @@ public sealed class PipeClient : IAsyncDisposable
                 throw new PipeProtocolException("Invalid JSON response: " + ex.Message, ex);
             }
             parseSw.Stop();
-            LastParseMs = parseSw.ElapsedMilliseconds;
+            long parseMs = parseSw.ElapsedMilliseconds;
+            LastParseMs = parseMs;
+            var telemetry = new RpcTelemetry(readMs, parseMs, responseChars);
             if (envelope is null)
             {
                 throw new PipeProtocolException("Empty response envelope.");
@@ -293,7 +323,7 @@ public sealed class PipeClient : IAsyncDisposable
             }
             // Honour the late cancel now — pipe is back in a clean state.
             ct.ThrowIfCancellationRequested();
-            return envelope;
+            return (envelope, telemetry);
         }
         finally
         {

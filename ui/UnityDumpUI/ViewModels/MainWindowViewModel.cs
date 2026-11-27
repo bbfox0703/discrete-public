@@ -274,6 +274,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         ReplacePipeForFreshConnect();
 
         IsConnected      = false;
+        SupportsStableMethodSymbols = false;
         ConnectionStatus = $"Disconnected ({reason})";
         Engine = Backend2 = DllVariant = GameModule = UnityVersion = null;
         Inspector.GameKey = null;   // clear the connected game's bookmarks
@@ -598,12 +599,13 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     [ObservableProperty] private string? _bridgeInjectStatus;
 
     [ObservableProperty] private string? _engine;
+    [ObservableProperty] private string? _backend2;     // "Backend" collides with field above
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(ExportSymbolsX64dbgCommand))]
     [NotifyCanExecuteChangedFor(nameof(ExportSymbolsGhidraCommand))]
     [NotifyCanExecuteChangedFor(nameof(ExportSymbolsIdaCommand))]
     [NotifyCanExecuteChangedFor(nameof(ExportIl2cppHeaderCommand))]
-    private string? _backend2;     // "Backend" collides with field above
+    private bool _supportsStableMethodSymbols;
     [ObservableProperty] private string? _dllVariant;
     [ObservableProperty] private string? _gameModule;
     [ObservableProperty] private string? _unityVersion;
@@ -876,6 +878,10 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 
             Engine          = hs.Engine;
             Backend2        = hs.Backend;
+            // E-L10: prefer the DLL's explicit capability flag; fall back to
+            // backend name only when talking to an older DLL build.
+            SupportsStableMethodSymbols = hs.StableModuleRelativeMethods
+                ?? string.Equals(hs.Backend, "IL2CPP", StringComparison.OrdinalIgnoreCase);
             DllVariant      = hs.DllVariant;
             GameModule      = hs.GameModule;
             UnityVersion    = hs.UnityVersion;
@@ -1159,6 +1165,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         finally
         {
             IsConnected      = false;
+            SupportsStableMethodSymbols = false;
             ConnectionStatus = "Disconnected";
             Engine = Backend2 = DllVariant = GameModule = UnityVersion = null;
             MetadataVersion = null;
@@ -1479,7 +1486,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 
     private bool CanExportSymbols() =>
         !IsBusy && IsConnected && SaveFileAsync is not null &&
-        string.Equals(Backend2, "IL2CPP", StringComparison.OrdinalIgnoreCase) &&
+        SupportsStableMethodSymbols &&
         !BulkGate.IsBusy;
 
     private async Task ExportSymbolsAsync(

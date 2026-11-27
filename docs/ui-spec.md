@@ -274,7 +274,7 @@ just widens the row; nothing else moves.
 - **Exception (wrapping last column)**: a read-only grid's *final* column may
   star-fill when it wraps and carries a ToolTip, so it absorbs the leftover
   width instead of clipping. Current sole member: the Class Pivot results
-  **Trajectory** column (`MainWindow.axaml:3801`, `Width="5*"`) — kept
+  **Trajectory** column (`MainWindow.axaml:3804`, `Width="5*"`) — kept
   deliberately through the Auto-width pass, not an oversight. Every other
   column in that grid is `Auto` + `MinWidth`.
 

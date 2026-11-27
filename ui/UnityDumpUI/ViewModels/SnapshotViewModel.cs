@@ -1873,9 +1873,12 @@ public sealed partial class SnapshotViewModel : ObservableObject
         if (hs.Contains("il2cpp")) return "il2cpp";
         if (hs.Contains("mono"))   return "mono";
 
+        // E-L10: fallback checks explicit IL2CPP module names BEFORE "mono" so
+        // an IL2CPP game whose path/module happens to contain "mono" isn't
+        // misclassified as Mono.
         var m = (_currentGameModule ?? string.Empty).ToLowerInvariant();
+        if (m.Contains("gameassembly") || m.Contains("userassembly") || m.Contains("il2cpp")) return "il2cpp";
         if (m.Contains("mono")) return "mono";
-        if (m.Contains("gameassembly") || m.Contains("il2cpp")) return "il2cpp";
         return "unknown";
     }
 

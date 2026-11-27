@@ -797,8 +797,12 @@ public static partial class CeXmlExporter
         List<WalkedField>? pairs = f.Fields;
         // No pairs (empty / dict_error / depth cap) or missing chain metadata
         // (older DLL) → emit a watchable pointer leaf instead of a broken chain.
+        // E-L11: Older DLL builds omitted per-pair Entry[] `index`. Falling back
+        // to `0` stacked every dictionary pair on slot 0; drop back to a pointer
+        // leaf when any pair lacks an authoritative slot index.
         if (!canDrill || pairs is not { Count: > 0 }
-            || f.DictEntriesOffset <= 0 || f.DictStride <= 0)
+            || f.DictEntriesOffset <= 0 || f.DictStride <= 0
+            || pairs.Any(p => p.Index is null))
         {
             EmitLeaf(sb, indent, ids, desc, vartype: PointerVartype(options),
                      showAsHex: true, address: rel, offsets: null);

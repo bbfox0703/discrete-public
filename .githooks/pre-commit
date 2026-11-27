@@ -1,7 +1,10 @@
-#!/bin/sh
-# pre-commit — reject staged *.lua whose working-tree state contains CRLF.
+#!/usr/bin/env bash
+# pre-commit —
+#   1. Reject staged *.lua whose working-tree state contains CRLF.
+#   2. Run tools/check_no_local_paths.py --staged to block machine-local paths
+#      or local account/host identifiers before they enter commit history (A-L18).
 #
-# Why this exists: .gitattributes (`*.lua text eol=lf`) keeps the *index*
+# Why check (1) exists: .gitattributes (`*.lua text eol=lf`) keeps the *index*
 # LF-only, but the UnityDumpUI.Core build embeds bytes from the working-
 # tree files (not from the index) as <EmbeddedResource>s. The Phase 22a
 # AOBMaker CE-side InjectTableFile pipeline verifies the post-write
@@ -14,39 +17,61 @@
 # Install once per clone:
 #   git config core.hooksPath .githooks
 
-set -eu
+set -euo pipefail
 
-# Limit to *.lua. --diff-filter excludes deletions so a `git rm`
-# doesn't trip the check.
-files=$(git diff --cached --name-only --diff-filter=ACMR -- '*.lua')
-[ -z "$files" ] && exit 0
-
+# 1. Check staged *.lua files for working-tree CRLF using NUL-delimited output
+#    so filenames containing spaces are never split (A-L18).
 CR=$(printf '\r')
-bad=""
-for f in $files; do
+bad=()
+while IFS= read -r -d '' f; do
     [ -f "$f" ] || continue
     # -U keeps grep in binary mode; without it, MSYS/git-bash grep
     # silently strips CR before matching (the very thing we're
     # trying to catch).
     if LC_ALL=C grep -qU "$CR" "$f"; then
-        bad="$bad $f"
+        bad+=("$f")
     fi
-done
+done < <(git diff --cached --name-only -z --diff-filter=ACMR -- '*.lua')
 
-if [ -n "$bad" ]; then
+if [ "${#bad[@]}" -gt 0 ]; then
     printf 'pre-commit: working-tree CRLF detected in staged *.lua:\n'
-    for f in $bad; do printf '  %s\n' "$f"; done
+    for f in "${bad[@]}"; do printf '  %s\n' "$f"; done
     printf '\n'
     printf 'Why this blocks: the UnityDumpUI.Core build embeds working-tree\n'
     printf "bytes into the assembly manifest, and the AOBMaker CE-side\n"
     printf 'InjectTableFile verification trips on CRLF. See .githooks/pre-commit.\n'
     printf '\n'
     printf 'Fix (the .gitattributes eol=lf rule rewrites as LF on checkout):\n'
-    for f in $bad; do
-        printf '  rm %s && git checkout -- %s\n' "$f" "$f"
+    for f in "${bad[@]}"; do
+        printf '  rm "%s" && git checkout -- "%s"\n' "$f" "$f"
     done
     printf '\n'
     exit 1
+fi
+
+# 2. Identity guard over staged index contents (A-L18).
+repo_root=$(git rev-parse --show-toplevel)
+checker="$repo_root/tools/check_no_local_paths.py"
+if [ -f "$checker" ]; then
+    py_cmd=""
+    if command -v py >/dev/null 2>&1; then
+        py_cmd="py"
+    elif command -v python3 >/dev/null 2>&1; then
+        py_cmd="python3"
+    elif command -v python >/dev/null 2>&1; then
+        py_cmd="python"
+    fi
+    if [ -z "$py_cmd" ]; then
+        printf 'pre-commit: no Python interpreter on PATH -- cannot run identity guard.\n' >&2
+        exit 2
+    fi
+    set +e
+    "$py_cmd" -I "$checker" --staged
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+        exit "$rc"
+    fi
 fi
 
 exit 0

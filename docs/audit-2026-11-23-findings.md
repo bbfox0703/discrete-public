@@ -98,7 +98,7 @@
 - 成因：mutex 的擁有者是 loader thread；`OnDetach` 通常在其他 thread 執行，`ReleaseMutex` 回傳 `ERROR_NOT_OWNER`。閘門只依賴 `ERROR_ALREADY_EXISTS`，所以功能不受影響；owner thread 結束後 mutex 變成 abandoned，也沒有人等它。
 - 修法：改用 `bInitialOwner=FALSE` 並刪掉 `ReleaseMutex`，只保留 `CloseHandle`。
 
-**A-L2 · 文件與實作不一致 / 過時註解（含 AUDIT 訊號 2、3）**
+**A-L2 · 文件與實作不一致 / 過時註解（含 AUDIT 訊號 2、3） — ✅ FIXED (2026-11-27)**
 - 位置與內容：
   - `PipeServer.h:44-45`：宣稱 `RegisterDisconnectHook` 具 idempotent，但 `PipeServer.cpp:410-414` 只有 `push_back`（`std::function` 也沒辦法比對 target）。
   - `PipeServer.h:8-9`：「single in-flight client / multi-client deferred」，與 `kMaxPipeInstances = 4` + per-client thread 不符。
@@ -118,7 +118,7 @@
 - 成因：`Stop()` 一律 `ClearDisconnectHooks()`，但 `Discrete_StopPipe` 不會清掉 `g_initialized`，之後的 `StartPipe` 也就不會重新 `Discrete_Init`，GC drain 與「最後一個 client 離開時丟棄 session」的 hook 都不會再註冊。repo 內沒有人呼叫 `Discrete_StopPipe`（dead export），所以列為 Low。
 - 修法：把 `ClearDisconnectHooks()` 從 `Stop()` 移到 `Discrete_Shutdown`；或者直接移除 `Discrete_StopPipe` export。
 
-**A-L4 · `WriteLine` 為了附加 `'\n'` 複製整份回應**
+**A-L4 · `WriteLine` 為了附加 `'\n'` 複製整份回應 — ✅ FIXED (2026-11-27)**
 - 位置：`dll/src/shared/PipeServer.cpp:53-55`
 - 成因：大型回應（snapshot / scan）的尖峰記憶體變成兩倍，在 32-bit 下更容易 `bad_alloc`（會被 worker 的 catch 吃掉，client 被斷線）。
 - 修法：讓 `serialized` 直接 `push_back('\n')` 後以 move 傳入，或分成兩次 `WriteFile`。
@@ -138,21 +138,21 @@
 - 成因：讀到 `g_scanActive > 0` 之後、`store(true)` 之前，最後一個 Scope 可能已經離開並清掉旗標，結果留下一個「已 arm」的旗標。下一個 outermost Scope 進場時會清掉，所以只影響沒有持有 Scope 的 polling 端（註解說這種情況只是 advisory）。
 - 修法：用 CAS 迴圈，或在 Scope dtor 最後一位離開時再清一次（先 store false、再檢查 count）。
 
-**A-L8 · 注入器的成功判定與權限**
+**A-L8 · 注入器的成功判定與權限 — ✅ FIXED (2026-11-27)**
 - 位置：`ui/UnityDumpUI/Platform/WindowsDllInjector.cs:31`、`:48`、`:113-122`
 - 成因：x64 HMODULE 的低 32 位元在 64 KB 粒度的 ASLR 下約有 1/65536 機率剛好是 0，會被誤判成載入失敗；`0x1F0FFF` 是 XP 時代的 `PROCESS_ALL_ACCESS`，要求的權限遠多於需要（對受保護的行程更容易失敗）；沒有檢查 DLL 的 PE machine 是否與目標 bitness 相符（錯配時只會看到 `LoadLibraryW returned NULL`）。
 - 修法：失敗時再用 `EnumProcessModulesEx` / Toolhelp 確認模組是否已經載入；權限只要求 `CREATE_THREAD | VM_OPERATION | VM_WRITE | VM_READ | QUERY_INFORMATION`（與 `inject-x86` 的 `kAccess` 一致）；注入前讀 DLL 的 PE machine 並與 `IsWow64Process` 結果比對。
 
-**A-L9 · `inject-x86` 把 `IsWow64Process` 失敗回報成「目標是 x64」，非 ASCII 路徑會截斷 stdout**
+**A-L9 · `inject-x86` 把 `IsWow64Process` 失敗回報成「目標是 x64」，非 ASCII 路徑會截斷 stdout — ✅ FIXED (2026-11-27)**
 - 位置：`tools/inject-x86/main.cpp:89-98`、`:139-146`、`:125-126`
 - 成因：API 失敗（存取被拒）時回傳 false → exit 2 → UI 顯示「ProcessPicker 誤判 bitness」，誤導使用者；`wprintf` 在 C locale 下遇到非 ASCII 的 DLL 路徑會在該字元停止輸出（僅影響 log）。
 - 修法：API 失敗時改走 exit 1，並帶 `GetLastError`；印路徑前先設定 `_setmode(_fileno(stdout), _O_U8TEXT)`，或改成手動轉 UTF-8 輸出。
 
-**A-L10 · Proxy 的小問題**
+**A-L10 · Proxy 的小問題 — ✅ FIXED (2026-11-27)**
 - 位置：`dll/src/proxy/loader.cpp:141`、`:169`（`noexcept` 函式內建 `std::wstring`，`bad_alloc` 會 `terminate`）；`dll/src/proxy/version/version.cpp:68-75`、`dll/src/proxy/winmm/winmm.cpp:131-138`（`static fn_t fn` 跨執行緒非 atomic 讀寫，在 x86/x64 上是良性 data race，但形式上屬於 UB）；`dll/src/proxy/winmm/winmm.cpp:142-242`（只轉發 UnityPlayer.dll 用到的子集，遊戲另外帶的 middleware 若 import `waveOutSetVolume` / `waveOutPause` / `midiStream*` / `mixer*` 等，會出現「找不到程序進入點」而無法啟動；待驗證）。
 - 修法：`SystemDllPath` 改用固定大小的 `wchar_t` buffer；`fn` 改成 `std::atomic<fn_t>`（constant-init，符合 Pre-CRT rule 3 的精神）並用 relaxed load/store；建一份常見 middleware 的 winmm import 清單，用 `dumpbin /imports` 對照補齊。
 
-**A-L11 · Logger 跨模組併寫與 DllMain 內的例外風險**
+**A-L11 · Logger 跨模組併寫與 DllMain 內的例外風險 — ✅ FIXED (2026-11-27)**
 - 位置：`dll/src/shared/Logger.cpp:60`、`:167-173`、`:321-323`
 - 成因：proxy、backend 和「被跳過 init 的第二份 DLL」各有一份 Logger（各自的 `g_mutex`），卻寫同一個 `current.log`；CRT 的 append 是「seek 到檔尾 + write」，不是 atomic，跨模組可能互相覆寫；一方開著檔案時另一方 rotate 會遇到 sharing violation（程式已註明會留到下次重試）。`fs::temp_directory_path()` 用的是會丟例外的 overload，而且是在 DllMain 的 `Log::Init` 裡呼叫。
 - 修法：用 `CreateFileW(FILE_APPEND_DATA, FILE_SHARE_READ|WRITE|DELETE)` + `WriteFile` 取代 `ofstream`（核心保證 append 是 atomic，rename 也不會被擋）；改用 `temp_directory_path(ec)` 這個 overload。
@@ -181,12 +181,12 @@
 - 成因：在主執行緒上 inline 執行的 closure 裡，`ThreadAttachGuard` 會判斷「不在 drain 中」而照樣做 attach / detach，正是 build #54 的問題型態；目前沒有實際會走到的路徑。
 - 修法：inline 執行期間比照 `Drain()` 設定並還原 `t_inside_work_item`。
 
-**A-L17 · Proxy deploy 的批次作業會作用在被 filter 隱藏的已選列；安裝不是原子操作**
+**A-L17 · Proxy deploy 的批次作業會作用在被 filter 隱藏的已選列；安裝不是原子操作 — ✅ FIXED (2026-11-27)**
 - 位置：`ui/UnityDumpUI/ViewModels/ProxyDeployViewModel.cs:138-156`、`:207-209`；`ui/UnityDumpUI/Platform/WindowsProxyInstaller.cs:204-223`
 - 成因：選取狀態跨 filter 保留，Install / Uninstall 列舉的是 `Games` 而不是 `FilteredGames`；複製到一半失敗（例如遊戲在執行、檔案被鎖）會留下新舊版本混雜的 DLL，而另一個 proxy 已經先被刪除；`_scanCts` 從未 Dispose。
 - 修法：批次作業只處理 `FilteredGames`（或在確認對話框中列出隱藏的列）；先複製到 `*.tmp`，全部成功後再 `File.Move(overwrite)`；替換 `_scanCts` 前先 Dispose 舊的。
 
-**A-L18 · Identity guard 的覆蓋與語意**
+**A-L18 · Identity guard 的覆蓋與語意 — ✅ FIXED (2026-11-27)**
 - 位置：`tools/check_no_local_paths.py:113-124`、`:249`、`:307-317`、`:330`；`.githooks/pre-commit:21-26`；`build.ps1:389-401`
 - 成因：
   1. `runtime_identifiers()` 用 word-bounded 比對 `USERNAME` / `COMPUTERNAME` / `USERDOMAIN` / home 目錄名稱；遇到常見字（例如 Linux runner 的 home 名稱 `runner` 會命中 `xunit.runner.visualstudio`，或 `admin`、`build`、網域名 `CORP`）就產生假的 exit 1，而且整個 build 會被擋下。
@@ -195,12 +195,12 @@
   4. 確認 AUDIT §7 的訊號：exit code 語意在 `build.ps1:394-401` 是一致的（1 = 洩漏、其他非 0 = 無法執行）；但 `.githooks/pre-commit` 只檢查 Lua 的 CRLF，**沒有**跑 identity guard，所以 hook 端不存在一致性問題，也就不存在 commit 時的防線。另外 hook 的 `for f in $files` 遇到含空白的檔名會拆錯。
 - 修法：identifier 加上最短長度 / 常見字 deny-list，並允許用環境變數 opt-out 單一 identifier；`--list` 在所有分支都回傳 0；加掃 `git diff @{push}..HEAD`（或 `--branches --not --remotes -p`）的新增行；在 pre-commit 中以 `--staged` 模式呼叫 checker（掃 index 內容）；hook 改用 `git diff -z` + `while IFS= read -r -d ''`。
 
-**A-L19 · `proxy_precrt_gate.py --all` 在兩個 proxy 都沒 build 時回報 PASS**
+**A-L19 · `proxy_precrt_gate.py --all` 在兩個 proxy 都沒 build 時回報 PASS — ✅ FIXED (2026-11-27)**
 - 位置：`tools/verify/proxy_precrt_gate.py:330-334`、`:370-375`
 - 成因：「not built」只印 `[SKIP]`，不計入 failures，最後印 `PASS` 並 exit 0；一個什麼都沒測的閘門看起來跟通過一樣（同檔對 bitness 不符的處理反而有計為失敗，兩者不一致）。
 - 修法：沒有任何 proxy 被測到時回傳非 0，或至少印「NOTHING TESTED」並 exit 2。
 
-**A-L20 · Disconnect hook 在每次 client 斷線都觸發 full GC（跨模組觀察）**
+**A-L20 · Disconnect hook 在每次 client 斷線都觸發 full GC（跨模組觀察） — ✅ FIXED (2026-11-27)**
 - 位置：契約在 `dll/src/shared/PipeServer.h:26-45`；hook 本體在 `dll/src/shared/ExportAPI.cpp:10536-10556`、`:10560-10577`（Block C）
 - 成因：CE bridge 的設計是「短連線 burst」，每次 burst 斷線都會在遊戲裡跑一次 `mono_gc_collect(-1)` / `il2cpp_gc_collect(0)`（log 顯示約 50–200 ms），也就是每次 bridge 操作都造成一次可感知的卡頓。
 - 修法：GC drain 只在 `ActiveClientCount() == 1`（最後一個 client 離開）時執行，或者只在該 client 跑過標記為「重量級」的 RPC 後才執行。
@@ -315,29 +315,29 @@
 
 ### Low
 
-**B-L1 · resolver / offset discovery 的「失敗即永久」與「無限重試」兩種極端並存（雙胞胎漂移）**
+**B-L1 · resolver / offset discovery 的「失敗即永久」與「無限重試」兩種極端並存（雙胞胎漂移） — ✅ FIXED (2026-11-27)**
 - 位置：`IL2CPPResolver.cpp:18`、`:138-141`（`std::call_once`）；`IL2CPPStaticFieldsOffset.cpp:36`、`:167-169`；`IL2CPPAddressFinder.cpp:468-543`（`g_ecOnce`）；`IL2CPPMetadataRegistration.cpp:54`、`:274-277`；`IL2CPPLazyInitSlotScanner.cpp:28`、`:370-373`；對照 `MonoResolver.cpp:192-206`
 - 成因：Mono 端特地修掉了「`call_once` 在第一次**呼叫**就鎖定結果」的 bug（註解寫得很清楚），IL2CPP 端的 resolver 與四個 discovery 仍然是 `call_once`：如果在 runtime 還沒初始化完成時被觸發（static_fields 都還是 null、class cache 還是空的），失敗結果會保留到行程結束，`scan` RPC 也救不回來。反過來，Mono 只要缺少任何一個 required export，**每一次** `GetResolver()` 都會重跑 `DoResolve`：重寫 `g_resolver`（包含 `std::wstring moduleName`），而其他 thread 正在沒有鎖的狀態下讀它（data race），同時每次都寫「missing export」log（log 洪水）。
 - 修法：統一成「成功才鎖定，失敗時以節流的方式重試」（例如記錄上次嘗試的 tick，間隔 ≥ 1 秒才重試）；Mono 的 `DoResolve` 先在 local `Resolver` 上完成，再在鎖內整體 swap，讀取端也改成拿一份 snapshot（或 `std::shared_ptr<const Resolver>`）。
 
-**B-L2 · `ResolveInstanceLookup` 的陣列分支對「boxed enum」誤判；對真正的陣列則永遠到不了（實質 dead code）**
+**B-L2 · `ResolveInstanceLookup` 的陣列分支對「boxed enum」誤判；對真正的陣列則永遠到不了（實質 dead code） — ✅ FIXED (2026-11-27)**
 - 位置：`MonoAddressFinder.cpp:467-509`；`IL2CPPAddressFinder.cpp:828-870`
 - 成因：兩個 runtime 都把 enum 類別的 `element_class` 設為其底層整數型別的類別，所以 `elemClass != k` 對 enum 成立。boxed enum 物件（enum 被存進 `object` 欄位、`Dictionary<object, …>` 等情況）會被回報成 `"[0]"`、`array-element`，`len=` 是從錯誤的 offset 讀出來的。真正的陣列 class 不在 classSet（見 B-H2），而 `ExportAPI` 沒有直接呼叫 `ResolveInstanceLookup`（grep 確認），所以這個分支實際上只會在 enum 上觸發。
 - 修法：改成判斷 rank（Mono：`mono_class_get_rank`；IL2CPP：`il2cpp_class_get_rank`，或在 `il2cpp_class_is_enum` / `mono_class_is_enum` 為真時排除）；與 B-H2 的 classSet 擴充一起處理，讓陣列真的能走到這個分支。
 
-**B-L3 · Dead code / 只寫不讀的狀態**
+**B-L3 · Dead code / 只寫不讀的狀態 — ✅ FIXED (2026-11-27)**
 - `IL2CPPLazyInitSlotScanner.cpp:401-491`：`g_mapOnce`、`g_typeDefMap`、`BuildTypeDefMap()` 完全沒有呼叫者（grep 確認）。
 - `IL2CPPLazyInitSlotScanner.cpp:559-577` + `IL2CPPFieldXref.cpp:605-617`：v3.1 的 `ResolveTypeInfoSlotClass` 只在 slot「已經是 heap 指標」時才回傳 class，但 v3.0（`:594-603`）剛讀過同一個 slot 並且比對失敗，所以 v3.1 實際上不可能新增命中（只差兩次讀取之間的時間窗口）。
 - `MonoAddressFinder.cpp:136-146`：`ContainsKlass` / `ContainsVtable` 沒有呼叫者；`vtableSet`、`g_minVtable/g_maxVtable` 只用於 `GetClassRangeStats`。`:1091-1096` 在迴圈中對**未排序**的 `vtableSet` 做 `binary_search`（結果靠最後的 sort + unique 修正）；`g_minVtable` 在 Build 時是 -1、在 Invalidate 時是 0，兩處更新規則（`:750` 與 `:1095`）不一致。
 - Resolver 綁定了但從未使用：`mono_domain_get`（而且是 **required**，`MonoResolver.cpp:69`，缺少它會讓整個 Mono backend 停擺）、`string_chars` / `string_length`（兩邊都是）、`mono_object_get_size`（B-H2 的修法可以用上）。
 - 修法：刪除或接上；`mono_domain_get` 改用 `optBind`。
 
-**B-L4 · `IsKnownNotArray` 的上限語意與註解相反，而且容器沒有比照 heap-leak 模式**
+**B-L4 · `IsKnownNotArray` 的上限語意與註解相反，而且容器沒有比照 heap-leak 模式 — ✅ FIXED (2026-11-27)**
 - 位置：`IL2CPPAddressFinder.cpp:565-588`、`:628`
 - 成因：註解說「滿了之後，未知值一律視為 non-array（never hangs）」，實作卻是 `RememberNotArray` 回 false 後呼叫端直接忽略，下一次遇到同一個值又會重新 probe（VirtualQuery），正是註解想避免的 300 秒情境。`g_notArrayKlass`（最多 524K 個 node）是一般的 static 物件，行程結束時會逐一解構，也就是 Cache 註解中提到的 shutdown 卡頓。
 - 修法：加一個 `std::atomic<bool> g_notArrayFull`，滿了之後 `LooksLikeValueTypeElementArray` 對未知值直接回 false；容器改成 heap-leaked。
 
-**B-L5 · chunk 讀取失敗時只前進 4 KB，會跳過壞頁**之前**的正常頁**
+**B-L5 · chunk 讀取失敗時只前進 4 KB，會跳過壞頁**之前**的正常頁 — ✅ FIXED (2026-11-27)**
 - 位置：`IL2CPPClassPointerScanner.cpp:126-135`；`IL2CPPLazyInitSlotScanner.cpp:233-237`；`IL2CPPClassReferenceDiagnostic.cpp:150-155`
 - 成因：`SafeReadBytes` 一次讀 1 MB，只要其中任何一頁不可讀就整段失敗；`pos += 4096` 之後再讀 1 MB 仍然包含同一個壞頁。壞頁之前（最多將近 1 MB）的正常頁永遠不會被掃到，而且會白白重試約 256 次。
 - 修法：失敗時把這個 chunk 改成逐頁（4 KB）讀取，只跳過真正讀不到的頁。
@@ -352,29 +352,29 @@
 - 成因：(1) 宣告類別是 **struct** 時，`this` 是 unboxed 指標，AOT 碼的 disp 是 `offset - kObjectHeader`，scanner 卻用含 header 的 offset，所以會全部漏掉，同時產生 false positive。(2) 透過 `FindClass` 的 `.` → nested fallback（ns = `Ns.Outer`、name = `Inner`）解析出來的巢狀類別，method index 裡記錄的是 `ns = "Ns"`、`className = "Outer/Inner"`，`m.ns != ns` 會讓宣告類別的方法數變成 0，靜默回傳 0 筆。
 - 修法：值型別時 disp 減去 header；比對改用 `ce.klass == target.klass`（在 `MethodIndexEntry` 中記錄 `Il2CppClass*`），不要比字串。
 
-**B-L8 · 兩個 backend 的實作細節漂移**
+**B-L8 · 兩個 backend 的實作細節漂移 — ✅ FIXED (2026-11-27)**
 - `IL2CPPMethodInvoker.cpp:218`、`:222`、`:298`：仍然寫死 `0x10` / `0x14` / `0x18`；Mono 端已改用 `ManagedLayout`（`MonoMethodInvoker.cpp:227`、`:231`、`:307`）。
 - `IL2CPPClassWalker.cpp:449`（`method_get_flags` 直接呼叫）、`:91`、`:486`、`:550`、`:556`；`MonoClassWalker.cpp:316-319`、`:378-383`；`MonoFieldXref.cpp:205-224`、`:371-380`；`IL2CPPFieldXref.cpp:220-233`：同一份檔案裡有的 accessor 包了 SEH、有的沒有，與 `IL2CPPClassWalker.cpp:24-30` 的政策註解不符。
 - `IL2CPP::ResolveStaticBaseAddress`（`IL2CPPClassWalker.cpp:522-527`）沒有 attach guard，Mono 版（`MonoClassWalker.cpp:478-483`）有；`ReadClassInfo` 只有 Mono 有 `forceSetup`。
 - 修法：IL2CPP 的 invoker 改用 `ManagedLayout`；accessor 統一走 `SehCall`。
 
-**B-L9 · 方法解析：只取第一個 overload、先 JIT 再判斷是否歧義**
+**B-L9 · 方法解析：只取第一個 overload、先 JIT 再判斷是否歧義 — ✅ FIXED (2026-11-27)**
 - 位置：`MonoClassWalker.cpp:503-523`（`CompileMethodByName`）、`IL2CPPClassWalker.cpp:545-559`（`GetMethodPointerByName`）；`MonoMethodInvoker.cpp:199-205`；`MonoMethodFinder.cpp:191-201`
 - 成因：前兩者遇到 overload 時靜默回傳第一個符合的方法；`ResolveOverload` 會先對每個候選呼叫 `mono_compile_method`，之後才因為 `ambiguous_method` 放棄（多做一次 JIT，產生副作用）。`FindMethodInstances` 只排除 abstract，不排除 open generic method / generic type definition 的方法；在舊版 Mono 上，`mono_compile_method` 失敗時可能用 `mono_raise_exception` 丟出 managed exception，而不是回傳 NULL（待驗證）。
 - 修法：歧義判斷放在 JIT 之前；跳過 `is_generic` / generic container 的方法；overload API 回傳 `ambiguous` 狀態。
 
-**B-L10 · `MethodSignatureFormat` 的 humanSuffix 碰撞**
+**B-L10 · `MethodSignatureFormat` 的 humanSuffix 碰撞 — ✅ FIXED (2026-11-27)**
 - 位置：`dll/src/shared/MethodSignatureFormat.h:30-42`
 - 成因：`System.Int32[]` 不在對照表中，所以變成 `Int32Arr` 而不是 `intArr`（與 scalar 的 keyword 規則不一致）；`Ns.Outer`1/Inner<…>` 先在 `<` 截斷、再在 `` ` `` 截斷，結果只剩 `Outer`，同一個泛型外層類別下的不同巢狀型別會得到相同的 suffix；`List<int>` / `List<string>` 都變成 `List`。CE 符號名稱可能因此重複。
 - 修法：先剝掉 `[]` 再查表；先處理 `/` 取最後一段，再處理 `` ` `` 與 `<`；泛型引數縮寫後併入 suffix（例如 `List_int`）。
 
-**B-L11 · 小型邊界問題**
+**B-L11 · 小型邊界問題 — ✅ FIXED (2026-11-27)**
 - `MonoFieldXref.cpp:124-127`：`switch` 的 `count * 4` 在 x86 的 `size_t` 下可能溢位，只影響畸形 IL 的對齊。
 - `MonoFieldXref.cpp:305`、`IL2CPPFieldXref.cpp:492`：`limit == 0` 時第一筆就 truncated（上層已驗證，屬防禦性問題）。
 - `MonoAddressFinder.cpp:630` vs `:681-683`、`IL2CPPAddressFinder.cpp:908` vs `:932-934`：`scannedFrom` 與 `rangeStart` 在接近位址 0 時用不同的條件計算，buffer index 與 `p` 會錯位（實際上碰不到）。
 - `MonoMethodInvoker.cpp:605-626`、`IL2CPPMethodInvoker.cpp:615-645`：提早返回的錯誤路徑沒有填 `elapsedMs`，也沒有寫 log。
 
-**B-L12 · 過時 / 錯誤的註解**
+**B-L12 · 過時 / 錯誤的註解 — ✅ FIXED (2026-11-27)**
 - `IL2CPPFieldXref.h:30-37`：說 v1 不偵測寫入（`0x89`），但 `IL2CPPFieldXref.cpp:54-61` 已經把它分類為 `write`。
 - `MonoMethodFinder.h:29`：`declaringClass` 寫的是「Outer/Inner form」，實作（`MonoMethodFinder.cpp:106-113`、`IL2CPPMethodFinder.cpp:113-120`）只取葉節點名稱，沒有走 nesting chain，巢狀類別的 overload 因此無法直接 round-trip 回 `FindClass`。
 - `MonoDomain.cpp:18-19`：「Pipe worker is single-threaded today」，與多 client 的現況不符。
@@ -510,11 +510,11 @@
 
 ### Low
 
-**C-L1 · Magic string 規則破口（確認 AUDIT 訊號 2）與 dead 常數**
+**C-L1 · Magic string 規則破口（確認 AUDIT 訊號 2）與 dead 常數 — ✅ FIXED (2026-11-27)**
 - 位置：字面值 `"ping"`（`ExportAPI.cpp:2002`）、`"lookupSymbol"`（`:3127`）、`"listSymbols"`（`:3137`）、`"getMetadataStats"`（`:6534`、`:8762`）、`"il2cppGetMetadataTypeFields"`（`:8503`）、`"il2cppGetMetadataRegistration"`（`:8780`）；`MagicStrings.h:54-56`、`:64` 的 `CmdExportCeXml` / `CmdExportCsx` / `CmdExportSdkHeader` / `CmdIL2CPPGetGenericInstances` 沒有任何 handler，repo 中也沒有引用（只剩 `docs/Archiutecture.md:365-384` 還在描述）；`MagicStrings.h:3`、`:41` 說「mirror in C# UI/Constants.cs」，但 UI 端沒有任何指令常數，`BackendAdapter` 全部用字面值（`:127`、`:180`、`:1024` 等），而 `PipeFor` 的路由表（`:49-56`）也是用字串比對。
 - 修法：補上 `CmdPing` / `CmdLookupSymbol` / `CmdListSymbols` / `CmdGetMetadataStats` / `CmdIL2CPPGetMetadataTypeFields` / `CmdIL2CPPGetMetadataRegistration`；刪除 4 個 dead 常數，並同步更新 `Archiutecture.md`；UI 端新增 `PipeCommands` 靜態類別，讓 `BackendAdapter` 和 `BulkCommands` 都引用它。
 
-**C-L2 · `pipe-protocol.md` 與程式碼的覆蓋率落差，以及其他文件 / 註解漂移**
+**C-L2 · `pipe-protocol.md` 與程式碼的覆蓋率落差，以及其他文件 / 註解漂移 — ✅ FIXED (2026-11-27)**
 - 位置與內容：
   - `docs/pipe-protocol.md` 完全沒有出現（grep 0 筆）的已註冊指令：`scanFieldValue`、`beginValueScan`、`refineValueScan`、`endValueScan`、`cancelScan`、`beginGroupScan`、`refineGroupScan`、`queryGroupCandidates`、`endGroupScan`、`getDispatcherStats`、`dumpClassInfo`、`setKeepForeground`、`getKeepForeground`、`diagnoseClassReferences`、`dumpLazyInitSlots`、`il2cppGetMetadataRegistration`、`getMetadataStats`（共 17 個；它們的契約目前只寫在 `MagicStrings.h` 的註解裡）。
   - `MagicStrings.h:233-237` 說 class-scoped `scanFieldValue` 要傳 `ns` / `class`，但 `resolveClassFromArgs`（`ExportAPI.cpp:3773-3775`、`:7152-7154`）讀的是 `namespace` / `name`（`tools/Test-ScanFieldValue.ps1:143-145` 也用後者）。照文件呼叫一定得到「missing 'assembly' or 'name' arg」。
@@ -524,7 +524,7 @@
   - `ExportAPI.cpp:2993-2994` 的註解宣稱「otherwise treat as ref by default below」，實際上不會成立（見 C-H2）。
 - 修法：逐條修正；`pipe-protocol.md` 補上這 17 個指令的 request / response 章節（可以直接搬 `MagicStrings.h` 中的註解，再讓 `MagicStrings.h` 只保留指向文件的連結）。
 
-**C-L3 · 次要的雙胞胎漂移（AUDIT 訊號 1 的實例）**
+**C-L3 · 次要的雙胞胎漂移（AUDIT 訊號 1 的實例） — ✅ FIXED (2026-11-27)**
 - `findInstances`：IL2CPP 預設排除 metadata arena 並 `skipMapped=true`（`ExportAPI.cpp:8854-8861`），Mono 直接 `ScanForPointer(vt, limit, &stats)`（`:5307`），不排除 `MEM_MAPPED`，但 Mono snapshot 的 fast path 自己又加了 `skipMapped=true`（`:4182-4184`，註解說這樣是為了「和 wide walk 結果一致」）。同一個類別在 `findInstances` 和 snapshot 中的 instance 集合因此不同。
 - `listFieldValuesAcrossInstances` 兩個 backend 都**沒有**套用 `filterMatches`（`:5426`、`:8970`），而 `findInstances` 預設 `validate=true`。對同一個類別，「列出所有 instance」和「列出所有 instance 的某個欄位」得到的 instance 集合不同（後者含有 stale 的 stack slot）。
 - `liveOnly` 只有 Mono 實作（`:5276-5308`），IL2CPP 會靜默忽略。
@@ -533,12 +533,12 @@
 - Mono `getMetadataStats`（`:6530-6550`）仍然遵循「刻意不開 outer guard」的舊說法，每次連線都對每個 assembly 做一次 attach / detach；`searchSymbols` / `dumpClassInfo` / snapshot 已經改成「一個 outer guard」才是正確作法（`:4946-4956`）。這個 handler 在每次 connect 時都會執行（`BackendAdapter.cs:192-207`）。
 - 修法：Mono `findInstances` / `listFieldValuesAcrossInstances` 傳入 `skipMapped=true`；`listFieldValuesAcrossInstances` 呼叫 `filterMatches`（至少做 validate）；IL2CPP `liveOnly` 回 `live_walk_unavailable:true`；`snapshotBegin` 在 domain 為 null 時回錯誤；把 `class_is_valuetype` 移進現有的 guard；`getMetadataStats` 外層加一個 `ThreadAttachGuard`，並更新註解。
 
-**C-L4 · `parseAddr` 太寬鬆：接受尾端垃圾字元、在 x86 上靜默截斷、十進位字串會被當成 16 進位**
+**C-L4 · `parseAddr` 太寬鬆：接受尾端垃圾字元、在 x86 上靜默截斷、十進位字串會被當成 16 進位 — ✅ FIXED (2026-11-27)**
 - 位置：`dll/src/shared/ExportAPI.cpp:2405-2425`
 - 成因：`_strtoui64` 遇到第一個非 hex 字元就停，`"0x1234zz"` 會被當成 `0x1234`；超過 64 bit 時飽和成 `ULLONG_MAX`；`static_cast<uintptr_t>` 在 x86 Mono 上會把 `0x1_2345_6789` 截成 `0x23456789`。`writeMemory` / `setInstanceField` 因此可能寫到使用者沒有輸入的位址。負的 JSON 整數也會被直接 cast。
 - 修法：要求整個字串都被吃完（`*end == '\0'`），檢查 `errno == ERANGE`，並在 `val > UINTPTR_MAX` 時回 false；只接受非負整數；文件寫明「字串一律是 hex」。
 
-**C-L5 · 參數驗證的邊界**
+**C-L5 · 參數驗證的邊界 — ✅ FIXED (2026-11-27)**
 - `refineValueScan`：`limit > 50000` 時被**重設成 5000**，而不是 clamp 到 50000（`ExportAPI.cpp:2098-2099`）；`refineGroupScan` / `queryGroupCandidates` / `beginGroupScan` 的 limit 處理方式相同（`:2208-2209`、`:2347-2348`、`:6160-6161`）。
 - `queryGroupCandidates`：負的 `offset` 經 `static_cast<size_t>` 變成極大值，`offset + limit` 會溢位，`truncated` 的計算也跟著錯（`:2346`、`:2357`、`:2368`）。
 - `walkArray`：`elementSize` 沒有上限，`std::vector<std::uint8_t> buf(elemSize)` 最多會配置 4096 次（`:3013-3014`、`:3065`）；32-bit 遊戲中可能造成 `bad_alloc` 或大量記憶體壓力。
@@ -548,7 +548,7 @@
 - `PipeServer::Dispatch` 遇到 `"args": null` 時直接把 null 傳給 handler（`PipeServer.cpp:155`），handler 中的 `args.value(...)` 會丟 `type_error 306`，結果變成 `-32000`，而不是「沒有參數」。
 - 修法：一律 clamp 到上限；`offset` 用 `int64` 讀取並拒絕負值；`elementSize` 上限設為 4096；`dictLimit` 上限設為 4096；`uint*` 拒絕負數；`char` 改用 UTF-8 → UTF-16 解碼取第一個 code unit；`Dispatch` 在 `args` 為 null 或不是 object 時改成 `json::object()`。
 
-**C-L6 · Session 管理的語意與資源**
+**C-L6 · Session 管理的語意與資源 — ✅ FIXED (2026-11-27)**
 - 位置：`dll/src/shared/ValueScanSession.h:76-95`、`:124`；`GroupScanSession.h:87-106`；`SnapshotSession.h:181-189`；`ValueScanSession.cpp:27`、`GroupScanSession.cpp:20`、`SnapshotSession.cpp:26`；`ExportAPI.cpp:4274`、`:4829`
 - 成因：
   1. Session 沒有 owner，id 是全域遞增的小整數。任何 client 都能 refine 或 end 別人的 session（CE bridge 和 UI 共用同一個 id 空間），而且 `ActiveClientCount() > 1` 的判斷在兩個 client 同時斷線時，兩邊都會看到 2，於是都不會 drop。
@@ -556,14 +556,14 @@
   3. Mono snapshot session 同時保留 `plan`（全部 instance 位址）和 `classes`（全部已解碼的 JSON）直到 End；chunk 是 `classes.push_back(s.classes[i])` 深複製，而且在全域 mutex 內進行。32-bit 遊戲中的尖峰記憶體因此是「完整 snapshot × 2 個 chunk」再加上 plan。
 - 修法：session 記錄建立者的 client id（由 PipeServer 傳入 handler context），refine / end 時驗證；可以加一個背景 timer，或在每次 RPC 時順便檢查過期；Mono session 在 decode 完成後 `plan.clear(); plan.shrink_to_fit();`，chunk 改成先在鎖內取出 shared payload 的參考，再到鎖外複製。
 
-**C-L7 · 32-bit OOM 閘門與 build id 的小問題**
+**C-L7 · 32-bit OOM 閘門與 build id 的小問題 — ✅ FIXED (2026-11-27)**
 - 位置：`dll/src/shared/ExportAPI.cpp:125-132`、`:4052-4053`、`:8088-8089`；`dll/src/shared/SnapshotSession.cpp:100-104`；`ExportAPI.cpp:1873-1874`、`:4217-4221`
 - 成因：
   1. 拒絕門檻是固定的 3 GB private usage，只適用於「WOW64 + LARGEADDRESSAWARE」；非 LAA 的舊 32-bit 遊戲上限是 2 GB，這個閘門永遠不會觸發。
   2. `ComputeGameBuildId` 找不到模組時會改用 host EXE，所以永遠不會回傳空字串；`if (id.empty())` 的 legacy `mono.dll` fallback 是 dead code，Unity < 5.4 的遊戲實際上 hash 的是 EXE。
 - 修法：門檻改成以 `GlobalMemoryStatusEx().ullTotalVirtual` 的某個比例計算（例如 75%）；`ComputeGameBuildId` 在找不到指定模組時回傳空字串，把 fallback 決定權交給呼叫端（handshake 與 snapshot 需要一起改，才能維持兩邊一致）。
 
-**C-L8 · `PipeClient` / `BackendAdapter` 的小問題**
+**C-L8 · `PipeClient` / `BackendAdapter` 的小問題 — ✅ FIXED (2026-11-27)**
 - `SnapshotChunkAsync` 在 `Send` 回傳、`_gate` 已釋放之後，才讀取 `PipeFor("snapshotChunk").LastReadMs` 等欄位（`BackendAdapter.cs:1287-1290`）。bulk pipe 是共用的，這段期間如果有其他 bulk RPC（例如 `findInstances`）完成，telemetry 就會被覆蓋。`PipeClient.cs:58-60` 宣稱「single-flight, so plain fields are safe right after the call」並不成立。修法：讓 `SendAsync` 回傳一個 telemetry struct，或把數值放在 envelope 外的 out 參數。
 - `CancelScanAsync` 每次都新開一條連線（`BackendAdapter.cs:1036-1047`），斷線時會觸發 DLL 的 full GC disconnect hook（見 A-L20），而且 `cancelScan` 沒有目標 id，會連 CE bridge 的 scan 一起取消（見 C-M1）。
 - Handshake 沒有 capability 清單（`ExportAPI.cpp:1904-1950`），UI 只能用 `backend` 字串判斷 `dumpIl2cppSymbols` / `diagnoseClassReferences` / `monoCompileMethod` 等只有單一 backend 才有的指令，這和「UI 必須 backend-agnostic」的規則相衝突（Block E 的訊號 1 部分源自這裡）。修法：handshake 加上 `"commands": [...]`，內容就是 `g_handlers` 的 key。
@@ -664,63 +664,63 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 
 ### Low
 
-**D-L1 · `Cargo.toml` 宣告 `rust-version = "1.85"`，但程式碼用了 Rust 1.88 才穩定的 let-chains**
+**D-L1 · `Cargo.toml` 宣告 `rust-version = "1.85"`，但程式碼用了 Rust 1.88 才穩定的 let-chains — ✅ FIXED (2026-11-27)**
 - 位置：`dll/rust/Cargo.toml:17`；`dll/rust/src/chain/decode.rs:547`、`:703`、`:896-897`（`if … && let Some(..) = …`）
 - 成因：MSRV 宣告過時。實際建置有 `rust-toolchain.toml`（1.100.0）保護，但 `rust-version` 會誤導 `cargo` 的 MSRV 檢查和讀者。
 - 修法：改成實際的最低版本（≥ 1.88），或直接和 toolchain pin 保持一致。
 
-**D-L2 · 「v16–v39 accepted」的實際語意是「只有 24/27/29/31–39 能解析型別表」；log 訊息誤導，還有 dead 分支（audit-2026-11-23-plan.md 訊號 2）**
+**D-L2 · 「v16–v39 accepted」的實際語意是「只有 24/27/29/31–39 能解析型別表」；log 訊息誤導，還有 dead 分支（audit-2026-11-23-plan.md 訊號 2） — ✅ FIXED (2026-11-27)**
 - 位置：`dll/rust/src/metadata/parser.rs:521-531`（`type_def_sizeof` 只涵蓋 24/27/29/31–39）、`:564`、`:1212`（method 的 `30` 分支，因為 type 表永遠不會載入而成為 dead code）、`:630-641`、`:673-684`（v16–23/25/26/28/30/32–34 都印「shares v31's layout … accepting」）
 - 成因：v16–v23、v25、v26、v28、v30 會 `loaded()==true`，但 `tables_loaded==false`（只有字串），log 卻說「與 v31 共用 layout，已接受」，使用者看到的是「metadata 載入成功、0 個 type」。v32–v34 走 v29 / v31 的 layout，從未用實際檔案驗證過。CLAUDE.md 的「v16–v39 accepted」也沒有說清楚這一點。
 - 修法：soft warning 分成兩種：「strings-only（不支援型別表）」與「未驗證、比照 v31 解析」。`getMetadataStats` 加上 `typeTablesSupported`。刪掉 `30` 分支，或者有意支援 v30 時同時把它加進 `type_def_sizeof`。CLAUDE.md 的描述改成「v16–v39 accepted (strings); type tables for v24/27/29/31–39」。
 
-**D-L3 · Rust 端大部分配置是 infallible，OOM 時會 abort 整個遊戲；legacy C++ 在這裡會丟 `bad_alloc`，可以被 pipe server 接住**
+**D-L3 · Rust 端大部分配置是 infallible，OOM 時會 abort 整個遊戲；legacy C++ 在這裡會丟 `bad_alloc`，可以被 pipe server 接住 — ✅ FIXED (2026-11-27)**
 - 位置：`dll/rust/src/chain/mod.rs:378`、`:388`、`:468`；`dll/rust/src/xref/mod.rs:172`、`:190`、`:255`；`dll/rust/src/metadata/parser.rs:1129`、`:1271`、`:1355`、`:988-990`；`dll/rust/src/metadata/ffi.rs:519-522`；`dll/rust/src/ffi.rs:67-70`（`format!`）
 - 成因：Rust 配置失敗會走 `handle_alloc_error` → abort，`catch_unwind` 接不住。只有 1 MiB 掃描 buffer、metadata 檔案 buffer 和 `group_match` 有用 `try_reserve`；結果向量、`HashSet`、`format!` 都沒有。x64 IL2CPP 遊戲碰到的機率很低（所以列為 Low），但這和 `group_match.rs:21-26`「never aborts the host on OOM」的設計精神不一致。
 - 修法：結果向量改用 `try_reserve` 逐步成長，失敗時截斷並在結果中標記 `truncated`；`ffi::log` 中的 `format!` 在 panic 路徑上改用固定大小的 stack buffer。
 
-**D-L4 · `Parser::Get()` 在 process 生命週期內只載入一次：失敗不重試，成功則常駐整個檔案**
+**D-L4 · `Parser::Get()` 在 process 生命週期內只載入一次：失敗不重試，成功則常駐整個檔案 — ✅ FIXED (2026-11-27)**
 - 位置：`dll/src/il2cpp/MetadataParserHostPath.cpp:27-34`；`dll/rust/src/metadata/parser.rs:33-34`、`:363-364`；`dll/rust/src/metadata/ffi.rs:27-33`、`:513-528`
 - 成因：magic static 第一次呼叫時如果 `BackendDetector` 還解析不到 data dir，或檔案暫時被鎖住，之後所有 metadata RPC 都會永遠回「not loaded」，直到遊戲重啟。成功時則把整個 `global-metadata.dat`（上限 256 MiB）複製一份放在遊戲 process 裡，另外 `decoded_strings` 會快取所有 sanitize 過的字串，直到 process 結束。C++ wrapper 拿到字串後會立即複製（`MetadataParserRs.cpp:259-263`），所以這個快取只是為了讓指標在「回傳到複製之間」保持有效。
 - 修法：`Get()` 改成「失敗後允許在下次呼叫時重試」（用 mutex 保護的 `std::optional<Parser>`，不要用 magic static）；檔案改用 `CreateFileMapping` 唯讀映射，不要整份複製。如果維持複製，`try_decode_string_default` 可以改成由呼叫端提供 buffer 的 API，省掉這個永久快取。
 
-**D-L5 · `scan_rip` 在 chunk 邊界會重複回報，REX 前綴之後的 6-byte 形式會被歸到前一個 byte（待驗證呼叫端是否去重）**
+**D-L5 · `scan_rip` 在 chunk 邊界會重複回報，REX 前綴之後的 6-byte 形式會被歸到前一個 byte（待驗證呼叫端是否去重） — ✅ FIXED (2026-11-27)**
 - 位置：`dll/rust/src/xref/mod.rs:159-193`
 - 成因：(a) chunk 的最後一個 byte 如果是 REX，前一個 chunk 會靠 overlap 回報 7-byte 形式（ip = p−1）；下一個 chunk 的 `p == 0` 不檢查 `buf[p-1]`，又會回報一次 6-byte 形式（ip = p），兩筆指向同一個 target。(b) 任何 6-byte 候選只要前一個 byte 剛好是 `0x40-0x4F`（上一條指令的 imm / disp），就會被跳過，改成以 ip−1 的 7-byte 形式回報，而 ip−1 可能落在前一個 method 的範圍內。行為和 legacy 相同，所以 golden 檢查抓不到。
 - 修法：確認 `IL2CPPFieldXref` 的歸屬與去重邏輯；如果沒有去重，就以 `(ip, opcode)` 去重，並在 7-byte 形式命中時，額外驗證 `buf[p]` 是否確實在前一條指令的結尾之後（實際上無法得知時，兩種 ip 都保留，交給 method 歸屬去判斷）。
 
-**D-L6 · Rust 的長時間掃描無法取消**
+**D-L6 · Rust 的長時間掃描無法取消 — ✅ FIXED (2026-11-27)**
 - 位置：`dll/rust/src/chain/mod.rs:390-478`；`dll/rust/src/xref/mod.rs:138-196`、`:211-260`；`include/discrete_core.h:266-269`、`:313-325`
 - 成因：chain detector 與 RIP xref 會逐 MiB 掃描整個 `GameAssembly.dll`（可達數百 MB），C ABI 沒有 cancel 參數，`ScanCancel::RequestCancel()` 或 client 斷線都停不下來，worker thread 會一直佔著直到掃描完成。
 - 修法：C ABI 加一個 `const volatile int32_t* cancel` 參數（或 `dc_cancel_fn` callback），每個 chunk 開始時檢查一次；取消時回傳的 handle 帶 `cancelled=1`，C++ 端再對應到既有的 `ScanCancel` 語意。
 
-**D-L7 · 非建置類 target 也會遞增 build number，`dist\build_number.txt` 和 `dist\` 中的 binary 對不起來**
+**D-L7 · 非建置類 target 也會遞增 build number，`dist\build_number.txt` 和 `dist\` 中的 binary 對不起來 — ✅ FIXED (2026-11-27)**
 - 位置：`build.ps1:431-438`（只要沒有 `-NoBumpBuildNumber`，任何 target 都會 bump）、`:769-771`、`:823-826`、`:848`
 - 成因：`build test`、`build deploy`、`build deploy-scripts`、`build ui` 都會讓 `build_number.txt` 加 1，接著 `Copy-CompanionArtifacts` 把新號碼複製到 `dist\`（`deploy` 還會再複製到 CE 目錄），但 DLL 仍是上一個號碼。之後回報問題時，用 build number 對照 binary 就會對錯。
 - 修法：只有 `DLL` / `ProxyDLL` / `MetadataCli` / `UI` / `All` 才 bump；`Test` / `Deploy*` 一律當成 `-NoBumpBuildNumber`。
 
-**D-L8 · 過時的變數、註解與文件**
+**D-L8 · 過時的變數、註解與文件 — ✅ FIXED (2026-11-27)**
 - `build.ps1:113`：`$SLN` 指向不存在的 `ui\Discrete.sln`（實際是 `ui\UnityCEDumper.sln`），而且沒有任何地方使用（§7 訊號確認）。修法：刪除。
 - `CMakeLists.txt:144-152`、`tools/metadata-cli/CMakeLists.txt:31-33`：仍以「避免 `/external:I` 洩漏到 Zydis vendor 子目錄」作為理由，但 Zydis 已經移除。修法：改寫成現況（只剩 MinHook）。
 - `tools/metadata-cli/SymbolPipeline.h:11-15`：描述「每個 method 呼叫 `FindImageContainingMethod`」，實作（`SymbolPipeline.cpp:202-219`）改成以 image 為主走訪。修法：同步註解。
 - `dll/rust/src/metadata/layout.rs:40-43`：宣稱 `vendor/Il2CppDumperV35plus` 「pinned at bbd9c0c2」，並引用 `MetadataClass.cs` 的行號，但 `sync_vendor.ps1:80-89` 讓 reference clone 跟著上游 tip 更新，行號會漂移。修法：在 `sync_vendor.ps1` 把這個 clone 釘在 `bbd9c0c2`，或在註解中說明行號以該 commit 為準。
 
-**D-L9 · `release.yml` 的供應鏈與權限強化**
+**D-L9 · `release.yml` 的供應鏈與權限強化 — ✅ FIXED (2026-11-27)**
 - 位置：`.github/workflows/release.yml:25-26`（整個 job 都有 `contents: write`）、`:37`、`:63`、`:106`（`actions/*@vN` 浮動 tag）、`:57`（`rustup self update` 沒有釘版）
 - 成因：build 步驟會執行 repo 腳本、clone 第三方 repo、下載 crate，這些步驟都持有可寫 release 的 token；actions 使用可移動的 major tag。這和專案其他地方「精確釘版」的政策不一致。
 - 修法：actions 改用 commit SHA 釘版；拆成兩個 job：`build`（`contents: read`，產出 artifact）與 `release`（`contents: write`，只下載 artifact 並呼叫 `gh`）。`rustup self update` 改成檢查版本，不足時才更新。
 
-**D-L10 · `metadata_golden.py --record` 會直接覆蓋既有的 golden entry，不做任何比對**
+**D-L10 · `metadata_golden.py --record` 會直接覆蓋既有的 golden entry，不做任何比對 — ✅ FIXED (2026-11-27)**
 - 位置：`tools/verify/metadata_golden.py:359-368`
 - 成因：如果有人在回歸發生後執行 `--record`（例如以為只是新增 fixture），同一個檔案雜湊下的舊 golden 會被新雜湊直接蓋掉，閘門就失效了，而 diff 只會顯示 JSON 變更。
 - 修法：`--record` 預設只新增 key 不存在的 entry；要覆蓋既有 entry 時，必須加上 `--rebaseline` 並印出哪些 check 改變了。`r2_golden.py` 這次沒有檢查是否有同樣的問題，請一併確認。
 
-**D-L11 · `CodeGenModulesFinder` 的小問題**
+**D-L11 · `CodeGenModulesFinder` 的小問題 — ✅ FIXED (2026-11-27)**
 - 位置：`tools/metadata-cli/CodeGenModulesFinder.cpp:86-91`、`:109`、`:239-257`
 - 成因：(a) `Il2CppCodeGenModule::methodPointerCount` 是 `uint32_t`，後面接 4 bytes padding，這裡用 `u64` 讀取，等於假設 padding 一定是 0（MSVC 的常數初始化資料通常如此，但沒有保證）。(b) `off = cursor; continue;` 之後，迴圈本身還會再 `off += 8`，跳過一個 slot；目前只會跳過剛驗證失敗的那一格，無害，但很脆弱。(c) `moduleCount` 不含中間的 null slot，不等於實際的陣列長度。
 - 修法：只讀 4 bytes 的 count；在迴圈內改成 `off = cursor - 8`，或把迴圈改成 while；另外回報 `arraySlots`（含 null）。
 
-**D-L12 · `FindFieldDefault` / `FindTypeByName` / `FindImageContainingMethod` 每次呼叫都是 O(N) 線性掃描**
+**D-L12 · `FindFieldDefault` / `FindTypeByName` / `FindImageContainingMethod` 每次呼叫都是 O(N) 線性掃描 — ✅ FIXED (2026-11-27)**
 - 位置：`dll/rust/src/metadata/parser.rs:1100-1109`、`:1476-1487`、`:1642-1694`；呼叫端 `ExportAPI.cpp:8695-8704`、`:10104-10108`
 - 成因：每個欄位都要掃一次整張 FieldDefaults 表（大型遊戲有數萬列）；`FindImageContainingMethod` 每次都要重新走訪每個 image 的所有 type。`metadata-cli/main.cpp:989-992` 自己就記錄了這會跑上數小時。
 - 修法：仿照 `declaring_type_map`，用 `OnceLock` 延遲建立 `fieldIndex → row`、`(ns,name) → typeIdx`、`methodIdx → imageIdx` 三個索引；回傳值不變，golden 也不受影響。
@@ -812,17 +812,17 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 
 ### Low
 
-**E-L1 · `AobAaScriptGenerator` 的 `[DISABLE] {$lua}` 沒有重設 `_G.DISCRETE_HAD_ERROR`**
+**E-L1 · `AobAaScriptGenerator` 的 `[DISABLE] {$lua}` 沒有重設 `_G.DISCRETE_HAD_ERROR` — ✅ FIXED (2026-11-27)**
 - 位置：`ui/UnityDumpUI.Core/Services/Export/AobAaScriptGenerator.cs:381-397`；對照 `MonoRegisterSymbolAaScriptGenerator.cs:180-189`（已寫明原因並補上）
 - 成因：違反 `docs/lua-logging.md` 與 `AaLuaLoader.AppendHadErrorReset` 的「每個 [ENABLE] / [DISABLE] 都要重設」約定。只要之前有一次 [ENABLE] 失敗，之後每次 disable 都會讀到殘留的 `true`，Lua Engine 就一直不會關閉。
 - 修法：在 `if syntaxcheck then return end` 之後呼叫 `AaLuaLoader.AppendHadErrorReset(sb)`。
 
-**E-L2 · 產生的 AA 在前置條件失敗時用 `print + return`，CE 仍會把該項目勾成「已啟用」**
+**E-L2 · 產生的 AA 在前置條件失敗時用 `print + return`，CE 仍會把該項目勾成「已啟用」 — ✅ FIXED (2026-11-27)**
 - 位置：`AaLuaLoader.cs:33-37`、`:43-47`；`MonoRegisterSymbolAaScriptGenerator.cs:105-110`、`:115-119`；`AobAaScriptGenerator.cs:343-347`；`AddressLookupAaScriptGenerator.cs:112-116`；`CallMethodAaScriptGenerator.cs:166-171`
 - 成因：`{$lua}` 區塊 `return nil` 不會讓 AA 失敗，checkbox 照樣打勾，但 symbol 根本沒有註冊；相依於這個 symbol 的其他腳本之後才會失敗，看不出根因。`AddressLookup` 的 bridge 檢查更是多餘：它的 `{$asm}`（`alloc` / `dq`）完全不需要 bridge，卻要求先載入 bridge，並在沒有載入時把旗標設成錯誤。
 - 修法：前置條件失敗時改用 `error('[Discrete] ...')`，讓 CE 拒絕啟用（錯誤訊息仍會顯示）；`AddressLookup` 移除 bridge 檢查。
 
-**E-L3 · `CallMethodAaScriptGenerator` 的參數字面值邊界**
+**E-L3 · `CallMethodAaScriptGenerator` 的參數字面值邊界 — ✅ FIXED (2026-11-27)**
 - 位置：`CallMethodAaScriptGenerator.cs:265`（`'\0'` → `"\\0"`）、`:200-203`、`:191-198`
 - 成因：(a) Lua 的 `\ddd` 會讀取最多 3 位十進位數字，NUL 後面若緊接數字字元（例如 `"a\0" + "12"`），就會變成 `\012`（換行字元）；(b) `double.TryParse` 接受 `NaN` / `Infinity`，`ToString("R")` 輸出的 `NaN` / `Infinity` 在 Lua 中是未定義的全域變數，會變成 `argFloat(nil)`；(c) 數值解析失敗時靜默代入 0，例如使用者在 Int32 欄位輸入 `abc`，產生的腳本會以 0 呼叫 method。
 - 修法：NUL 改成 `\000`；非有限值輸出 `0/0`、`1/0`、`-1/0`；解析失敗時 `Build` 直接丟出例外（或回傳錯誤）給 VM 顯示，不要產生腳本。
@@ -832,22 +832,22 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：live 模式已經在 leaf 層級修正（`Live.cs:122-129`），template / CSX / SDK / AddressLookup 沒有。x86 遊戲上，`IntPtr` 欄位以 8 bytes 讀取會與下一個欄位重疊，CSX 的結構大小也會被高估。
 - 修法：`UnityTypeMap.Resolve` 加上 `pointerSize` 參數；Browser 的 `CurrentExportOptions` 帶入 `GamePointerSize`（與 Inspector 的 `ResolveExportOptions` 一致）。
 
-**E-L5 · CE 匯出的 `VariableType` / `Vartype` 用了 CE 不認得的 `12 Bytes` / `16 Bytes` / `24 Bytes`（待驗證）**
+**E-L5 · CE 匯出的 `VariableType` / `Vartype` 用了 CE 不認得的 `12 Bytes` / `16 Bytes` / `24 Bytes`（待驗證） — ✅ FIXED (2026-11-27)**
 - 位置：`UnityTypeMap.cs:64-71`；使用處 `CeXmlExporter.cs:426-429`（template leaf）、`CsxExporter.cs:173`
 - 成因：CE 的 variable type 只有 `Byte` / `2 Bytes` / `4 Bytes` / `8 Bytes` / `Float` / `Double` / `String` / `Array of byte` 等固定名稱。`Vector3` 等 value type 在 template 模式會被輸出成一個未知型別的 leaf，CE 可能以預設型別讀取，或拒絕載入整筆 entry。
 - 修法：value struct 改成展開為 x / y / z 的 `Float` 子項（live 模式已經這樣做），或輸出 `Array of byte` 加上 `<ByteLength>`。
 
-**E-L6 · XML 跳脫沒有過濾 XML 1.0 不允許的控制字元**
+**E-L6 · XML 跳脫沒有過濾 XML 1.0 不允許的控制字元 — ✅ FIXED (2026-11-27)**
 - 位置：`CeXmlExporter.cs:648-664`、`CsxExporter.cs:392-408`
 - 成因：混淆過的 IL2CPP 名稱，或 live 模式描述中附帶的 `f.String` 值（`Live.cs:101-102`、`:1042-1043`，也就是遊戲中的字串內容），可能含有 `\u0001`、孤立的 surrogate 等字元。這類字元會讓 CE 的 XML parser 拒絕整份表格。
 - 修法：`< 0x20`（tab / LF / CR 除外）與孤立的 surrogate 一律替換成 `?` 或 `\uXXXX` 文字。
 
-**E-L7 · Lua bridge 內嵌的 JSON 編解碼不完整**
+**E-L7 · Lua bridge 內嵌的 JSON 編解碼不完整 — ✅ FIXED (2026-11-27)**
 - 位置：`scripts/unity_symbols.lua:135`（`quote()` 只跳脫 `"`，不處理 `\` 與控制字元）、`:84`（`\n` / `\uXXXX` 被解成字面字元）、`:119-121`（無法辨識的字元會讓 `#m` 對 nil 取長度）、`:160-161`（`resp == nil` 時直接 `parseValue(nil)`）；`scripts/unity_invoke.lua:117-136`（`😀` 這類 surrogate pair 會解成 CESU-8）、`:235-238`（`inf` / `nan` 輸出 `inf` / `-nan`，不是合法的 JSON）
 - 成因：兩支腳本各自維護一份 parser，修補的程度也不同（`unity_invoke.lua` 已經處理了大部分轉義，`unity_symbols.lua` 沒有）。
 - 修法：抽出一份共用的 JSON 小模組（例如放進 `utils.lua` 或成為獨立的 embedded 檔案），兩支腳本共用；至少讓 `unity_symbols.lua` 的 `rpc` 在 `resp == nil` 時給出明確的錯誤。
 
-**E-L8 · 錯誤只在 DEBUG 時才輸出，違反 lua-logging「錯誤一律輸出」的規則**
+**E-L8 · 錯誤只在 DEBUG 時才輸出，違反 lua-logging「錯誤一律輸出」的規則 — ✅ FIXED (2026-11-27)**
 - 位置：`scripts/unity_dump.lua:92-102`（`discreteShutdown` 失敗只呼叫 `U.warn`，受 DEBUG 控制）、`BootstrapAaScriptGenerator.cs:245-251`（`pcall(discreteShutdown)` 的回傳值被丟掉）；`scripts/unity_symbols.lua:412-419`（`sigFilter` 命中多個 overload 時只有 `warn`，然後註冊第一個）
 - 成因：`Discrete_Shutdown` 逾時或失敗時，[DISABLE] 會清掉 `discrete_bridgeLoaded` 並靜默關閉 Lua Engine，使用者以為 pipe 已經停止；選錯 overload 也不會有任何提示。
 - 修法：這兩處都改用 `U.err` / `err`；bootstrap 的 [DISABLE] 檢查 `discreteShutdown()` 的回傳值，失敗時設定 `DISCRETE_HAD_ERROR`。
@@ -857,12 +857,12 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：`bootstrap()` / `teardown()` 開頭沒有重設 `DISCRETE_HAD_ERROR`，同一個 CE session 中只要之前有一次失敗，之後就永遠不會關閉 Lua Engine；`os.execute('mkdir ...')` 每次都會閃出一個 console 視窗。
 - 修法：入口呼叫 `rawset(_G, "DISCRETE_HAD_ERROR", false)`；建立目錄改用 CE 的 `createDir`（如果 `celua.txt` 有）或 `pcall(io.open)` 探測。
 
-**E-L10 · Backend-agnostic 規則的破口（audit-2026-11-23-plan.md 訊號 1）**
+**E-L10 · Backend-agnostic 規則的破口（audit-2026-11-23-plan.md 訊號 1） — ✅ FIXED (2026-11-27)**
 - 位置：`ui/UnityDumpUI/ViewModels/MainWindowViewModel.cs:1480`（symbol export 以 `Backend2 == "IL2CPP"` 控制）；`ui/UnityDumpUI/Views/MainWindow.axaml.cs:1378-1380`（以 backend 字首判斷 `supportsSignatureMatch`，實際效果等同「有連線」）；`ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs:1845-1860`（`GuessBackend` 優先採用 handshake 的值，但 fallback 仍先比對 `mono` 子字串，正是註解自承的誤判來源）
 - 成因：UI 直接依 backend 字串做功能分支，與「所有 Mono / IL2CPP 差異都藏在 pipe 協定之後」的規則不符。三處都只影響功能可用性或標籤，不影響資料正確性，所以列為 Low。
 - 修法：handshake 加上 capability 旗標（例如 `stableModuleRelativeMethods`），UI 改以旗標控制；`supportsSignatureMatch` 改成 `IsConnected`；`GuessBackend` 的 fallback 先比對 `gameassembly`，或只採用 handshake / DB 中記錄的值。
 
-**E-L11 · 早期版本遺留的 dead code 與過時註解**
+**E-L11 · 早期版本遺留的 dead code 與過時註解 — ✅ FIXED (2026-11-27)**
 - `CsxExporter.cs:87-100`、`:190-202`：同步的 `Render` → `EmitElements` 路徑完全沒有用到 `childRenderer` / `options` / `lookup` / `visited` 這四個參數（dead parameter）。
 - `CeXmlExporter.cs:237-247`：兩段連續的 `<summary>`，第一段描述的方法（回傳 primitive hint 的版本）已經不存在。
 - `MonoRegisterSymbolAaScriptGenerator.cs:101-121`：手動內嵌了一份與 `AaLuaLoader.AppendSelfLoad` 相同的 loader，兩份未來容易漂移。

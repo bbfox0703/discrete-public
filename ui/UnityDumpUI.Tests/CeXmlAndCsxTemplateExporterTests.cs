@@ -562,4 +562,135 @@ public class CeXmlAndCsxTemplateExporterTests
             Assert.Null(e.Element("Structure"));
         });
     }
+
+    // ---- 6. E-L6: XML 1.0 control characters & unpaired surrogates
+
+    [Fact]
+    public async Task CeXml_And_Csx_SanitizeInvalidXml10ControlCharsAndUnpairedSurrogates()
+    {
+        // E-L6: obfuscated IL2CPP identifiers or live string previews may contain
+        // XML-1.0-illegal chars (< 0x20 except TAB/LF/CR, lone surrogates, 0xFFFE/0xFFFF).
+        // Both exporters must sanitize them so CE's XML parser (and XDocument.Parse)
+        // accepts the output while preserving valid CJK, tabs, and emoji surrogate pairs.
+        string badName = "Obf\u0001\u0000\u001F_\uD800_\uDC00_\uFFFE_\uFFFF_合法\t😀";
+        var root = new GetClassInfoResult
+        {
+            Namespace = "Game\u0002Ns",
+            Name      = badName,
+            Fields    = new List<FieldEntry>
+            {
+                F("fld\u0007_\uD83D", "System.Int32", 0x10),
+            },
+        };
+
+        var opts = ExportOptions.Defaults with { LiveData = false, PointerSize = 8 };
+
+        string xml = await CeXmlExporter.RenderAsync(
+            "INSTANCE_ADDRESS", root, ancestors: null, "Assembly-CSharp", opts, lookup: null,
+            TestContext.Current.CancellationToken);
+        var xmlDoc = XDocument.Parse(xml); // throws XmlException if any illegal char leaked
+        Assert.Contains("\\u0001", xml);
+        Assert.Contains("\\u0000", xml);
+        Assert.Contains("\\uD800", xml);
+        Assert.Contains("\\uDC00", xml);
+        Assert.Contains("\\uFFFE", xml);
+        Assert.Contains("\\uFFFF", xml);
+        Assert.Contains("合法\t😀", xml);
+        Assert.NotNull(xmlDoc.Root);
+
+        string csx = await CsxExporter.RenderAsync(
+            root, ancestors: null, "Assembly-CSharp", opts, lookup: null,
+            TestContext.Current.CancellationToken);
+        var csxDoc = XDocument.Parse(csx);
+        Assert.Contains("\\u0001", csx);
+        Assert.Contains("\\uD800", csx);
+        Assert.Contains("合法\t😀", csx);
+        Assert.NotNull(csxDoc.Root);
+    }
+
+    // ---- 7. E-L5 + E-L11: Math struct component expansion & multi-arg generics
+
+    [Fact]
+    public async Task CeXml_And_Csx_MathStructFieldsAndArrays_ExpandToValidCeTypes_Never12Or16Or24Bytes()
+    {
+        // E-L5: Cheat Engine does not recognize "12 Bytes" / "16 Bytes" / "24 Bytes".
+        // Known Unity math structs (Vector3, Bounds, Color32, ...) must expand into
+        // valid Float/Byte sub-entries in both CE XML and CSX (fields and arrays).
+        var root = new GetClassInfoResult
+        {
+            Namespace = "Game",
+            Name      = "Spatial",
+            Fields    = new List<FieldEntry>
+            {
+                F("pos",    "UnityEngine.Vector3",   0x10),
+                F("bounds", "UnityEngine.Bounds",    0x1C),
+                F("tint",   "UnityEngine.Color32",   0x34),
+                F("path",   "UnityEngine.Vector3[]", 0x38),
+            },
+        };
+
+        var opts = ExportOptions.Defaults with
+        {
+            LiveData = false, PointerSize = 8, DrilldownDepth = 1, ArrayLimit = 2,
+        };
+
+        string xml = await CeXmlExporter.RenderAsync(
+            "INSTANCE_ADDRESS", root, ancestors: null, "Assembly-CSharp", opts, lookup: null,
+            TestContext.Current.CancellationToken);
+        var xmlDoc = XDocument.Parse(xml);
+
+        Assert.DoesNotContain("12 Bytes", xml);
+        Assert.DoesNotContain("16 Bytes", xml);
+        Assert.DoesNotContain("24 Bytes", xml);
+
+        XElement pos = FindEntry(xmlDoc, "pos : UnityEngine.Vector3");
+        Assert.Equal("1", (string?)pos.Element("GroupHeader"));
+        Assert.Null(pos.Element("Offsets"));
+        var posKids = pos.Element("CheatEntries")!.Elements("CheatEntry").ToList();
+        Assert.Equal(3, posKids.Count);
+        Assert.All(posKids, k => Assert.Equal("Float", (string?)k.Element("VariableType")));
+        Assert.Equal("+0", (string?)posKids[0].Element("Address"));
+        Assert.Equal("+4", (string?)posKids[1].Element("Address"));
+        Assert.Equal("+8", (string?)posKids[2].Element("Address"));
+
+        XElement bounds = FindEntry(xmlDoc, "bounds : UnityEngine.Bounds");
+        Assert.Equal(6, bounds.Element("CheatEntries")!.Elements("CheatEntry").Count());
+
+        XElement tint = FindEntry(xmlDoc, "tint : UnityEngine.Color32");
+        var tintKids = tint.Element("CheatEntries")!.Elements("CheatEntry").ToList();
+        Assert.Equal(4, tintKids.Count);
+        Assert.All(tintKids, k => Assert.Equal("Byte", (string?)k.Element("VariableType")));
+
+        string csx = await CsxExporter.RenderAsync(
+            root, ancestors: null, "Assembly-CSharp", opts, lookup: null,
+            TestContext.Current.CancellationToken);
+        var csxDoc = XDocument.Parse(csx);
+        Assert.DoesNotContain("12 Bytes", csx);
+        Assert.DoesNotContain("16 Bytes", csx);
+        Assert.DoesNotContain("24 Bytes", csx);
+        Assert.Contains("pos.x : System.Single", csx);
+        Assert.Contains("pos.z : System.Single", csx);
+        Assert.Contains("bounds.extents.z : System.Single", csx);
+        Assert.Contains("tint.a : System.Byte", csx);
+        Assert.Contains("[1].z System.Single", csx);
+        Assert.NotNull(csxDoc.Root);
+
+        // Sync Render also expands math structs without invalid N-Bytes Vartypes.
+        string csxSync = CsxExporter.Render(root, ancestors: null, "Assembly-CSharp");
+        Assert.DoesNotContain("12 Bytes", csxSync);
+        Assert.DoesNotContain("24 Bytes", csxSync);
+        Assert.Contains("pos.y : System.Single", csxSync);
+    }
+
+    [Fact]
+    public void UnityTypeMap_ExtractElementClass_ReturnsNullForMultiParamGenerics()
+    {
+        // E-L11: multi-parameter generics (Dictionary`2<K,V>) have no single element
+        // class and must return null rather than recursing on "K,V".
+        Assert.Null(UnityTypeMap.ExtractElementClass(
+            "System.Collections.Generic.Dictionary`2<System.String, Game.Enemy>"));
+        Assert.Null(UnityTypeMap.ExtractElementClass("Game.Pair`2<Game.A, Game.B>"));
+        Assert.Equal(("Game", "Enemy"),
+            UnityTypeMap.ExtractElementClass("System.Collections.Generic.List`1<Game.Enemy>"));
+    }
 }

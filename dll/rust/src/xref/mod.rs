@@ -33,7 +33,7 @@ mod tests;
 use std::ffi::c_void;
 
 use crate::chain::decode::{InsnDecoder, MemAct, Reg};
-use crate::ffi::{ReadFn, Reader, guard};
+use crate::ffi::{CancelCheck, CancelFn, ReadFn, Reader, guard, try_push};
 use iced_x86::Register;
 
 /// The static path reads code in 1 MiB chunks ...
@@ -85,11 +85,27 @@ pub struct DcXrefInstHit {
 /// Opaque handle behind `DcXrefRipResult*`.
 pub struct DcXrefRipResult {
     hits: Vec<DcXrefRipHit>,
+    cancelled: bool,
+    truncated: bool,
 }
 
 /// Opaque handle behind `DcXrefInstResult*`.
 pub struct DcXrefInstResult {
     hits: Vec<DcXrefInstHit>,
+    cancelled: bool,
+    truncated: bool,
+}
+
+pub(crate) struct RipScanOutput {
+    pub hits: Vec<DcXrefRipHit>,
+    pub cancelled: bool,
+    pub truncated: bool,
+}
+
+pub(crate) struct InstScanOutput {
+    pub hits: Vec<DcXrefInstHit>,
+    pub cancelled: bool,
+    pub truncated: bool,
 }
 
 // FFI rule 5: handles are shareable across the pipe's worker threads.
@@ -128,13 +144,32 @@ fn read_i32_le(b: &[u8]) -> i32 {
 /// C++ `ScanRipRelative`. Every section in order, 1 MiB chunks + 16-byte
 /// overlap; returns ALL candidates in scan order. `None` only when the chunk
 /// buffer cannot be allocated.
+#[cfg(test)]
 pub(crate) fn scan_rip(reader: &Reader, sections: &[DcXrefSection], target: usize) -> Option<Vec<DcXrefRipHit>> {
+    scan_rip_cancellable(reader, sections, target, CancelCheck::none()).map(|r| r.hits)
+}
+
+pub(crate) fn scan_rip_cancellable(
+    reader: &Reader,
+    sections: &[DcXrefSection],
+    target: usize,
+    cancel: CancelCheck,
+) -> Option<RipScanOutput> {
     let mut out = Vec::new();
+    let mut cancelled = false;
+    let mut truncated = false;
     // Allocated up front, like the legacy vector (even with no sections).
     let mut buf = try_buffer(CHUNK_SIZE + OVERLAP)?;
 
     for sec in sections {
+        if cancelled || truncated {
+            break;
+        }
         let mut failed_pages = 0usize;
+        // D-L5: carry the last owned byte of the preceding contiguous span so
+        // `p == 0` at a chunk boundary still sees a trailing REX prefix from
+        // the prior chunk and never re-emits the 6-byte duplicate.
+        let mut prev_owned_end: Option<(usize, u8)> = None;
         reader.scan_readable_spans(
             sec.va,
             sec.size,
@@ -142,7 +177,16 @@ pub(crate) fn scan_rip(reader: &Reader, sections: &[DcXrefSection], target: usiz
             OVERLAP,
             &mut buf,
             &mut failed_pages,
+            cancel,
+            &mut cancelled,
             |span_va, span, owned_len| {
+                let prev_end = prev_owned_end;
+                prev_owned_end = if owned_len > 0 {
+                    Some((span_va.wrapping_add(owned_len), span[owned_len - 1]))
+                } else {
+                    None
+                };
+
                 let read_want = span.len();
                 // Candidates start only in the owned part; a 7-byte read must fit.
                 if read_want < 7 {
@@ -163,15 +207,24 @@ pub(crate) fn scan_rip(reader: &Reader, sections: &[DcXrefSection], target: usiz
                             let end_ip = start_ip.wrapping_add(7);
                             let hit_target = end_ip.wrapping_add(disp as isize as usize);
                             if hit_target == target {
-                                out.push(DcXrefRipHit { ip: start_ip, opcode: b1 });
+                                if !try_push(&mut out, DcXrefRipHit { ip: start_ip, opcode: b1 }) {
+                                    truncated = true;
+                                    return false;
+                                }
                                 continue;
                             }
                         }
                     }
 
                     // 6-byte form, skipped right after a REX byte (that would be
-                    // the 7-byte form starting one byte earlier).
-                    if p > 0 && is_rex(span[p - 1]) {
+                    // the 7-byte form starting one byte earlier — including across
+                    // a contiguous chunk boundary, D-L5).
+                    let prev_is_rex = if p > 0 {
+                        is_rex(span[p - 1])
+                    } else {
+                        matches!(prev_end, Some((end_va, last_b)) if end_va == span_va && is_rex(last_b))
+                    };
+                    if prev_is_rex {
                         continue;
                     }
 
@@ -181,7 +234,10 @@ pub(crate) fn scan_rip(reader: &Reader, sections: &[DcXrefSection], target: usiz
                         let end_ip = start_ip.wrapping_add(6);
                         let hit_target = end_ip.wrapping_add(disp as isize as usize);
                         if hit_target == target {
-                            out.push(DcXrefRipHit { ip: start_ip, opcode: b0 });
+                            if !try_push(&mut out, DcXrefRipHit { ip: start_ip, opcode: b0 }) {
+                                truncated = true;
+                                return false;
+                            }
                         }
                     }
                 }
@@ -189,21 +245,37 @@ pub(crate) fn scan_rip(reader: &Reader, sections: &[DcXrefSection], target: usiz
             },
         );
     }
-    Some(out)
+    Some(RipScanOutput { hits: out, cancelled, truncated })
 }
 
 /// C++ `ScanInstanceAccesses`. Linear-decodes each range (stops at the first
 /// 0xCC or decode failure; an unreadable range is skipped) and returns every
 /// matching operand in order. `None` only when the read buffer cannot be
 /// allocated.
+#[cfg(test)]
 pub(crate) fn scan_inst(reader: &Reader, ranges: &[DcXrefRange], field_offset: usize) -> Option<Vec<DcXrefInstHit>> {
+    scan_inst_cancellable(reader, ranges, field_offset, CancelCheck::none()).map(|r| r.hits)
+}
+
+pub(crate) fn scan_inst_cancellable(
+    reader: &Reader,
+    ranges: &[DcXrefRange],
+    field_offset: usize,
+    cancel: CancelCheck,
+) -> Option<InstScanOutput> {
     let mut out = Vec::new();
+    let mut cancelled = false;
+    let mut truncated = false;
     let mut dec = InsnDecoder::new();
 
     let max_len = ranges.iter().map(|m| m.len).max().unwrap_or(0);
     let mut buf = try_buffer(max_len)?;
 
-    for (mi, m) in ranges.iter().enumerate() {
+    'methods: for (mi, m) in ranges.iter().enumerate() {
+        if cancel.is_cancelled() {
+            cancelled = true;
+            break;
+        }
         let method_start = m.start;
         let range_len = m.len;
         if range_len == 0 {
@@ -247,13 +319,16 @@ pub(crate) fn scan_inst(reader: &Reader, ranges: &[DcXrefRange], field_offset: u
                         MemAct::None => continue,
                     }
                 };
-                out.push(DcXrefInstHit { method: mi, ip: insn_ip, write: u8::from(write) });
+                if !try_push(&mut out, DcXrefInstHit { method: mi, ip: insn_ip, write: u8::from(write) }) {
+                    truncated = true;
+                    break 'methods;
+                }
             }
 
             consumed += len;
         }
     }
-    Some(out)
+    Some(InstScanOutput { hits: out, cancelled, truncated })
 }
 
 /// Borrows `(ptr, n)` as a slice; NULL or `n == 0` is the empty slice.
@@ -287,14 +362,39 @@ pub unsafe extern "C" fn dc_xref_rip_scan(
     read: Option<ReadFn>,
     read_ctx: *mut c_void,
 ) -> *mut DcXrefRipResult {
-    guard("dc_xref_rip_scan", std::ptr::null_mut(), || {
+    // SAFETY: forwarded caller contract; NULL cancel callback is a no-op.
+    unsafe { dc_xref_rip_scan_cancellable(sections, n, target, read, read_ctx, None, std::ptr::null_mut()) }
+}
+
+/// D-L6: Runs `scan_rip` with an optional cooperative cancellation callback.
+///
+/// # Safety
+/// Same as [`dc_xref_rip_scan`], plus `cancel` / `cancel_ctx` must remain valid
+/// for the duration of the call when `cancel` is `Some`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dc_xref_rip_scan_cancellable(
+    sections: *const DcXrefSection,
+    n: usize,
+    target: usize,
+    read: Option<ReadFn>,
+    read_ctx: *mut c_void,
+    cancel: Option<CancelFn>,
+    cancel_ctx: *mut c_void,
+) -> *mut DcXrefRipResult {
+    guard("dc_xref_rip_scan_cancellable", std::ptr::null_mut(), || {
         let Some(read) = read else { return std::ptr::null_mut() };
         // SAFETY: caller contract on `sections`.
         let sections = unsafe { input_slice(sections, n) };
         // SAFETY: caller contract on `read` / `read_ctx`.
         let reader = unsafe { Reader::new(read, read_ctx) };
-        match scan_rip(&reader, sections, target) {
-            Some(hits) => Box::into_raw(Box::new(DcXrefRipResult { hits })),
+        // SAFETY: caller contract on `cancel` / `cancel_ctx`.
+        let cancel_check = unsafe { CancelCheck::new(cancel, cancel_ctx) };
+        match scan_rip_cancellable(&reader, sections, target, cancel_check) {
+            Some(o) => Box::into_raw(Box::new(DcXrefRipResult {
+                hits: o.hits,
+                cancelled: o.cancelled,
+                truncated: o.truncated,
+            })),
             None => std::ptr::null_mut(),
         }
     })
@@ -333,6 +433,30 @@ pub unsafe extern "C" fn dc_xref_rip_result_get(r: *const DcXrefRipResult, i: us
     })
 }
 
+/// D-L6: returns 1 when the RIP scan stopped early due to cancellation (0 for NULL).
+///
+/// # Safety
+/// `r` must be NULL or a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dc_xref_rip_result_cancelled(r: *const DcXrefRipResult) -> i32 {
+    guard("dc_xref_rip_result_cancelled", 0, || {
+        // SAFETY: caller contract.
+        unsafe { r.as_ref() }.map_or(0, |r| i32::from(r.cancelled))
+    })
+}
+
+/// D-L3: returns 1 when the RIP scan truncated hits due to OOM (0 for NULL).
+///
+/// # Safety
+/// `r` must be NULL or a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dc_xref_rip_result_truncated(r: *const DcXrefRipResult) -> i32 {
+    guard("dc_xref_rip_result_truncated", 0, || {
+        // SAFETY: caller contract.
+        unsafe { r.as_ref() }.map_or(0, |r| i32::from(r.truncated))
+    })
+}
+
 /// Frees a handle (NULL is a no-op).
 ///
 /// # Safety
@@ -363,14 +487,39 @@ pub unsafe extern "C" fn dc_xref_inst_scan(
     read: Option<ReadFn>,
     read_ctx: *mut c_void,
 ) -> *mut DcXrefInstResult {
-    guard("dc_xref_inst_scan", std::ptr::null_mut(), || {
+    // SAFETY: forwarded caller contract; NULL cancel callback is a no-op.
+    unsafe { dc_xref_inst_scan_cancellable(ranges, n, field_offset, read, read_ctx, None, std::ptr::null_mut()) }
+}
+
+/// D-L6: Runs `scan_inst` with an optional cooperative cancellation callback.
+///
+/// # Safety
+/// Same as [`dc_xref_inst_scan`], plus `cancel` / `cancel_ctx` must remain valid
+/// for the duration of the call when `cancel` is `Some`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dc_xref_inst_scan_cancellable(
+    ranges: *const DcXrefRange,
+    n: usize,
+    field_offset: usize,
+    read: Option<ReadFn>,
+    read_ctx: *mut c_void,
+    cancel: Option<CancelFn>,
+    cancel_ctx: *mut c_void,
+) -> *mut DcXrefInstResult {
+    guard("dc_xref_inst_scan_cancellable", std::ptr::null_mut(), || {
         let Some(read) = read else { return std::ptr::null_mut() };
         // SAFETY: caller contract on `ranges`.
         let ranges = unsafe { input_slice(ranges, n) };
         // SAFETY: caller contract on `read` / `read_ctx`.
         let reader = unsafe { Reader::new(read, read_ctx) };
-        match scan_inst(&reader, ranges, field_offset) {
-            Some(hits) => Box::into_raw(Box::new(DcXrefInstResult { hits })),
+        // SAFETY: caller contract on `cancel` / `cancel_ctx`.
+        let cancel_check = unsafe { CancelCheck::new(cancel, cancel_ctx) };
+        match scan_inst_cancellable(&reader, ranges, field_offset, cancel_check) {
+            Some(o) => Box::into_raw(Box::new(DcXrefInstResult {
+                hits: o.hits,
+                cancelled: o.cancelled,
+                truncated: o.truncated,
+            })),
             None => std::ptr::null_mut(),
         }
     })
@@ -406,6 +555,30 @@ pub unsafe extern "C" fn dc_xref_inst_result_get(r: *const DcXrefInstResult, i: 
             }
             None => 0,
         }
+    })
+}
+
+/// D-L6: returns 1 when the instance scan stopped early due to cancellation (0 for NULL).
+///
+/// # Safety
+/// `r` must be NULL or a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dc_xref_inst_result_cancelled(r: *const DcXrefInstResult) -> i32 {
+    guard("dc_xref_inst_result_cancelled", 0, || {
+        // SAFETY: caller contract.
+        unsafe { r.as_ref() }.map_or(0, |r| i32::from(r.cancelled))
+    })
+}
+
+/// D-L3: returns 1 when the instance scan truncated hits due to OOM (0 for NULL).
+///
+/// # Safety
+/// `r` must be NULL or a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dc_xref_inst_result_truncated(r: *const DcXrefInstResult) -> i32 {
+    guard("dc_xref_inst_result_truncated", 0, || {
+        // SAFETY: caller contract.
+        unsafe { r.as_ref() }.map_or(0, |r| i32::from(r.truncated))
     })
 }
 

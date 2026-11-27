@@ -1046,4 +1046,38 @@ public class CeXmlExporterLiveTests
         Assert.Contains("<Address>+10</Address>", xml);   // slot 0: dataOff (0x10)
         Assert.Contains("<Address>+14</Address>", xml);   // slot 1: dataOff + 4
     }
+
+    [Fact]
+    public async Task RenderLive_Dictionary_MissingPairIndex_FallsBackToPointerLeaf()
+    {
+        // E-L11: older DLL responses without per-pair `index` must fall back to a
+        // pointer leaf rather than stacking every pair onto Entry[0].
+        const string baseAddr = "0x000000000000B900";
+        var live = new FakeLive();
+        live.AddInstance(baseAddr, new List<WalkedField>
+        {
+            new()
+            {
+                Name = "legacy_dict",
+                Type = "System.Collections.Generic.Dictionary<System.String,System.Int32>",
+                Offset = 0x20, Address = "0x000000000000B920",
+                Dict = true, DictCount = 2,
+                DictEntriesOffset = 0x10, DictDataOffset = 0x20, DictStride = 0x18,
+                Fields = new List<WalkedField>
+                {
+                    new() { Name = "[a]", Type = "System.Int32", Offset = 0x10, Index = null, Value = Json("1") },
+                    new() { Name = "[b]", Type = "System.Int32", Offset = 0x10, Index = null, Value = Json("2") },
+                },
+            },
+        });
+
+        string xml = await CeXmlExporter.RenderAsync(
+            baseAddr, RootClass(), ancestors: null, "Assembly-CSharp",
+            ExportOptions.Defaults with { LiveData = true, DrilldownDepth = 2 },
+            live, TestContext.Current.CancellationToken);
+
+        Assert.Contains("legacy_dict", xml);
+        Assert.DoesNotContain("[a]", xml);
+        Assert.DoesNotContain("[b]", xml);
+    }
 }

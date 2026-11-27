@@ -12,6 +12,265 @@ this file grows too large.
 
 -----
 
+## 2026-11-27 (build 1588) — Fix A-L18 + A-L19 (completes 100% of Block A and 118/118 of the entire 2026-11-23 audit: identity guard deny-list / `--staged` / unpushed diff scan / `--list` semantics, pre-commit hook wiring, `proxy_precrt_gate.py` zero-target non-zero exit)
+
+- **Bug fixes (`A-L18`, `A-L19` — completes 100% of Block A and all 118/118 Critical/High/Medium/Low findings in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md)):**
+  - **`A-L18` (`tools/check_no_local_paths.py`, `.githooks/pre-commit`):**
+    - Added `COMMON_WORDS` deny-list (preventing false positives on CI runner usernames/hostnames such as `runner`, `admin`, `build`, `corp`) plus `DISCRETE_IDENTITY_ALLOW` env-var opt-out in `runtime_identifiers()`.
+    - Fixed `--list` semantics so it prints every finding group (commit messages, unpushed diffs, AND tracked files — never early-returning on `msg_hits`) and always returns `EXIT_OK (0)`.
+    - Added `unpushed_commit_added_lines()` (`git log --branches --not --remotes --format=COMMIT:%H -p --no-color --unified=0`) so leaks committed locally and later overwritten before push are caught prior to `git push`.
+    - Added `--staged` mode (`git diff --cached --name-only -z --diff-filter=ACMR` + `git show :<path>`) and expanded `selftest()` from 11 to 16 cases covering unpushed diff leaks, `--list` multi-category output, `--staged` pass/fail, and `COMMON_WORDS` / `DISCRETE_IDENTITY_ALLOW`.
+    - Updated `.githooks/pre-commit` (`#!/usr/bin/env bash`, LF-only) to iterate staged `*.lua` files via NUL-delimited `git diff -z` + `while IFS= read -r -d ''` (safe for filenames with spaces) and run `tools/check_no_local_paths.py --staged` on every commit.
+  - **`A-L19` (`tools/verify/proxy_precrt_gate.py`):**
+    - Tracked `tested` count in `run_all()`; when zero proxy DLLs are found/tested in `--dist`, prints `NOTHING TESTED - no proxy DLLs found in <dist>` and exits with code `2` instead of reporting `PASS` (exit `0`).
+  - Marked `A-L18` and `A-L19` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md) (`118/118` fixed, `0` remaining).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1588) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, `inject-x86.exe`, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; `check_no_local_paths.py --selftest` 16/16 OK, full & `--staged` CHECK OK; `proxy_precrt_gate.py --all` PASS (exit 0 on `dist/`, exit 2 `NOTHING TESTED` on empty dir); C# xUnit v3 tests 1262 passed (0 failed, 0 skipped, locked mode); Rust core dev 118 (x64) / 119 (x86) + release `+crt-static` 118 (x64) / 119 (x86) passed; C++ `discrete_dll_test` 964 passed (x64) / 964 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
+## 2026-11-27 (build 1587) — Fix A-L8 + A-L9 + A-L17 (least-privilege injector with PE-arch & loaded-module fallback, `inject-x86` `IsWow64Process` & UTF-8 fixes, filtered-only proxy bulk ops & atomic staged proxy install)
+
+- **Bug fixes (`A-L8`, `A-L9`, `A-L17`):**
+  - **`A-L8` (`ui/UnityDumpUI/Platform/WindowsDllInjector.cs`):**
+    - Replaced legacy `PROCESS_ALL_ACCESS (0x1F0FFF)` with least-privilege `PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_QUERY_INFORMATION` (matching `inject-x86`'s `kAccess`).
+    - Added `TryReadPeMachine` and `ValidateDllMachineForTarget` to validate the DLL's PE COFF Machine (`0x014C` x86 vs `0x8664` x64) against `IsWow64Process` (failing loudly if `IsWow64Process` itself fails) before touching remote memory or spawning `inject-x86.exe`.
+    - Added AOT-safe `TryVerifyModuleLoaded` (`EnumProcessModulesEx` + `GetModuleFileNameExW`) fallback when `GetExitCodeThread` returns `0`, eliminating the ~1/65536 x64 ASLR low-32-bit-zero false-failure bug; set UTF-8 stdout/stderr encoding on `inject-x86.exe` `ProcessStartInfo`.
+  - **`A-L9` (`tools/inject-x86/main.cpp`):**
+    - Split `IsWow64Process` API failure (`QueryTargetIsWow64` returning `false` → exit `1` with `GetLastError`) from confirmed x64 targets (exit `2`) so access-denied errors never report a misleading bitness mismatch.
+    - Converted wide DLL path / invalid PID arguments to UTF-8 via `WideCharToMultiByte(CP_UTF8, ...)` before `printf`/`fprintf` so non-ASCII paths never truncate stdout under the default C locale.
+  - **`A-L17` (`ui/UnityDumpUI/ViewModels/ProxyDeployViewModel.cs`, `ui/UnityDumpUI/Views/ProxyDeployWindow.axaml.cs`, `ui/UnityDumpUI/Platform/WindowsProxyInstaller.cs`):**
+    - Scoped `InstallSelectedAsync` and `UninstallSelectedAsync` to `FilteredGames.ToList()` so filter-hidden rows selected earlier are never modified silently (while surfacing `(+N hidden)` in `SummaryText`), and implemented `IDisposable` on `ProxyDeployViewModel` (wired on `ProxyDeployWindow.Closed`) to cancel and release `_scanCts` and row handlers.
+    - Rewrote `WindowsProxyInstaller.InstallSync` as a 3-phase atomic staged replacement (`*.discrete.tmp` staging → `.discrete.bak` backup + `File.Move(overwrite: true)` commit → delete backups and mutually-exclusive other Discrete proxy only after every required file succeeds, with full rollback on any lock/copy failure).
+  - Added 4 C# regression tests in `ui/UnityDumpUI.Tests/ProxyInstallerAndDeployViewModelTests.cs` (`InstallSelected_AndUninstallSelected_OnlyActOnFilteredVisibleRows`, `Install_RollsBackAtomically_WhenTargetFileIsLocked_LeavingOtherProxyUntouched`, `ProxyDeployViewModel_Dispose_CancelsInFlightScanCleanly`, `WindowsDllInjector_TryReadPeMachine_AndValidateDllMachineForTarget`).
+  - Marked `A-L8`, `A-L9`, and `A-L17` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1587) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, `inject-x86.exe`, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1262 passed (0 failed, 0 skipped, locked mode); Rust core dev 118 (x64) / 119 (x86) + release `+crt-static` 118 (x64) / 119 (x86) passed; C++ `discrete_dll_test` 964 passed (x64) / 964 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
+## 2026-11-27 (build 1586) — Fix A-L2 + A-L4 + A-L10 + A-L11 + A-L20 (keyed idempotent disconnect hooks & doc sync, zero-copy `WriteLine`, atomic proxy thunks & middleware `winmm` exports, atomic `FILE_APPEND_DATA` Logger, heavy-RPC-gated disconnect GC drain)
+
+- **Bug fixes (`A-L2`, `A-L4`, `A-L10`, `A-L11`, `A-L20`):**
+  - **`A-L2` (`dll/src/shared/{PipeServer.{h,cpp},Logger.h,ForegroundHook.h}`, `dll/CMakeLists.txt`, `dll/src/proxy/loader.cpp`, `dll/src/shared/ExportAPI.cpp`):**
+    - Made `PipeServer::RegisterDisconnectHook(std::string key, DisconnectHook hook)` genuinely idempotent by key (updating an existing key in place rather than appending duplicates) and updated callers (`"gc-drain"`, `"session-cleanup"`).
+    - Synced stale comments across `PipeServer.h` (multi-client `kMaxPipeInstances = 4` + bounded `Stop()` drain), `PipeServer.cpp` (bounded worker drain), `dll/CMakeLists.txt` (x86 proxy builds), `Logger.h` (DllMain fallback on `CreateThread` failure), `ForegroundHook.h` (`UnsubclassAllGameWindows` on `Shutdown()`), and `loader.cpp`.
+  - **`A-L4` (`dll/src/shared/PipeServer.cpp`):**
+    - Changed `WriteLine` to take `std::string` by value (`std::move(serialized)`), append `'\n'` in place without duplicating large response buffers (halving 32-bit peak memory on large snapshots/scans), and write in 16 MiB overlapped chunks.
+  - **`A-L10` (`dll/src/proxy/{version/version.cpp,winmm/winmm.cpp,winmm/winmm.def}`):**
+    - Replaced non-atomic `static fn_t fn` in `PROXY_THUNK` with constant-initialized `static std::atomic<fn_t> fn{nullptr}` (acquire/release load/store), eliminating formal UB while preserving pre-CRT zero-init safety (verified via `tools/verify/proxy_precrt_gate.py --all`).
+    - Added 48 common middleware `winmm.dll` forwarding thunks + `.def` exports (`waveOutPause/Restart/GetVolume/SetVolume/GetErrorTextA/GetID/Message`, `waveInStop/GetPosition/GetErrorTextA/W/Message`, `midiOutGetNumDevs/GetDevCapsA/W`, `midiIn*`, `midiStream*`, `joyGetPos/GetDevCapsA`, `mixer*`, `mmioOpenA/Read/Write/Seek/Descend/Ascend`) with arities verified against Windows SDK `10.0.26100.0` headers.
+  - **`A-L11` (`dll/src/shared/Logger.cpp`):**
+    - Replaced `std::ofstream` appends with `CreateFileW(FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, ...)` + single-buffer `WriteFile` so cross-module writes (proxy + backend) land atomically at EOF and never block concurrent rotation with sharing violations.
+    - Switched `LogBaseDirectory()` from throwing `fs::temp_directory_path()` to non-throwing `fs::temp_directory_path(ec)` + `GetTempPathW` fallback, and wrapped `Init()` / `Write()` in `try/catch` guards.
+  - **`A-L20` (`dll/src/shared/{PipeServer.{h,cpp},ExportAPI.cpp}`):**
+    - Added `PipeServer::MarkHeavyCommands(...)` and per-worker `CurrentClientRanHeavyRpc()` tracking (`findFieldReferences`, `searchSymbols`, `snapshotBegin`, `dumpClassInfo`, `dumpIl2cppSymbols`, `beginValueScan`, `beginGroupScan`, `scanFieldValue`, `findInstances`, `listFieldValuesAcrossInstances`, `diagnoseClassReferences`, `dumpLazyInitSlots`), gating both Mono and IL2CPP disconnect GC-drain hooks so lightweight short-lived CE bridge bursts incur zero full-GC stall on disconnect.
+  - Added C++ unit test `Test_AL11_LoggerAtomicAppendAndConcurrentRename` in `dll/tests/dll_core_test.cpp` (+8 checks on x64 and x86).
+  - Marked `A-L2`, `A-L4`, `A-L10`, `A-L11`, and `A-L20` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1586) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; `proxy_precrt_gate.py --all` PASS; C# xUnit v3 tests 1258 passed (0 failed, 0 skipped, locked mode); Rust core dev 118 (x64) / 119 (x86) + release `+crt-static` 118 (x64) / 119 (x86) passed; C++ `discrete_dll_test` 964 passed (x64) / 964 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
+## 2026-11-27 (build 1584) — Fix B-L9 + B-L10 + B-L11 + B-L12 (completes 100% of Block B: ambiguity & open-generic guards before JIT, collision-free `MethodSignatureFormat` suffixes, near-zero backward-scan clamping, `Outer/Inner` `declaringClass` & doc sync)
+
+- **Bug fixes (`B-L9`, `B-L10`, `B-L11`, `B-L12` — completes 100% of Block B Critical/High/Medium/Low findings):**
+  - **`B-L9` (`dll/src/mono/{MonoResolver.{h,cpp},MonoClassWalker.{h,cpp},MonoMethodFinder.cpp,MonoMethodInvoker.cpp}`, `dll/src/il2cpp/IL2CPPClassWalker.{h,cpp}`, `dll/src/shared/ExportAPI.cpp`, `docs/pipe-protocol.md`):**
+    - Opt-bound `mono_class_is_generic` and `mono_method_is_generic` in `MonoResolver` (with arity backtick fallback when unbound) and guarded `MonoMethodFinder::FindMethodInstances`, `MonoMethodInvoker::ResolveOverload`, and `MonoClassWalker::CompileMethodByName` so open-generic classes/methods never invoke `mono_compile_method`.
+    - Updated `Mono::CompileMethodByName` and `IL2CPP::GetMethodPointerByName` to scan all matching overloads first, record `ambiguous` / `matchCount`, and bail out before JIT / pointer resolution on ambiguity; surfaced `"ambiguous"` and `"match_count"` in `monoCompileMethod` and updated `docs/pipe-protocol.md`.
+  - **`B-L10` (`dll/src/shared/MethodSignatureFormat.h`):**
+    - Rewrote `ShortenManagedTypeName` to peel trailing array rank specifiers (`[]`, `[,]`, jagged `[][]`) BEFORE checking the primitive table (`System.Int32[]` → `intArr`), parse and recursively shorten top-level generic arguments in both `<...>` and Mono `[...]` forms (`List`1<System.Int32>` → `List_int` vs `List_string`, `Dictionary`2<K, V>` → `Dictionary_K_V`), and slice the innermost segment after `/` or `.` at bracket depth 0 BEFORE stripping arity backticks (`Ns.Outer`1/Inner` → `Inner`).
+  - **`B-L11` (`dll/src/shared/AddressBounds.h`, `dll/src/mono/MonoAddressFinder.cpp`, `dll/src/il2cpp/IL2CPPAddressFinder.cpp`):**
+    - Added `AddressBounds::ComputeBackwardScanRange` and migrated `Mono::WhatIsAt`, `IL2CPP::WhatIsAt`, and `IL2CPP::WhatIsAtAcceptingArrays` onto it so near-zero addresses clamp `maxSteps` cleanly with `scannedFrom == rangeStart == start - (maxSteps - 1) * stride` and exact `bufIdx == p - rangeStart` alignment.
+  - **`B-L12` (`dll/src/mono/MonoMethodFinder.cpp`, `dll/src/il2cpp/IL2CPPMethodFinder.cpp`, `dll/src/il2cpp/IL2CPPFieldXref.h`):**
+    - Walked `class_get_nesting_type` (Mono) / `class_get_declaring` (IL2CPP) in `FindMethodInstances` to emit `Outer/Inner` `declaringClass` and outermost `declaringNamespace` so nested types round-trip back into `FindClass`.
+    - Updated `IL2CPPFieldXref.h` header documentation to accurately describe v1 static reads/writes (`0x89`), v2 chain, v3 lazy-init slot, and instance-field heuristic scanning.
+  - Added C++ unit test suite `Test_BL10_BL11_MethodSignatureAndScanRange` in `dll/tests/dll_core_test.cpp` (+89 checks on x64 and x86).
+  - Marked `B-L9`, `B-L10`, `B-L11`, and `B-L12` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1584) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1258 passed (0 failed, 0 skipped, locked mode); Rust core dev 118 (x64) / 119 (x86) + release `+crt-static` 118 (x64) / 119 (x86) passed; C++ `discrete_dll_test` 956 passed (x64) / 956 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
+## 2026-11-27 (build 1583) — Fix B-L2 + B-L3 + B-L8 (rank/enum guard on array detection, dead-code & unsorted `vtableSet` cleanup, `mono_domain_get` optBind, SEH & `ResolveStaticBaseAddress` attach-guard parity)
+
+- **Bug fixes (`B-L2`, `B-L3`, `B-L8`):**
+  - **`B-L2` (`dll/src/mono/{MonoResolver.{h,cpp},MonoAddressFinder.cpp}`, `dll/src/il2cpp/{IL2CPPResolver.{h,cpp},IL2CPPAddressFinder.cpp}`):**
+    - Bound optional `mono_class_get_rank` / `il2cpp_class_get_rank` in both resolvers and added `IsMonoArrayClass` / `IsIl2CppArrayClass` helpers requiring `class_get_rank > 0` (or `!isEnum` fallback when `class_get_rank` is unbound) before trusting `element_class != k`, eliminating boxed-enum-as-array misclassification in both `ResolveInstanceLookup` and `Get*ClassExtentInfo`.
+  - **`B-L3` (`dll/src/il2cpp/{IL2CPPLazyInitSlotScanner.{h,cpp},IL2CPPFieldXref.cpp}`, `dll/src/shared/ExportAPI.cpp`, `dll/src/mono/{MonoAddressFinder.cpp,MonoResolver.cpp}`):**
+    - Removed dead `g_mapOnce` / `g_typeDefMap` / `BuildTypeDefMap()` and the redundant `ResolveTypeInfoSlotClass` fallback (which only re-read slots v3.0 had just checked) from `IL2CPPLazyInitSlotScanner`, `IL2CPPFieldXref`, and `ExportAPI::dumpLazyInitSlots`.
+    - Unified `g_minVtable = 0` initialization in `MonoAddressFinder::BuildClassRangeCache` (matching `InvalidateClassRangeCache`) and replaced the unsorted `std::binary_search` on `cache().vtableSet` inside `FindAllInstances` with O(1) deduplication via `cache().vtableToKlass.emplace(vt, kl).second` followed by a single sort.
+    - Demoted unused `mono_domain_get` from `tryBind` to `optBind` in `MonoResolver.cpp`.
+  - **`B-L8` (`dll/src/il2cpp/IL2CPPClassWalker.cpp`, `dll/src/mono/{MonoClassWalker.cpp,MonoFieldXref.cpp}`):**
+    - Added reentrant `ThreadAttachGuard` to `IL2CPP::ResolveStaticBaseAddress` (matching `MonoClassWalker::ResolveStaticBaseAddress`).
+    - Wrapped remaining bare resolver accessor calls across `IL2CPPClassWalker.cpp` (`FindNestedByName`, `ReadClassInfo`, `ResolveStaticFieldAddress`, `GetMethodPointerByName`) and `MonoClassWalker.cpp` (`DescribeClass`, `FindNestedByName`, `ReadClassInfo`, `ResolveStaticFieldAddress`, `CompileMethodByName`, `EnumerateLiteralFields`) in SEH leaf helpers, and routed `MonoFieldXref.cpp`'s `r.type_get_name` through SEH-safe `TypeName()`.
+  - Marked `B-L2`, `B-L3`, and `B-L8` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1583) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1258 passed (0 failed, 0 skipped, locked mode); Rust core dev 118 (x64) / 119 (x86) + release `+crt-static` 118 (x64) / 119 (x86) passed; C++ `discrete_dll_test` 867 passed (x64) / 867 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
+## 2026-11-27 (build 1581) — Fix B-L1 + B-L4 + B-L5 (race-free throttled-retry resolvers & discoveries, `IsKnownNotArray` cap enforcement & heap-leaked memos, 4 KiB page-fallback chunk scanning)
+
+- **Bug fixes (`B-L1`, `B-L4`, `B-L5`):**
+  - **`B-L1` (`dll/src/shared/ThrottledRetry.h`, `dll/src/mono/MonoResolver.cpp`, `dll/src/il2cpp/{IL2CPPResolver,IL2CPPStaticFieldsOffset,IL2CPPMetadataRegistration,IL2CPPLazyInitSlotScanner,IL2CPPAddressFinder}.cpp`):**
+    - Added shared `RetryPolicy::CanRetryNow` / `NonZeroTick` (`1000 ms` failure retry throttle) and unified both resolvers (`MonoResolver`, `IL2CPPResolver`) and all four IL2CPP lazy discoveries (`IL2CPPStaticFieldsOffset`, `IL2CPPAddressFinder::GetElementClassOffset`, `IL2CPPMetadataRegistration`, `IL2CPPLazyInitSlotScanner`) on the same "latch permanently on success via atomic acquire/release publication, throttled retry on failure" contract.
+    - Eliminated the `MonoResolver` data race (where failed retries mutated `g_resolver.moduleName` and slots in place while concurrent threads read them) by resolving into a local `Resolver`, returning an immutable `g_unresolved` fallback on failure, and publishing an immutable heap-leaked singleton on success.
+  - **`B-L4` (`dll/src/il2cpp/IL2CPPAddressFinder.cpp`):**
+    - Moved `arrayKlassSet` and `notArrayKlass` into a heap-leaked `ArrayMemoState` singleton (avoiding process-exit teardown over up to 524K `unordered_set` nodes) and added `std::atomic<bool> notArrayFull` enforced in `LooksLikeValueTypeElementArray` so hitting `kNotArrayCap` genuinely stops probing unknown values (and resets cleanly in `ResetArrayKlassMemos`).
+  - **`B-L5` (`dll/src/shared/SafeChunkRead.h`, `dll/src/il2cpp/{IL2CPPClassPointerScanner,IL2CPPLazyInitSlotScanner,IL2CPPClassReferenceDiagnostic}.cpp`):**
+    - Extended `SafePeScan::ScanReadableSpans` with optional `std::size_t* outFailedPages` tracking and migrated `IL2CPPClassPointerScanner`, `IL2CPPLazyInitSlotScanner`, and `IL2CPPClassReferenceDiagnostic::ScanRangeForPointer` off `pos += 4096` whole-chunk-retry loops so a single `PAGE_NOACCESS` / `PAGE_GUARD` page inside a 1 MiB chunk falls back to 4 KiB page reads without skipping up to ~1 MiB of readable pages ahead of it.
+  - Added C++ unit test suite `Test_BL1_BL5_RetryThrottleAndPageFallback` in `dll/tests/dll_core_test.cpp` (+14 checks on x64 and x86, including a live `VirtualAlloc` + `PAGE_NOACCESS` middle-page test).
+  - Marked `B-L1`, `B-L4`, and `B-L5` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1581) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1258 passed (0 failed, 0 skipped, locked mode); Rust core dev 118 (x64) / 119 (x86) + release `+crt-static` 118 (x64) / 119 (x86) passed; C++ `discrete_dll_test` 867 passed (x64) / 867 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
+## 2026-11-27 (build 1580) — Fix C-L1 + C-L2 (completes 100% of Block C: eliminate literal command names & dead `MagicStrings`, add UI `PipeCommands`, document all 17 missing RPCs in `pipe-protocol.md`)
+
+- **Bug fixes (`C-L1`, `C-L2` — completes 100% of Block C Critical/High/Medium/Low findings):**
+  - **`C-L1` (`dll/src/shared/MagicStrings.h`, `dll/src/shared/ExportAPI.cpp`, `ui/UnityDumpUI.Core/PipeCommands.cs`, `ui/UnityDumpUI.Core/Services/BackendAdapter.cs`, `docs/Archiutecture.md`):**
+    - Added `CmdPing`, `CmdLookupSymbol`, `CmdListSymbols`, `CmdGetMetadataStats`, `CmdIL2CPPGetMetadataTypeFields`, and `CmdIL2CPPGetMetadataRegistration` to `MagicStrings.h` and migrated all 7 literal `PipeServer::RegisterHandler("...")` calls in `ExportAPI.cpp` (0 literal registrations remaining).
+    - Removed the 4 unimplemented dead constants (`CmdExportCeXml`, `CmdExportCsx`, `CmdExportSdkHeader`, `CmdIL2CPPGetGenericInstances`) from `MagicStrings.h` and updated `docs/Archiutecture.md` to reflect actual commands + client-side exporters.
+    - Added `UnityDumpUI.Core.PipeCommands` (53 constants mirroring `MagicStrings.h` 1-to-1) and migrated `BackendAdapter.BulkCommands` plus all 41 RPC dispatch sites in `BackendAdapter.cs` off raw string literals.
+  - **`C-L2` (`docs/pipe-protocol.md`, `dll/src/shared/MagicStrings.h`, `ui/UnityDumpUI.Core/Services/BackendAdapter.cs`):**
+    - Documented all 17 previously missing registered commands in `docs/pipe-protocol.md` (`scanFieldValue`, `beginValueScan`, `refineValueScan`, `endValueScan`, `cancelScan`, `beginGroupScan`, `refineGroupScan`, `queryGroupCandidates`, `endGroupScan`, `getDispatcherStats`, `dumpClassInfo`, `setKeepForeground`, `getKeepForeground`, `diagnoseClassReferences`, `dumpLazyInitSlots`, `il2cppGetMetadataRegistration`, `getMetadataStats`), fixed the broken dispatcher error table, and synced concurrency / strict address / `handshake.commands` / snapshot cap & OOM threshold specs.
+    - Fixed stale comments & XML docs in `MagicStrings.h` (`scanFieldValue` class-scoped `namespace`/`name`, `callMethod` full Mono+IL2CPP scope, per-client disconnect cleanup) and `BackendAdapter.cs` (`WalkInstanceAsync` strict hex address note, `SnapshotBeginAsync` 8192 / 4096 hard caps).
+  - Added C# unit test `PipeCommands_HasNoDuplicateOrEmptyCommandNames` in `ui/UnityDumpUI.Tests/PipeClientReliabilityTests.cs`.
+  - Marked `C-L1` and `C-L2` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1580) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1258 passed (0 failed, 0 skipped, locked mode); Rust core dev 118 (x64) / 119 (x86) + release `+crt-static` 118 (x64) / 119 (x86) passed; C++ `discrete_dll_test` 853 passed (x64) / 853 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
+## 2026-11-27 (build 1579) — Fix C-L3 + C-L6 + C-L8 (twin-handler alignment, per-client session ownership/off-lock snapshot slicing, atomic RPC telemetry, handshake `commands` list, dual-pipe `cancelScan` reuse)
+
+- **Bug fixes (`C-L3`, `C-L6`, `C-L8`):**
+  - **`C-L3` (`dll/src/shared/ExportAPI.cpp`):**
+    - Aligned Mono `findInstances` and `listFieldValuesAcrossInstances` with IL2CPP's `skipMapped = true` default (and surfaced `regions_skip_mapped` in Mono `findInstances` logs + `scan_stats`).
+    - Wired `filterMatches` post-scan header validation into `listFieldValuesAcrossInstances` on both Mono and IL2CPP so instance lists and per-field value listings match.
+    - Reported `filter.live_walk = false` + `filter.live_walk_unavailable = true` in IL2CPP `findInstances` when `liveOnly = true` is requested.
+    - Moved `r.class_is_valuetype(k)` inside Mono `walkInstance`'s existing `ThreadAttachGuard` (eliminating an unattached Mono runtime call), and wrapped Mono `getMetadataStats` in a single outer `ThreadAttachGuard`.
+  - **`C-L6` (`dll/src/shared/PipeServer.{h,cpp}`, `dll/src/shared/{SnapshotSession,ValueScanSession,GroupScanSession}.{h,cpp}`, `dll/src/shared/ExportAPI.cpp`):**
+    - Assigned every accepted pipe worker a unique `workerClientId` bound to `thread_local t_currentClientId` (accessible via `PipeServer::CurrentClientId()`) for the full lifetime of its RPCs and disconnect hooks.
+    - Enforced per-client `ownerClientId` across `Snapshot`, `ValueScan`, and `GroupScan` `Begin` / `View` / `RefineWith` / `ViewWith` / `End` (with opportunistic expiry on every operation) and replaced the racy `ActiveClientCount() > 1` + `DropAll()` disconnect hook with per-owner `DropForOwner(cid)` + `ExpireOldSessions()`.
+    - Released Mono `snapshotBegin`'s `session->plan` (`clear()` + `shrink_to_fit()`) right after decode, moved `session->classes` into immutable `std::shared_ptr<const std::vector<ClassPayload>> sharedClasses`, and moved `snapshotChunk` JSON slice copying outside `SessionManager`'s global mutex.
+  - **`C-L8` (`dll/src/shared/PipeServer.{h,cpp}`, `dll/src/shared/ExportAPI.cpp`, `ui/UnityDumpUI.Core/Services/{PipeClient,BackendAdapter,ProtocolModels}.cs`):**
+    - Added `PipeClient.SendWithTelemetryAsync<TResult>` returning `(RpcEnvelope<TResult>, RpcTelemetry)` captured atomically inside `_gate`, and switched `BackendAdapter.SnapshotChunkAsync` to consume it instead of reading mutable `LastReadMs` / `LastParseMs` / `LastResponseChars` properties off-gate.
+    - Updated `BackendAdapter.CancelScanAsync` to prefer the already-open interactive `_pipe` in dual-pipe mode (falling back to a short-lived connection if single-pipe or busy) to avoid spawning a new pipe + triggering the DLL disconnect GC hook on every cancel.
+    - Added `PipeServer::RegisteredCommands()`, emitted `"commands"` in `BuildHandshakeJson`, and exposed `HandshakeResult.Commands` + `SupportsCommand(string)` on the UI side.
+    - Skipped negative `relOff < 0` struct member offsets in `CaptureMonoStructFields` and `CaptureIl2cppStructFields` so torn class metadata cannot emit negative numbers into `SnapshotFieldEntry.Offset` (`ulong`).
+  - Added C++ unit test suite `Test_CL6_SessionOwnershipAndSharedClasses` in `dll/tests/dll_core_test.cpp` (linked `ValueScanSession.cpp` + `GroupScanSession.cpp`, +26 checks on x64 and x86) and C# unit tests `SendWithTelemetryAsync_ReturnsCallScopedTelemetryInsideGate` & `HandshakeResult_DeserializesCommandsAndSupportsCommand` in `ui/UnityDumpUI.Tests/PipeClientReliabilityTests.cs`.
+  - Marked `C-L3`, `C-L6`, and `C-L8` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1579) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1257 passed (0 failed, 0 skipped, locked mode); Rust core dev 118 (x64) / 119 (x86) + release `+crt-static` 118 (x64) / 119 (x86) passed; C++ `discrete_dll_test` 853 passed (x64) / 853 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
+## 2026-11-27 (build 1578) — Fix C-L4 + C-L5 + C-L7 (strict `ParseAddress`, RPC parameter bounds/UTF-16 char/null args hardening, dynamic 32-bit OOM threshold & `ComputeGameBuildId` module fallback)
+
+- **Bug fixes (`C-L4`, `C-L5`, `C-L7`):**
+  - **`C-L4` (`dll/src/shared/ExportHelpers.h`, `dll/src/shared/ExportAPI.cpp`):**
+    - Replaced `_strtoui64`-based `parseAddr` with `ExportHelpers::ParseAddressStrict` / `ParseAddress`: requires full hex string consumption via `std::from_chars(..., 16)` (rejecting trailing garbage, empty/sign/whitespace strings, and 64-bit overflow), rejects negative signed JSON integers and floats, and rejects values exceeding `UINTPTR_MAX` (preventing silent x86 truncation).
+  - **`C-L5` (`dll/src/shared/ExportHelpers.h`, `dll/src/shared/ExportAPI.cpp`, `dll/src/shared/PipeServer.cpp`):**
+    - Normalized omitted, `null`, or non-object `"args"` to `json::object()` in `PipeServer::Dispatch` so handlers never throw `nlohmann::json::type_error 306` (`-32000`).
+    - Added `ClampRpcLimit` so `refineValueScan` / `refineGroupScan` / `queryGroupCandidates` / `beginGroupScan` clamp `limit > 50000` to `50000` (instead of resetting to default), `walkInstance` clamps `dictLimit` to `4096`, `snapshotBegin` clamps `structMemberCap` to `256`, and `walkArray` clamps `elementSize` to `4096`.
+    - Rejected negative `offset` in `queryGroupCandidates` with overflow-safe `[offset, end)` bounds; rejected negative values in `setInstanceField`'s `asU64` and `snapshotBegin`'s `memHeadroomMB`; removed unreachable integer branches in `setInstanceField` float/double; decoded `char` / `System.Char` via UTF-8 -> first UTF-16 code unit (`DecodeFirstUtf16CodeUnit`) in both `setInstanceField` and `callMethod` (Mono + IL2CPP).
+  - **`C-L7` (`dll/src/shared/ExportHelpers.h`, `dll/src/shared/ExportAPI.cpp`, `dll/src/shared/SnapshotSession.{h,cpp}`):**
+    - Replaced fixed 3 GB `kX86PrivateUsageRefuseThreshold` with `QueryX86PrivateUsageRefuseThreshold()` (`75%` of `GlobalMemoryStatusEx().ullTotalVirtual`, protecting both 2 GB non-LAA and 4 GB WOW64 LAA 32-bit games).
+    - Changed `ComputeGameBuildId(moduleName)` to return empty when an explicit `moduleName` is not loaded (host EXE is hashed only when `moduleName == nullptr`), unifying handshake and `snapshotBegin` on `CurrentGameBuildId()` so legacy `mono.dll` fallback works on Unity < 5.4.
+  - Added C++ unit test suite `Test_CL4_CL5_CL7_ValidationAndBuildId` in `dll/tests/dll_core_test.cpp` (+38 checks on x64 and x86).
+  - Marked `C-L4`, `C-L5`, and `C-L7` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1578) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1255 passed (0 failed, 0 skipped, locked mode); Rust core dev 118 (x64) / 119 (x86) + release `+crt-static` 118 (x64) / 119 (x86) passed; C++ `discrete_dll_test` 827 passed (x64) / 827 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
+## 2026-11-27 (build 1577) — Fix D-L3 + D-L5 + D-L6 + D-L9 (completes 100% of Block D: Rust fallible allocation & stack panic log, `scan_rip` chunk-boundary dedup, Rust cooperative scan cancellation, `release.yml` SHA-pinned split build/release jobs)
+
+- **Bug fixes (`D-L3`, `D-L5`, `D-L6`, `D-L9` — completes 100% of Block D Critical/High/Medium/Low findings):**
+  - **`D-L3` (`dll/rust/src/{ffi,chain/mod,xref/mod,metadata/parser,metadata/ffi}.rs`, `dll/rust/include/discrete_core.h`):**
+    - Replaced heap-allocating `format!` in `ffi::guard` and the Rust panic hook with a zero-alloc fixed-capacity UTF-8-safe `StackBuf<512>`.
+    - Added fallible `try_push` / `try_insert` helpers and converted result vectors / sets in `chain::detect_cancellable`, `xref::scan_rip_cancellable`, `xref::scan_inst_cancellable`, `metadata::Parser` enumerators & lazy maps, and `dc_md_try_decode_string_default` to use fallible reservations so OOM truncates gracefully instead of aborting the host game process; exposed `dc_*_result_truncated()` accessors.
+  - **`D-L5` (`dll/rust/src/xref/mod.rs`, `tools/verify/r2_golden.json`):**
+    - Carried the last owned byte `(end_va, last_byte)` across contiguous spans in `scan_rip_cancellable` so `p == 0` at a chunk boundary still sees a trailing REX prefix at `CHUNK_SIZE - 1` and suppresses the duplicate 6-byte hit; rebaselined `rip-synthetic` in `tools/verify/r2_golden.json` via `r2_golden.py --record --rebaseline --no-images` (`1970913 -> 1970879` bytes, removing the 2 boundary duplicates).
+  - **`D-L6` (`dll/rust/src/{ffi,chain/mod,xref/mod}.rs`, `dll/rust/include/discrete_core.h`, `dll/src/il2cpp/{IL2CPPChainDetector.h,IL2CPPChainDetectorRs.cpp,IL2CPPFieldXrefScan.h,IL2CPPFieldXrefScanRs.cpp,IL2CPPFieldXref.cpp}`):**
+    - Added optional `dc_cancel_fn` cooperative cancellation callback polled at every chunk start, page-fallback step, and instance-scan method; exported `dc_chain_detect_cancellable`, `dc_xref_rip_scan_cancellable`, `dc_xref_inst_scan_cancellable`, and `dc_*_result_cancelled()` accessors.
+    - Wired `Discrete::ScanCancel::IsCancelRequested()` into all three Rust scan kernels through C++ wrappers and surfaced `bool* cancelled` to `IL2CPPFieldXref.cpp`.
+  - **`D-L9` (`.github/workflows/release.yml`):**
+    - Pinned all GitHub Actions (`actions/checkout`, `actions/setup-dotnet`, `actions/upload-artifact`, `actions/download-artifact`) to full commit SHAs.
+    - Split the workflow into `build` (`permissions: contents: read`) and `release` (`needs: build`, `permissions: contents: write`, verifies artifact `.sha256` before creating/updating the draft release), and guarded `rustup self update` behind a `< 1.28.0` version check.
+  - Added Rust unit tests (`stack_buf_truncates_on_utf8_boundary_without_alloc`, `rip_rex_at_chunk_boundary_is_not_duplicated_in_next_chunk`, `rip_and_inst_support_cooperative_cancellation`, and chain cancellation FFI test).
+  - Marked `D-L3`, `D-L5`, `D-L6`, and `D-L9` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1577) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1255 passed (0 failed, 0 skipped, locked mode); Rust core dev 118 (x64) / 119 (x86) + release `+crt-static` 118 (x64) / 119 (x86) passed; C++ `discrete_dll_test` 789 passed (x64) / 789 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
+## 2026-11-27 (build 1575) — Fix D-L2 + D-L4 + D-L12 (metadata version warnings & `typeTablesSupported`, `Parser::Get()` retry + Windows read-only file mapping, lazy `OnceLock` metadata lookup indices)
+
+- **Bug fixes (`D-L2`, `D-L4`, `D-L12`):**
+  - **`D-L2` (`dll/rust/src/metadata/{parser,ffi}.rs`, `dll/rust/include/discrete_core.h`, `dll/src/il2cpp/{MetadataParser.h,MetadataParserRs.cpp}`, `dll/src/shared/ExportAPI.cpp`, `ui/UnityDumpUI.Core/Services/ProtocolModels.cs`, `CLAUDE.md`):**
+    - Split the non-verified metadata soft warning in `Parser::load_header()` into an explicit strings-only warning for versions with no `TypeDefinition` layout (v16–23/25/26/28/30) vs an unverified v31-layout warning for v32–34.
+    - Removed dead v30 match arms in `method_def_sizeof` and `get_method_definition`.
+    - Added `Parser::type_tables_supported()` / `dc_md_type_tables_supported()` / `Parser::typeTablesSupported()`, surfaced `typeTablesSupported` in `getMetadataStats` (both IL2CPP and Mono) and `MetadataStatsResult.TypeTablesSupported`, and clarified `CLAUDE.md` to distinguish strings acceptance (v16–v39) from type-table support (v24/27/29/31–39).
+  - **`D-L4` (`dll/src/il2cpp/MetadataParserHostPath.cpp`, `dll/rust/src/metadata/parser.rs`):**
+    - Replaced the one-shot magic static in `Parser::Get()` with a mutex-guarded retry loader publishing an immutable `Parser*` atomically once loaded (lock-free steady state, zero data race, retries cleanly if an earlier load failed before `BackendDetector` resolved `gameDataDir` or while the file was locked).
+    - Replaced whole-file heap copying in `Parser::load_from_path` on Windows with a read-only `CreateFileMappingW` + `MapViewOfFile` (`PAGE_READONLY` / `FILE_MAP_READ`) backing (`MetadataBacking::Mapped`) with automatic fallback to `ReadFile` and clean `UnmapViewOfFile` on drop.
+  - **`D-L12` (`dll/rust/src/metadata/parser.rs`):**
+    - Added lazy `OnceLock` indices for `find_type_by_name` (FNV-1a `(ns, 0xFF, name)` -> ascending TypeDef indices), `get_image` / `find_image_containing_method` (cached per-image `(method_start, method_end)` ranges), and `find_field_default` (`global_field_index` -> first matching row index), preserving exact linear-scan first-match semantics while eliminating O(N) / O(types) rescans per lookup.
+  - Added Rust unit tests (`version_type_tables_supported_and_split_warnings`, `load_from_path_uses_readonly_file_mapping_and_releases_on_drop`, `lazy_indices_preserve_first_match_semantics`) and C# DTO deserialization test (`MetadataStatsResult_DeserializesTypeTablesSupportedAndDegradedFlags`).
+  - Marked `D-L2`, `D-L4`, and `D-L12` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1575) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1255 passed (0 failed, 0 skipped, locked mode); Rust core dev 115 (x64) / 116 (x86) + release `+crt-static` 115 (x64) / 116 (x86) passed; C++ `discrete_dll_test` 789 passed (x64) / 789 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
+## 2026-11-27 (build 1574) — Fix D-L1 + D-L7 + D-L8 + D-L10 + D-L11 (Rust MSRV 1.88, build-only `build_number.txt` bump, stale comments/vars cleanup, golden `--rebaseline` guard, `CodeGenModulesFinder` u32 count + loop/slots fix)
+
+- **Bug fixes (`D-L1`, `D-L7`, `D-L8`, `D-L10`, `D-L11`):**
+  - **`D-L1` (`dll/rust/Cargo.toml`):** Updated `rust-version` from `"1.85"` to `"1.88"` to accurately match let-chains in `chain/decode.rs`.
+  - **`D-L7` (`build.ps1`):** Restricted `Bump-BuildNumber` to actual binary-producing targets (`DLL`, `ProxyDLL`, `MetadataCli`, `UI`, `All`) so `Test`, `CppTest`, `Deploy`, and `DeployScripts` leave `build_number.txt` aligned with the binaries in `dist\`.
+  - **`D-L8` (`build.ps1`, `CMakeLists.txt`, `tools/metadata-cli/CMakeLists.txt`, `dll/rust/src/metadata/layout.rs`):** Removed unused `$SLN` pointing to non-existent `ui\Discrete.sln`, updated Zydis-era include comments to reflect current MinHook-only `dll/vendor/`, and clarified that `layout.rs`'s `Il2CppDumperV35plus` line citations correspond to commit `bbd9c0c2`.
+  - **`D-L10` (`tools/verify/metadata_golden.py`, `tools/verify/r2_golden.py`):** Changed `--record` to add missing keys only and refuse overwriting changed existing golden entries unless `--rebaseline` is also passed (printing a per-check diff summary on rebaseline; rejecting `--rebaseline` without `--record`).
+  - **`D-L11` (`tools/metadata-cli/CodeGenModulesFinder.{h,cpp}`, `tools/metadata-cli/main.cpp`):** Read `Il2CppCodeGenModule::methodPointerCount` as 4-byte `uint32_t` (ignoring x64 alignment padding), guarded `methodPointersRva` against underflow when `methodPtrsVa == 0`, replaced the fragile `for` loop with an explicit `while` advance (`off = cursor`), and exposed `Found::arraySlots` (`array_slots` in `CmdCodeModules`) including intermediate null slots.
+  - Marked `D-L1`, `D-L7`, `D-L8`, `D-L10`, and `D-L11` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1574) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1254 passed (0 failed, 0 skipped, locked mode); Rust core dev 112/113 + release `+crt-static` 112/113 passed; C++ `discrete_dll_test` 789 passed (x64) / 789 passed (x86); `r2_golden.py --no-images` 7/7 passed; verified `--rebaseline` guard on both golden scripts.
+
+-----
+
+## 2026-11-27 (build 1573) — Fix E-L5 + E-L7 + E-L10 + E-L11 (completes 100% of Block E: CE math-struct expansion, Lua UTF-16 surrogate & JSON hardening, handshake capability flag, dead-code & doc cleanup + tests)
+
+- **Bug fixes (`E-L5`, `E-L7`, `E-L10`, `E-L11` — completes 100% of Block E Critical/High/Medium/Low findings):**
+  - **`E-L5` (`UnityTypeMap.cs`, `CeXmlExporter.cs`, `CsxExporter.cs`):**
+    - Replaced non-standard CE keywords (`12 Bytes` / `16 Bytes` / `24 Bytes`) in `UnityTypeMap.Resolve` with `Array of byte` (with `<ByteLength>` emission in `CeXmlExporter.EmitLeaf`) and added `UnityTypeMap.TryGetKnownMathComponents` covering `Vector2`/`Vector3`/`Vector4`/`Quaternion`/`Color`/`Color32`/`Rect`/`Bounds`.
+    - Expanded known Unity math structs into typed `Float` / `Byte` sub-fields across `CeXmlExporter` (fields & arrays) and `CsxExporter` (`Render`, `RenderAsync`, and arrays).
+  - **`E-L7` (`scripts/unity_symbols.lua`, `scripts/unity_invoke.lua`):**
+    - Upgraded `unity_symbols.lua` with full JSON string escaping (`escapeStr` covering `\`, `"`, `\b`/`\f`/`\n`/`\r`/`\t`, control chars `< 0x20`), full JSON unescaping including UTF-16 surrogate pairs (`\uD800-\uDBFF` + `\uDC00-\uDFFF` -> 4-byte UTF-8), strict malformed-token errors, `resp == nil` / `pcall(parseValue)` guards, and `null` encoding for non-finite numbers.
+    - Upgraded `unity_invoke.lua` to decode UTF-16 surrogate pairs into valid 4-byte UTF-8 (fixing CESU-8 output), decode `\b`/`\f`, and serialize `NaN`/`Infinity`/`-Infinity` as JSON `null`.
+  - **`E-L10` (`dll/src/shared/ExportAPI.cpp`, `ProtocolModels.cs`, `MainWindowViewModel.cs`, `MainWindow.axaml.cs`, `SnapshotViewModel.cs`):**
+    - Added `stable_module_relative_methods` capability flag to DLL handshake (`HandshakeResult.StableModuleRelativeMethods`), wired `MainWindowViewModel.CanExportSymbols()` to `SupportsStableMethodSymbols` (with fallback for older DLLs), simplified `MainWindow.axaml.cs` `supportsSignatureMatch` to `vm.IsConnected`, and checked `gameassembly`/`userassembly`/`il2cpp` before `mono` in `SnapshotViewModel.GuessBackend()`.
+  - **`E-L11` (`CeXmlExporter.cs`, `CeXmlExporter.Live.cs`, `MonoRegisterSymbolAaScriptGenerator.cs`, `AaLuaLoader.cs`, `UnityTypeMap.cs`, `SdkHeaderExporter.cs`, `docs/ui-spec.md`):**
+    - Deduplicated `MonoRegisterSymbolAaScriptGenerator`'s CT Lua loader onto `AaLuaLoader.AppendSelfLoad` (with optional `missingHint`), rejected multi-parameter generics in `UnityTypeMap.ExtractElementClass`, fell back to a pointer leaf in `CeXmlExporter.Live.cs` when legacy DLL dictionary pairs omit `Index`, removed the duplicate obsolete `<summary>` in `CeXmlExporter.cs`, fixed `docs/Architecture.md` -> `docs/Archiutecture.md` comments, and updated `docs/ui-spec.md` line reference (`MainWindow.axaml:3804`).
+  - **Tests:** Added 6 new xUnit tests across `CeXmlAndCsxTemplateExporterTests`, `CeXmlExporterLiveTests`, `BridgeLuaResourcesTests`, and `ValueScanWireAndDtoContractTests`, plus verified `unity_symbols.lua` and `unity_invoke.lua` codecs with a real `lua.EXE` behavioral test (`EL7_EL8_LUA_TESTS_PASSED`).
+  - Marked `E-L5`, `E-L7`, `E-L10`, and `E-L11` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1573) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1254 passed (0 failed, 0 skipped, locked mode); Rust core dev 112/113 + release `+crt-static` 112/113 passed; C++ `discrete_dll_test` 789 passed (x64) / 789 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
+## 2026-11-27 (build 1571) — Fix E-L1 + E-L2 + E-L3 + E-L6 + E-L8 (AA error()/HAD_ERROR/literal hardening, XML 1.0 control-char escaping, unconditional Lua error reporting + tests)
+
+- **Branch milestone:** Merged all High & Medium audit fixes from `dev` into `main` via PR #3 (`143154b`).
+- **Bug fixes (`E-L1`, `E-L2`, `E-L3`, `E-L6`, `E-L8`):**
+  - **`E-L1` (`ui/UnityDumpUI.Core/Services/Export/AobAaScriptGenerator.cs`):**
+    - Added `AaLuaLoader.AppendHadErrorReset(sb)` to `[DISABLE] {$lua}` so a prior failed `[ENABLE]` does not keep CE's Lua Engine open on subsequent clean disables.
+  - **`E-L2` (`AaLuaLoader.cs`, `AobAaScriptGenerator.cs`, `MonoRegisterSymbolAaScriptGenerator.cs`, `CallMethodAaScriptGenerator.cs`, `AddressLookupAaScriptGenerator.cs`):**
+    - Replaced `print + return` with `error('[Discrete] ...')` (keeping `_G.DISCRETE_HAD_ERROR = true`) on AA precondition failures (missing CT Lua file, parse error, bridge not loaded) so Cheat Engine rejects enabling the entry instead of ticking its checkbox.
+    - Removed the unnecessary Lua bridge check from `AddressLookupAaScriptGenerator` (pure `{$asm}` `alloc`/`registersymbol`/`dq` needs no bridge and never pops Lua Engine).
+  - **`E-L3` (`ui/UnityDumpUI.Core/Services/Export/CallMethodAaScriptGenerator.cs`):**
+    - Escaped embedded NUL in Lua single-quoted strings as `\000` (3 decimal digits) so adjacent digits cannot form `\012` etc.
+    - Emitted `0/0`, `1/0`, `-1/0` for `NaN`/`Infinity`/`-Infinity` float/double arguments instead of bare undefined Lua globals.
+    - Threw `ArgumentException` on unparseable boolean/integer/float/char argument strings (caught and surfaced by `MethodCallViewModel`) instead of silently substituting `0`.
+  - **`E-L6` (`TemplateExportHelpers.cs`, `CeXmlExporter.cs`, `CsxExporter.cs`):**
+    - Unified XML escaping in `TemplateExportHelpers.XmlEscape`, sanitizing XML 1.0 illegal control characters (`< 0x20` except `\t`/`\n`/`\r`), unpaired UTF-16 surrogates, and `0xFFFE`/`0xFFFF` as `\uXXXX` while preserving valid CJK and surrogate-pair emoji.
+  - **`E-L8` (`scripts/unity_dump.lua`, `scripts/unity_symbols.lua`, `BootstrapAaScriptGenerator.cs`):**
+    - Upgraded `discreteShutdown` failure logging from `U.warn` to unconditional `U.err`, checked `pcall(discreteShutdown)`'s return value in `BootstrapAaScriptGenerator` `[DISABLE]` (flagging `_G.DISCRETE_HAD_ERROR = true` on failure), and changed `registerMethodSymbol`'s ambiguous `sigFilter` branch to report via `err()` and return `false` instead of silently picking the first overload.
+  - **Tests:** Added 19 new xUnit tests across `AobAaScriptGeneratorTests`, `AddressLookupAaScriptGeneratorTests`, `CallMethodAaScriptGeneratorTests`, `BootstrapAaScriptGeneratorTests`, `MonoRegisterSymbolAaScriptGeneratorTests`, `CeXmlAndCsxTemplateExporterTests`, and `BridgeLuaResourcesTests`; verified Lua syntax with `lua.EXE`.
+  - Marked `E-L1`, `E-L2`, `E-L3`, `E-L6`, and `E-L8` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1571) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1248 passed (0 failed, 0 skipped, locked mode); Rust core dev 112/113 + release `+crt-static` 112/113 passed; C++ `discrete_dll_test` 789 passed (x64) / 789 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
 ## 2026-11-27 (build 1570) — Fix D-M4 + D-M5 + D-M6 + D-M7 (Rust release `+crt-static` & golden-hash build gates, `release.yml` draft/published guard, `metadata-cli` token-RID method indexing, pinned NuGet/SDK + locked-mode restores)
 
 - **Bug fixes (`D-M4`, `D-M5`, `D-M6`, `D-M7` — completes 100% of High & Medium audit findings across all 5 blocks A–E):**

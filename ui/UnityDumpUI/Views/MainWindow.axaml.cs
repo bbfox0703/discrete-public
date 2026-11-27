@@ -1371,13 +1371,10 @@ public partial class MainWindow : Window
             // when its target class matches the browser's selected class.
             // Pre-fills the Instance address textbox in MethodCallWindow.
             defaultInstanceAddress: GetDefaultMethodCallInstance(vm, asm, ns, cls),
-            // Signature-match register actions work on ANY connected Unity
-            // target — CE's "Active Mono features" dissector drives the mono_*
-            // Lua API on BOTH Mono AND IL2CPP, so this is NOT Mono-only. Enable
-            // whenever the backend is a recognised Unity runtime.
-            supportsSignatureMatch:
-                (vm.Backend2 ?? string.Empty).StartsWith("Mono",   StringComparison.OrdinalIgnoreCase) ||
-                (vm.Backend2 ?? string.Empty).StartsWith("IL2CPP", StringComparison.OrdinalIgnoreCase),
+            // E-L10: backend-agnostic — CE's "Active Mono features" dissector
+            // drives mono_* on every connected Unity runtime, so gate on
+            // IsConnected rather than parsing the backend string.
+            supportsSignatureMatch: vm.IsConnected,
             // AOBMaker standalone-app client: when its pipe is up, "Copy: aobscan"
             // / "Push aobscan to CE" route through GenerateAob for a unique AOB.
             aobMakerApp: vm.AobMakerApp,

@@ -42,7 +42,8 @@ struct RipCandidate {
 // whose RIP-relative target == `target`. Returns ALL candidates, in the order
 // the legacy loop met them (the caller stops at its own limit).
 std::vector<RipCandidate> ScanRipRelative(const std::vector<ExecSection>& sections,
-                                          std::uintptr_t target);
+                                          std::uintptr_t target,
+                                          bool* cancelled = nullptr);
 
 // Instance path. One method body to decode: [start, start + len), len already
 // clamped by the caller (next method, 8 KiB cap, section end) and > 0.
@@ -66,6 +67,7 @@ struct InstanceHit {
 // instruction with two matching operands yields two hits (the caller dedups by
 // IP after its limit cut-off).
 std::vector<InstanceHit> ScanInstanceAccesses(const std::vector<MethodRange>& methods,
-                                              std::size_t fieldOffset);
+                                              std::size_t fieldOffset,
+                                              bool* cancelled = nullptr);
 
 }  // namespace Discrete::IL2CPP::XrefScan

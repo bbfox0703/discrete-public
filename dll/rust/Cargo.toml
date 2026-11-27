@@ -14,7 +14,8 @@
 name = "discrete_core"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+# D-L1: let-chains in chain/decode.rs require Rust >= 1.88 (pinned to 1.100.0 in rust-toolchain.toml).
+rust-version = "1.88"
 publish = false
 license = "GPL-3.0-only"
 description = "Rust core for the Discrete Unity dumper DLL"

@@ -541,6 +541,40 @@ fn ffi_round_trip() {
         assert_eq!(dc_chain_result_len(r), 0);
         dc_chain_result_stats(r, &mut st);
         assert_eq!(st.valid, 0);
+        assert_eq!(dc_chain_result_cancelled(r), 0);
+        assert_eq!(dc_chain_result_truncated(r), 0);
+        dc_chain_result_free(r);
+
+        // D-L6: cooperative cancellation stops a multi-chunk scan early and sets cancelled = 1.
+        assert_eq!(dc_chain_result_cancelled(std::ptr::null()), 0);
+        assert_eq!(dc_chain_result_truncated(std::ptr::null()), 0);
+        unsafe extern "C" fn cancel_after_first(ctx: *mut c_void) -> i32 {
+            // SAFETY: points to a local AtomicUsize below.
+            let n = unsafe { &*(ctx as *const std::sync::atomic::AtomicUsize) };
+            i32::from(n.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 1)
+        }
+        let mut two_chunks = vec![0x90u8; CHUNK_SIZE + 0x200];
+        let mut a2 = Asm { code: two_chunks[..CHUNK_SIZE + 0x40].to_vec() };
+        a2.hop1(slot(0)).raw(&HOP2_RAX).raw(&HOP3_READ_RAX_10);
+        two_chunks[..a2.code.len()].copy_from_slice(&a2.code);
+        let m2 = Module::new(&two_chunks);
+        let polls = std::sync::atomic::AtomicUsize::new(0);
+        let r = dc_chain_detect_cancellable(
+            BASE,
+            Some(fake_read),
+            &m2.mem as *const FakeMem as *mut c_void,
+            slots.as_ptr(),
+            1,
+            SFO,
+            0x10,
+            10,
+            Some(cancel_after_first),
+            &polls as *const std::sync::atomic::AtomicUsize as *mut c_void,
+        );
+        assert!(!r.is_null());
+        assert_eq!(dc_chain_result_cancelled(r), 1);
+        // Chunk 1 (holding the chain) must never have been scanned.
+        assert_eq!(dc_chain_result_len(r), 0);
         dc_chain_result_free(r);
     }
 }

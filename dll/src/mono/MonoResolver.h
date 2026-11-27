@@ -62,6 +62,10 @@ using fn_free                   = void           (*)(void*);
 using fn_class_vtable           = MonoVTable*    (*)(MonoDomain*, MonoClass*);
 using fn_vtable_get_static_data = void*          (*)(MonoVTable*);
 using fn_compile_method         = void*          (*)(MonoMethod*);
+// B-L9: Open-generic guards before calling mono_compile_method. Optional:
+// older builds that lack either export fall back to name-based arity check.
+using fn_class_is_generic       = int            (*)(MonoClass*);
+using fn_method_is_generic      = int            (*)(MonoMethod*);
 
 // --- Mono enum decode (Phase 5 follow-up) -----------------------------------
 using fn_field_get_data         = const char*    (*)(MonoClassField*);
@@ -74,6 +78,7 @@ using fn_class_from_mono_type   = MonoClass*     (*)(MonoType*);
 
 // --- Mono array element metadata (Phase 10 follow-up) ----------------------
 using fn_class_get_element_class = MonoClass*    (*)(MonoClass*);
+using fn_class_get_rank         = int            (*)(MonoClass*);
 using fn_class_value_size       = int            (*)(MonoClass*, std::uint32_t* /*align*/);
 using fn_class_instance_size    = std::int32_t   (*)(MonoClass*);
 using fn_class_is_valuetype     = int            (*)(MonoClass*);
@@ -199,6 +204,8 @@ struct Resolver {
     fn_class_vtable           class_vtable           = nullptr;
     fn_vtable_get_static_data vtable_get_static_data = nullptr;
     fn_compile_method         compile_method         = nullptr;
+    fn_class_is_generic       class_is_generic       = nullptr;
+    fn_method_is_generic      method_is_generic      = nullptr;
 
     // Enum decode — Phase 5 follow-up.
     fn_field_get_data         field_get_data         = nullptr;
@@ -206,6 +213,7 @@ struct Resolver {
     fn_class_enum_basetype    class_enum_basetype    = nullptr;
     fn_class_from_mono_type   class_from_mono_type   = nullptr;
     fn_class_get_element_class class_get_element_class = nullptr;
+    fn_class_get_rank         class_get_rank         = nullptr;
     fn_class_value_size       class_value_size       = nullptr;
     fn_class_instance_size    class_instance_size    = nullptr;
     fn_class_is_valuetype     class_is_valuetype     = nullptr;

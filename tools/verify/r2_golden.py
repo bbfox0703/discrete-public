@@ -220,8 +220,14 @@ def main() -> int:
     ap.add_argument("--only", nargs="+", choices=GENERATED_CMDS + IMAGE_CMDS, metavar="CMD",
                     help=f"restrict to these subcommands ({', '.join(GENERATED_CMDS + IMAGE_CMDS)})")
     ap.add_argument("--record", action="store_true",
-                    help="write the hashes of this run into r2_golden.json (see the docstring)")
+                    help="add missing entries into r2_golden.json (refuses to overwrite changed entries without --rebaseline)")
+    ap.add_argument("--rebaseline", action="store_true",
+                    help="with --record: explicitly allow overwriting existing changed golden entries and print the diff")
     args = ap.parse_args()
+
+    if args.rebaseline and not args.record:
+        print("--rebaseline requires --record", file=sys.stderr)
+        return 2
 
     cli_dir = Path(args.cli_dir)
     selected = set(args.only or GENERATED_CMDS + IMAGE_CMDS)
@@ -320,13 +326,38 @@ def main() -> int:
         compared += r.status == "PASS" and r.task.key is not None
 
     if args.record and not fails:
+        added, rebaselined, unchanged = 0, 0, 0
+        blocked: list[str] = []
         for r in results:
-            if r.status == "REC":
-                golden[r.task.key] = {"sha256": r.digest, "size": r.size, "lines": r.lines,
-                                      **({"image": r.task.hint} if r.task.hint else {})}
+            if r.status != "REC":
+                continue
+            new_entry = {"sha256": r.digest, "size": r.size, "lines": r.lines,
+                         **({"image": r.task.hint} if r.task.hint else {})}
+            old_entry = golden.get(r.task.key)
+            if old_entry is None:
+                golden[r.task.key] = new_entry
+                added += 1
+                continue
+            if old_entry.get("sha256") == r.digest:
+                unchanged += 1
+                continue
+            diff_line = (f"  ~ {r.task.key} ({r.task.label}): "
+                         f"{str(old_entry.get('sha256', ''))[:16]}.. -> {r.digest[:16]}.. "
+                         f"(size {old_entry.get('size')} -> {r.size}, lines {old_entry.get('lines')} -> {r.lines})")
+            if not args.rebaseline:
+                blocked.append(diff_line)
+                continue
+            print(f"[REBASELINE]\n{diff_line}")
+            golden[r.task.key] = new_entry
+            rebaselined += 1
+        if blocked:
+            print("\nrefusing to overwrite existing golden entries without --rebaseline:", file=sys.stderr)
+            for b in blocked:
+                print(b, file=sys.stderr)
+            return 1
         golden_doc["entries"] = dict(sorted(golden.items()))
         GOLDEN.write_text(json.dumps(golden_doc, indent=1) + "\n", encoding="utf-8", newline="\n")
-        print(f"\nrecorded {sum(r.status == 'REC' for r in results)} entr(ies) into {GOLDEN}")
+        print(f"\nrecorded into {GOLDEN}: {added} added, {rebaselined} rebaselined, {unchanged} unchanged")
         return 0
 
     print(f"\n{len(results)} run(s): {compared} matched golden, {skips} skipped, {fails} failed, "

@@ -5,9 +5,12 @@
 #include "../shared/Logger.h"
 #include "../shared/MagicStrings.h"
 #include "../shared/ModuleHelper.h"
+#include "../shared/ThrottledRetry.h"
 
 #include <windows.h>
 
+#include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <string>
 
@@ -15,9 +18,13 @@ namespace Discrete::Mono {
 
 namespace {
 
-// (the former g_once is gone — see GetResolver: latching on the first CALL
-// made a too-early resolve permanent)
-Resolver       g_resolver;
+// B-L1: Lock-free publish-once on success, immutable unresolved fallback on
+// failure, with 1s throttled retries so a missing export neither races with
+// concurrent readers (writing moduleName / slots in-place) nor floods logs.
+std::atomic<const Resolver*> g_resolved{nullptr};
+const Resolver               g_unresolved{};
+std::mutex                   g_resolveMu;
+std::uint64_t                g_lastFailTickMs = 0;
 
 const wchar_t* PickMonoModule() {
     if (ModuleHelper::GetModuleBase(MagicStrings::ModuleMonoBdwgc) != nullptr) {
@@ -42,15 +49,15 @@ bool Bind(const wchar_t* module, const char* exportName, Fn& slot) {
     return true;
 }
 
-void DoResolve() {
+void DoResolve(Resolver& out) {
     const wchar_t* module = PickMonoModule();
     if (module == nullptr) {
         Discrete::Log::Write(MagicStrings::LogCategoryInit,
             "MonoResolver: no mono module loaded (mono-2.0-bdwgc.dll / mono.dll)");
-        g_resolver.resolved = false;
+        out.resolved = false;
         return;
     }
-    g_resolver.moduleName = module;
+    out.moduleName = module;
 
     int ok = 0;
     int total = 0;
@@ -65,12 +72,14 @@ void DoResolve() {
         (void)Bind(module, name, slot);
     };
 
-    tryBind("mono_get_root_domain",        g_resolver.get_root_domain);
-    tryBind("mono_domain_get",             g_resolver.domain_get);
-    tryBind("mono_thread_attach",          g_resolver.thread_attach);
-    tryBind("mono_thread_detach",          g_resolver.thread_detach);
-    tryBind("mono_assembly_foreach",       g_resolver.assembly_foreach);
-    tryBind("mono_assembly_get_image",     g_resolver.assembly_get_image);
+    tryBind("mono_get_root_domain",        out.get_root_domain);
+    // B-L3: mono_domain_get is unused by the Mono backend (root domain is used
+    // everywhere); demote to optBind so missing it never disables the backend.
+    optBind("mono_domain_get",             out.domain_get);
+    tryBind("mono_thread_attach",          out.thread_attach);
+    tryBind("mono_thread_detach",          out.thread_detach);
+    tryBind("mono_assembly_foreach",       out.assembly_foreach);
+    tryBind("mono_assembly_get_image",     out.assembly_get_image);
     // assembly_get_name + assembly_name_get_name: optional in practice.
     // MonoDomain::OnAssembly uses image_get_name as the primary source for
     // the friendly assembly name and only falls back to this pair when the
@@ -78,104 +87,107 @@ void DoResolve() {
     // bdwgc Mono 2.x fork) ships without these two exports — see Endless
     // Legend smoke 2026-05-19. Demoting to optBind unblocks legacy targets;
     // call sites are already null-guarded.
-    optBind("mono_assembly_get_name",      g_resolver.assembly_get_name);
-    optBind("mono_assembly_name_get_name", g_resolver.assembly_name_get_name);
-    tryBind("mono_image_get_name",         g_resolver.image_get_name);
-    tryBind("mono_image_get_filename",     g_resolver.image_get_filename);
+    optBind("mono_assembly_get_name",      out.assembly_get_name);
+    optBind("mono_assembly_name_get_name", out.assembly_name_get_name);
+    tryBind("mono_image_get_name",         out.image_get_name);
+    tryBind("mono_image_get_filename",     out.image_get_filename);
 
     // Segment 2: class / field / method walking.
-    tryBind("mono_image_get_table_info",   g_resolver.image_get_table_info);
-    tryBind("mono_table_info_get_rows",    g_resolver.table_info_get_rows);
-    tryBind("mono_class_get",              g_resolver.class_get);
-    tryBind("mono_class_from_name",        g_resolver.class_from_name);
-    tryBind("mono_class_get_name",         g_resolver.class_get_name);
-    tryBind("mono_class_get_namespace",    g_resolver.class_get_namespace);
-    tryBind("mono_class_get_parent",       g_resolver.class_get_parent);
-    tryBind("mono_class_get_image",        g_resolver.class_get_image);
-    tryBind("mono_class_get_fields",       g_resolver.class_get_fields);
-    tryBind("mono_class_get_methods",      g_resolver.class_get_methods);
-    tryBind("mono_field_get_name",         g_resolver.field_get_name);
-    tryBind("mono_field_get_type",         g_resolver.field_get_type);
-    tryBind("mono_field_get_offset",       g_resolver.field_get_offset);
-    tryBind("mono_field_get_flags",        g_resolver.field_get_flags);
-    tryBind("mono_method_get_name",        g_resolver.method_get_name);
-    tryBind("mono_method_get_token",       g_resolver.method_get_token);
-    tryBind("mono_method_get_flags",       g_resolver.method_get_flags);
-    tryBind("mono_type_get_name",          g_resolver.type_get_name);
+    tryBind("mono_image_get_table_info",   out.image_get_table_info);
+    tryBind("mono_table_info_get_rows",    out.table_info_get_rows);
+    tryBind("mono_class_get",              out.class_get);
+    tryBind("mono_class_from_name",        out.class_from_name);
+    tryBind("mono_class_get_name",         out.class_get_name);
+    tryBind("mono_class_get_namespace",    out.class_get_namespace);
+    tryBind("mono_class_get_parent",       out.class_get_parent);
+    tryBind("mono_class_get_image",        out.class_get_image);
+    tryBind("mono_class_get_fields",       out.class_get_fields);
+    tryBind("mono_class_get_methods",      out.class_get_methods);
+    tryBind("mono_field_get_name",         out.field_get_name);
+    tryBind("mono_field_get_type",         out.field_get_type);
+    tryBind("mono_field_get_offset",       out.field_get_offset);
+    tryBind("mono_field_get_flags",        out.field_get_flags);
+    tryBind("mono_method_get_name",        out.method_get_name);
+    tryBind("mono_method_get_token",       out.method_get_token);
+    tryBind("mono_method_get_flags",       out.method_get_flags);
+    tryBind("mono_type_get_name",          out.type_get_name);
     // mono_free: ideally we call it to free the char* mono_type_get_name
     // allocates, but Unity 5.3-era legacy mono.dll doesn't export it.
     // Without mono_free, we leak a small string per type-name lookup —
     // bounded, non-fatal. MonoTypeParser is already null-guarded at the
     // call site. Demoting unblocks legacy Unity 5.x Mono targets.
-    optBind("mono_free",                   g_resolver.free);
+    optBind("mono_free",                   out.free);
 
     // Segment 3: static-field address + JIT compile.
-    tryBind("mono_class_vtable",                g_resolver.class_vtable);
-    tryBind("mono_vtable_get_static_field_data", g_resolver.vtable_get_static_data);
-    tryBind("mono_compile_method",              g_resolver.compile_method);
+    tryBind("mono_class_vtable",                out.class_vtable);
+    tryBind("mono_vtable_get_static_field_data", out.vtable_get_static_data);
+    tryBind("mono_compile_method",              out.compile_method);
+    optBind("mono_class_is_generic",            out.class_is_generic);
+    optBind("mono_method_is_generic",           out.method_is_generic);
 
     // Phase 5 follow-up: enum decode (true-optional — missing exports just
     // disable getEnumValues, don't take the whole resolver offline).
-    optBind("mono_field_get_data",              g_resolver.field_get_data);
-    optBind("mono_class_is_enum",               g_resolver.class_is_enum);
-    optBind("mono_class_enum_basetype",         g_resolver.class_enum_basetype);
-    optBind("mono_class_from_mono_type",        g_resolver.class_from_mono_type);
-    // Phase 10 follow-up: array element-class metadata for walkArray.
-    optBind("mono_class_get_element_class",     g_resolver.class_get_element_class);
-    optBind("mono_class_value_size",            g_resolver.class_value_size);
-    optBind("mono_class_instance_size",         g_resolver.class_instance_size);
-    optBind("mono_class_is_valuetype",          g_resolver.class_is_valuetype);
+    optBind("mono_field_get_data",              out.field_get_data);
+    optBind("mono_class_is_enum",               out.class_is_enum);
+    optBind("mono_class_enum_basetype",         out.class_enum_basetype);
+    optBind("mono_class_from_mono_type",        out.class_from_mono_type);
+    // Phase 10 follow-up: array element-class metadata for walkArray + B-L2 rank check.
+    optBind("mono_class_get_element_class",     out.class_get_element_class);
+    optBind("mono_class_get_rank",              out.class_get_rank);
+    optBind("mono_class_value_size",            out.class_value_size);
+    optBind("mono_class_instance_size",         out.class_instance_size);
+    optBind("mono_class_is_valuetype",          out.class_is_valuetype);
 
     // Nested-type support — required to resolve `Outer/Inner` style names
     // emitted by EnumerateClasses for nested classes.
-    optBind("mono_class_get_nesting_type",      g_resolver.class_get_nesting_type);
-    optBind("mono_class_get_nested_types",      g_resolver.class_get_nested_types);
+    optBind("mono_class_get_nesting_type",      out.class_get_nesting_type);
+    optBind("mono_class_get_nested_types",      out.class_get_nested_types);
 
     // Phase 18 — method signature decoding. Optional: missing exports just
     // disable findMethodInstances signature output, the rest of the resolver
     // still works.
-    optBind("mono_method_signature",            g_resolver.method_signature);
-    optBind("mono_signature_get_param_count",   g_resolver.signature_get_param_count);
-    optBind("mono_signature_get_params",        g_resolver.signature_get_params);
-    optBind("mono_signature_get_return_type",   g_resolver.signature_get_return_type);
-    optBind("mono_method_get_param_names",      g_resolver.method_get_param_names);
+    optBind("mono_method_signature",            out.method_signature);
+    optBind("mono_signature_get_param_count",   out.signature_get_param_count);
+    optBind("mono_signature_get_params",        out.signature_get_params);
+    optBind("mono_signature_get_return_type",   out.signature_get_return_type);
+    optBind("mono_method_get_param_names",      out.method_get_param_names);
 
     // Phase 19 — managed-method invocation. Optional at resolve time so
     // pre-19 features (handshake / class walking / findMethodInstances)
     // keep working on minimal Mono builds where these are missing; the
     // callMethod handler refuses cleanly when runtime_invoke is unbound.
-    optBind("mono_runtime_invoke",              g_resolver.runtime_invoke);
-    optBind("mono_object_unbox",                g_resolver.object_unbox);
-    optBind("mono_object_get_class",            g_resolver.object_get_class);
-    optBind("mono_string_new",                  g_resolver.string_new);
-    optBind("mono_string_chars",                g_resolver.string_chars);
-    optBind("mono_string_length",               g_resolver.string_length);
-    optBind("mono_gchandle_new",                g_resolver.gchandle_new);
-    optBind("mono_gchandle_free",               g_resolver.gchandle_free);
+    optBind("mono_runtime_invoke",              out.runtime_invoke);
+    optBind("mono_object_unbox",                out.object_unbox);
+    optBind("mono_object_get_class",            out.object_get_class);
+    optBind("mono_string_new",                  out.string_new);
+    optBind("mono_string_chars",                out.string_chars);
+    optBind("mono_string_length",               out.string_length);
+    optBind("mono_gchandle_new",                out.gchandle_new);
+    optBind("mono_gchandle_free",               out.gchandle_free);
 
     // Phase 28 — IL body access. Optional: missing exports just disable
     // findFieldReferences on this backend; the rest of the runtime stays up.
     // Every modern Mono build (Unity 5+) ships these; the optBind keeps the
     // resolver tolerant of legacy/stripped builds where they might not be.
-    optBind("mono_method_get_header",           g_resolver.method_get_header);
-    optBind("mono_method_header_get_code",      g_resolver.method_header_get_code);
-    optBind("mono_metadata_free_mh",            g_resolver.metadata_free_mh);
-    optBind("mono_class_get_field_token",       g_resolver.class_get_field_token);
-    optBind("mono_field_from_token",            g_resolver.field_from_token);
-    optBind("mono_field_get_parent",            g_resolver.field_get_parent);
+    optBind("mono_method_get_header",           out.method_get_header);
+    optBind("mono_method_header_get_code",      out.method_header_get_code);
+    optBind("mono_metadata_free_mh",            out.metadata_free_mh);
+    optBind("mono_class_get_field_token",       out.class_get_field_token);
+    optBind("mono_field_from_token",            out.field_from_token);
+    optBind("mono_field_get_parent",            out.field_get_parent);
 
     // Disconnect-time GC drain — closes the "game shutdown is slow after
     // a Phase 28 IL walker run" complaint. Exported by every BDWGC-based
     // Mono build (Unity 5+) under the canonical name.
-    optBind("mono_gc_collect",                  g_resolver.gc_collect);
+    optBind("mono_gc_collect",                  out.gc_collect);
 
     // Phase 32 — live-object enumeration for findInstances liveOnly. Exported
     // by Unity's mono-2.0-bdwgc.dll; legacy/embedded Mono may lack them, in
     // which case liveOnly falls back to the raw pointer scan.
-    optBind("mono_gc_walk_heap",                g_resolver.gc_walk_heap);
-    optBind("mono_object_get_size",             g_resolver.object_get_size);
+    optBind("mono_gc_walk_heap",                out.gc_walk_heap);
+    optBind("mono_object_get_size",             out.object_get_size);
 
-    g_resolver.resolved = (ok == total);
+    out.resolved = (ok == total);
 
     char line[256];
     {
@@ -195,19 +207,28 @@ void DoResolve() {
 }  // namespace
 
 const Resolver& GetResolver() {
-    // NOT std::call_once. call_once latches on the CALL, not on success, so a
-    // first attempt made before the game had loaded mono-2.0-bdwgc.dll left
-    // g_resolver.resolved == false FOREVER — DoResolve could never run again and
-    // the `scan` re-detect RPC, whose whole purpose is to recover exactly that
-    // state, was powerless. Retry until we actually resolve, then latch.
-    //
-    // Cost of the retry path is a handful of GetModuleHandle / GetProcAddress
-    // lookups, and only while unresolved; once resolved this is a lock plus a
-    // load. Callers are RPC entry points, not inner loops.
-    static std::mutex resolveMu;
-    std::lock_guard<std::mutex> lk(resolveMu);
-    if (!g_resolver.resolved) DoResolve();
-    return g_resolver;
+    if (const Resolver* p = g_resolved.load(std::memory_order_acquire)) {
+        return *p;
+    }
+    std::lock_guard<std::mutex> lk(g_resolveMu);
+    if (const Resolver* p = g_resolved.load(std::memory_order_relaxed)) {
+        return *p;
+    }
+    const std::uint64_t now = ::GetTickCount64();
+    if (!RetryPolicy::CanRetryNow(g_lastFailTickMs, now)) {
+        return g_unresolved;
+    }
+    Resolver local;
+    DoResolve(local);
+    if (local.resolved) {
+        // Heap-allocated, intentionally leaked immutable singleton — never
+        // mutated after publication and safe across process teardown.
+        auto* published = new Resolver(std::move(local));
+        g_resolved.store(published, std::memory_order_release);
+        return *published;
+    }
+    g_lastFailTickMs = RetryPolicy::NonZeroTick(::GetTickCount64());
+    return g_unresolved;
 }
 
 bool IsResolved() { return GetResolver().resolved; }

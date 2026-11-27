@@ -165,9 +165,11 @@ public static class CallMethodAaScriptGenerator
 
     private static void AppendBridgeGuard(StringBuilder sb)
     {
+        // E-L2: error() makes CE reject enabling the entry when the bridge is
+        // not loaded (print + return would tick the checkbox as enabled).
         sb.AppendLine("if not _G.discrete_bridgeLoaded then");
-        sb.AppendLine("  print('[Discrete] Enable \"Load Discrete Bridge\" first')");
-        sb.AppendLine("  return");
+        sb.AppendLine("  _G.DISCRETE_HAD_ERROR = true");
+        sb.AppendLine("  error('[Discrete] Enable \"Load Discrete Bridge\" first')");
         sb.AppendLine("end");
     }
 
@@ -185,22 +187,38 @@ public static class CallMethodAaScriptGenerator
         switch (a.TypeName)
         {
         case "System.Boolean":
-            // Lua bool literal: lower-case true/false. Be lenient on input.
-            return $"argBool({(bool.TryParse(raw, out bool bv) && bv ? "true" : "false")})";
+            if (!bool.TryParse(raw.Trim(), out bool bv))
+                throw new ArgumentException(
+                    $"Invalid System.Boolean argument value: '{raw}'", nameof(a));
+            return $"argBool({(bv ? "true" : "false")})";
 
-        case "System.Byte":   return $"argByte({UInt(raw,  byte.MaxValue)})";
-        case "System.SByte":  return $"argSByte({Int(raw,  sbyte.MinValue, sbyte.MaxValue)})";
-        case "System.Int16":  return $"argInt16({Int(raw,  short.MinValue, short.MaxValue)})";
-        case "System.UInt16": return $"argUInt16({UInt(raw, ushort.MaxValue)})";
-        case "System.Int32":  return $"argInt32({Int(raw,  int.MinValue,   int.MaxValue)})";
-        case "System.UInt32": return $"argUInt32({UInt(raw, uint.MaxValue)})";
-        case "System.Int64":  return $"argInt64({(long.TryParse(raw, NumberStyles.Integer, inv, out long lv) ? lv : 0L).ToString(inv)})";
-        case "System.UInt64": return $"argUInt64({(ulong.TryParse(raw, NumberStyles.Integer, inv, out ulong uv) ? uv : 0UL).ToString(inv)})";
+        case "System.Byte":   return $"argByte({UInt(raw,  byte.MaxValue,   a.TypeName)})";
+        case "System.SByte":  return $"argSByte({Int(raw,  sbyte.MinValue,  sbyte.MaxValue, a.TypeName)})";
+        case "System.Int16":  return $"argInt16({Int(raw,  short.MinValue,  short.MaxValue, a.TypeName)})";
+        case "System.UInt16": return $"argUInt16({UInt(raw, ushort.MaxValue, a.TypeName)})";
+        case "System.Int32":  return $"argInt32({Int(raw,  int.MinValue,    int.MaxValue,   a.TypeName)})";
+        case "System.UInt32": return $"argUInt32({UInt(raw, uint.MaxValue,   a.TypeName)})";
+        case "System.Int64":
+            if (!long.TryParse(raw, NumberStyles.Integer, inv, out long lv))
+                throw new ArgumentException(
+                    $"Invalid System.Int64 argument value: '{raw}'", nameof(a));
+            return $"argInt64({lv.ToString(inv)})";
+        case "System.UInt64":
+            if (!ulong.TryParse(raw, NumberStyles.Integer, inv, out ulong uv))
+                throw new ArgumentException(
+                    $"Invalid System.UInt64 argument value: '{raw}'", nameof(a));
+            return $"argUInt64({uv.ToString(inv)})";
 
         case "System.Single":
-            return $"argFloat({(double.TryParse(raw, NumberStyles.Float, inv, out double f) ? f : 0.0).ToString("R", inv)})";
+            if (!double.TryParse(raw, NumberStyles.Float, inv, out double f))
+                throw new ArgumentException(
+                    $"Invalid System.Single argument value: '{raw}'", nameof(a));
+            return $"argFloat({FormatLuaDouble(f)})";
         case "System.Double":
-            return $"argDouble({(double.TryParse(raw, NumberStyles.Float, inv, out double d) ? d : 0.0).ToString("R", inv)})";
+            if (!double.TryParse(raw, NumberStyles.Float, inv, out double d))
+                throw new ArgumentException(
+                    $"Invalid System.Double argument value: '{raw}'", nameof(a));
+            return $"argDouble({FormatLuaDouble(d)})";
 
         case "System.Char":
             // Single character → its UTF-16 code unit. Numeric input is
@@ -208,7 +226,8 @@ public static class CallMethodAaScriptGenerator
             if (raw.Length == 1) return $"argChar({(int)raw[0]})";
             if (ushort.TryParse(raw, NumberStyles.Integer, inv, out ushort cv))
                 return $"argChar({cv})";
-            return "argChar(0)";
+            throw new ArgumentException(
+                $"Invalid System.Char argument value: '{raw}'", nameof(a));
 
         case "System.String":
             // Empty input becomes "" — distinguish from null (which only
@@ -228,19 +247,34 @@ public static class CallMethodAaScriptGenerator
         return $"argAddress('{EscapeSq(raw)}')";
     }
 
-    private static string Int(string raw, long min, long max)
+    /// <summary>
+    /// E-L3: Emit valid Lua numeric literals for non-finite IEEE-754 values
+    /// (<c>0/0</c>, <c>1/0</c>, <c>-1/0</c>) instead of bare <c>NaN</c> /
+    /// <c>Infinity</c> identifiers (which evaluate to <c>nil</c> in Lua).
+    /// </summary>
+    private static string FormatLuaDouble(double v)
+    {
+        if (double.IsNaN(v)) return "0/0";
+        if (double.IsPositiveInfinity(v)) return "1/0";
+        if (double.IsNegativeInfinity(v)) return "-1/0";
+        return v.ToString("R", CultureInfo.InvariantCulture);
+    }
+
+    private static string Int(string raw, long min, long max, string typeName)
     {
         var inv = CultureInfo.InvariantCulture;
-        if (!long.TryParse(raw, NumberStyles.Integer, inv, out long v)) return "0";
+        if (!long.TryParse(raw, NumberStyles.Integer, inv, out long v))
+            throw new ArgumentException($"Invalid {typeName} argument value: '{raw}'", nameof(raw));
         if (v < min) v = min;
         if (v > max) v = max;
         return v.ToString(inv);
     }
 
-    private static string UInt(string raw, ulong max)
+    private static string UInt(string raw, ulong max, string typeName)
     {
         var inv = CultureInfo.InvariantCulture;
-        if (!ulong.TryParse(raw, NumberStyles.Integer, inv, out ulong v)) return "0";
+        if (!ulong.TryParse(raw, NumberStyles.Integer, inv, out ulong v))
+            throw new ArgumentException($"Invalid {typeName} argument value: '{raw}'", nameof(raw));
         if (v > max) v = max;
         return v.ToString(inv);
     }
@@ -248,7 +282,8 @@ public static class CallMethodAaScriptGenerator
     /// <summary>
     /// Escape a string for embedding inside a Lua single-quoted literal
     /// (<c>'...'</c>). Conservative — backslash, single quote, CR, LF,
-    /// NUL. Other bytes pass through.
+    /// NUL (3-digit <c>\000</c> per E-L3 so adjacent digits don't merge into
+    /// <c>\012</c> etc.). Other bytes pass through.
     /// </summary>
     internal static string EscapeSq(string s)
     {
@@ -258,12 +293,12 @@ public static class CallMethodAaScriptGenerator
         {
             switch (c)
             {
-            case '\\': sb.Append("\\\\"); break;
-            case '\'': sb.Append("\\'");  break;
-            case '\n': sb.Append("\\n");  break;
-            case '\r': sb.Append("\\r");  break;
-            case '\0': sb.Append("\\0");  break;
-            default:   sb.Append(c);      break;
+            case '\\': sb.Append("\\\\");  break;
+            case '\'': sb.Append("\\'");   break;
+            case '\n': sb.Append("\\n");   break;
+            case '\r': sb.Append("\\r");   break;
+            case '\0': sb.Append("\\000"); break;
+            default:   sb.Append(c);       break;
             }
         }
         return sb.ToString();

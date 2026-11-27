@@ -6,6 +6,7 @@
 #include "../shared/MagicStrings.h"
 #include "../shared/Memory.h"
 #include "../shared/ModuleHelper.h"
+#include "../shared/SafeChunkRead.h"
 
 #include <windows.h>
 
@@ -102,52 +103,45 @@ std::vector<ClassPointerSlot> EnumerateClassPointerSlots(
     // here — every slot is 8-byte aligned at section start, so chunk
     // boundaries fall on slot boundaries when `want` is a multiple of 8.
     constexpr std::size_t kChunkSize = 1024u * 1024u;
-    std::vector<std::uint8_t> buf(kChunkSize);
+    std::vector<std::uint8_t> buf;
+    buf.reserve(kChunkSize);
 
-    // Anti-cheat page-strip tolerance: when a SafeReadBytes fails we
-    // skip 4 KB and continue. Track for diagnostic logging.
+    // B-L5: Anti-cheat page-strip tolerance via SafePeScan::ScanReadableSpans —
+    // when a 1 MiB chunk read fails due to a single PAGE_NOACCESS / PAGE_GUARD
+    // page, falls back to 4 KiB page-by-page reads so readable pages BEFORE
+    // the bad page are never dropped.
     std::size_t failedReads = 0;
     std::size_t totalScanned = 0;
 
     for (const auto& sec : sections) {
-        std::size_t pos = 0;
-        while (pos < sec.size) {
-            std::size_t want = (sec.size - pos) < kChunkSize
-                ? (sec.size - pos)
-                : kChunkSize;
-            // Round down to 8-byte boundary so we don't read a partial
-            // qword at the chunk tail. The trailing < 8 bytes are
-            // skipped (sections are virtually-mapped page-aligned, so
-            // this only ever drops <= 7 trailing bytes of the very
-            // last chunk of the very last section).
-            want = (want / sizeof(std::uintptr_t)) * sizeof(std::uintptr_t);
-            if (want == 0) break;
-
-            if (!Memory::SafeReadBytes(
-                    reinterpret_cast<const void*>(sec.va + pos),
-                    buf.data(), want)) {
-                // AC page-strip: skip 4 KB and continue. Don't update
-                // `pos += want` because we want to retry the section
-                // boundary on the next page, not jump the whole chunk.
-                ++failedReads;
-                pos += 4096u;
-                continue;
-            }
-
-            for (std::size_t i = 0; i + sizeof(std::uintptr_t) <= want;
-                 i += sizeof(std::uintptr_t)) {
-                std::uintptr_t val = 0;
-                std::memcpy(&val, buf.data() + i, sizeof(val));
-                if (val == targetVal) {
-                    ClassPointerSlot slot{};
-                    slot.address   = sec.va + pos + i;
-                    slot.sectionVa = sec.va;
-                    result.push_back(slot);
+        SafePeScan::ScanReadableSpans(
+            reinterpret_cast<const std::uint8_t*>(sec.va),
+            sec.size,
+            kChunkSize,
+            /*overlapBytes=*/0u,
+            buf,
+            [&](const std::uint8_t* localSpan,
+                const std::uint8_t* realSpanBase,
+                std::size_t spanLen) -> bool {
+                const std::uintptr_t realAddr0 = reinterpret_cast<std::uintptr_t>(realSpanBase);
+                const std::size_t alignPad =
+                    (sizeof(std::uintptr_t) - (realAddr0 & (sizeof(std::uintptr_t) - 1u))) &
+                    (sizeof(std::uintptr_t) - 1u);
+                for (std::size_t i = alignPad; i + sizeof(std::uintptr_t) <= spanLen;
+                     i += sizeof(std::uintptr_t)) {
+                    std::uintptr_t val = 0;
+                    std::memcpy(&val, localSpan + i, sizeof(val));
+                    if (val == targetVal) {
+                        ClassPointerSlot slot{};
+                        slot.address   = realAddr0 + i;
+                        slot.sectionVa = sec.va;
+                        result.push_back(slot);
+                    }
                 }
-            }
-            totalScanned += want;
-            pos += want;
-        }
+                totalScanned += spanLen;
+                return true;
+            },
+            &failedReads);
     }
 
     // Tighten log volume — only log when caller will care (zero hits is

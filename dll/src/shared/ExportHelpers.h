@@ -617,4 +617,133 @@ inline bool ShouldChargeStreamingPlanRow(std::size_t idx,
     return true;
 }
 
+// C-L4: Strict address parser for JSON RPC args.
+//   * String values are ALWAYS parsed as hexadecimal (optional "0x"/"0X"
+//     prefix). Rejects empty strings, signs/whitespace, trailing garbage,
+//     64-bit overflow, and values exceeding `maxAddr` (e.g. > UINT32_MAX on x86).
+//   * Numeric values accept non-negative integers only (rejects negative signed
+//     integers, floats, booleans, and values exceeding `maxAddr`).
+inline bool ParseAddressStrict(
+    const nlohmann::json& v,
+    std::uint64_t&        out,
+    std::uint64_t         maxAddr = (std::numeric_limits<std::uintptr_t>::max)()) noexcept {
+    if (v.is_string()) {
+        const auto& s = v.get_ref<const std::string&>();
+        const char* p = s.data();
+        const char* end = p + s.size();
+        if (end - p >= 2 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+            p += 2;
+        }
+        if (p == end) return false;
+        // std::from_chars does not accept leading '+'/'-' or whitespace; checking
+        // the first character explicitly keeps behavior obvious and tight.
+        const unsigned char first = static_cast<unsigned char>(*p);
+        const bool isHex = (first >= '0' && first <= '9') ||
+                           (first >= 'a' && first <= 'f') ||
+                           (first >= 'A' && first <= 'F');
+        if (!isHex) return false;
+        std::uint64_t val = 0;
+        const auto res = std::from_chars(p, end, val, 16);
+        if (res.ec != std::errc{} || res.ptr != end) return false;
+        if (val > maxAddr) return false;
+        out = val;
+        return true;
+    }
+    if (v.is_number_unsigned()) {
+        const std::uint64_t val = v.get<std::uint64_t>();
+        if (val > maxAddr) return false;
+        out = val;
+        return true;
+    }
+    if (v.is_number_integer()) {
+        const std::int64_t iv = v.get<std::int64_t>();
+        if (iv < 0) return false;
+        const std::uint64_t val = static_cast<std::uint64_t>(iv);
+        if (val > maxAddr) return false;
+        out = val;
+        return true;
+    }
+    return false;
+}
+
+inline bool ParseAddress(const nlohmann::json& v, std::uintptr_t& out) noexcept {
+    std::uint64_t raw = 0;
+    if (!ParseAddressStrict(v, raw, (std::numeric_limits<std::uintptr_t>::max)())) {
+        return false;
+    }
+    out = static_cast<std::uintptr_t>(raw);
+    return true;
+}
+
+// C-L5: Decode the first Unicode code point of a UTF-8 string into its first
+// UTF-16 code unit (CLR System.Char). Rejects empty or malformed UTF-8.
+inline bool DecodeFirstUtf16CodeUnit(std::string_view utf8, std::uint16_t& out) noexcept {
+    if (utf8.empty()) return false;
+    const auto b0 = static_cast<unsigned char>(utf8[0]);
+    if (b0 < 0x80u) {
+        out = static_cast<std::uint16_t>(b0);
+        return true;
+    }
+    auto isCont = [](unsigned char b) noexcept { return (b & 0xC0u) == 0x80u; };
+    if (b0 >= 0xC2u && b0 <= 0xDFu) {
+        if (utf8.size() < 2) return false;
+        const auto b1 = static_cast<unsigned char>(utf8[1]);
+        if (!isCont(b1)) return false;
+        const std::uint32_t cp = ((static_cast<std::uint32_t>(b0 & 0x1Fu)) << 6) | (b1 & 0x3Fu);
+        out = static_cast<std::uint16_t>(cp);
+        return true;
+    }
+    if (b0 >= 0xE0u && b0 <= 0xEFu) {
+        if (utf8.size() < 3) return false;
+        const auto b1 = static_cast<unsigned char>(utf8[1]);
+        const auto b2 = static_cast<unsigned char>(utf8[2]);
+        if (!isCont(b1) || !isCont(b2)) return false;
+        const std::uint32_t cp = ((static_cast<std::uint32_t>(b0 & 0x0Fu)) << 12) |
+                                 ((static_cast<std::uint32_t>(b1 & 0x3Fu)) << 6)  |
+                                  (b2 & 0x3Fu);
+        if (cp < 0x800u || (cp >= 0xD800u && cp <= 0xDFFFu)) return false;
+        out = static_cast<std::uint16_t>(cp);
+        return true;
+    }
+    if (b0 >= 0xF0u && b0 <= 0xF4u) {
+        if (utf8.size() < 4) return false;
+        const auto b1 = static_cast<unsigned char>(utf8[1]);
+        const auto b2 = static_cast<unsigned char>(utf8[2]);
+        const auto b3 = static_cast<unsigned char>(utf8[3]);
+        if (!isCont(b1) || !isCont(b2) || !isCont(b3)) return false;
+        const std::uint32_t cp = ((static_cast<std::uint32_t>(b0 & 0x07u)) << 18) |
+                                 ((static_cast<std::uint32_t>(b1 & 0x3Fu)) << 12) |
+                                 ((static_cast<std::uint32_t>(b2 & 0x3Fu)) << 6)  |
+                                  (b3 & 0x3Fu);
+        if (cp < 0x10000u || cp > 0x10FFFFu) return false;
+        // High surrogate (first UTF-16 code unit for supplementary scalar values).
+        out = static_cast<std::uint16_t>(0xD800u + ((cp - 0x10000u) >> 10));
+        return true;
+    }
+    return false;
+}
+
+// C-L5: Clamp an RPC limit parameter: <= 0 falls back to `defaultVal`, values
+// exceeding `maxVal` clamp to `maxVal` (never reset to default).
+inline std::size_t ClampRpcLimit(std::int64_t requested,
+                                 std::size_t  defaultVal,
+                                 std::size_t  maxVal) noexcept {
+    if (requested <= 0) return defaultVal;
+    const auto u = static_cast<std::uint64_t>(requested);
+    if (u > static_cast<std::uint64_t>(maxVal)) return maxVal;
+    return static_cast<std::size_t>(u);
+}
+
+// C-L7: 32-bit OOM pre-check threshold as 75% of the process's actual virtual
+// address space (`GlobalMemoryStatusEx().ullTotalVirtual`). Properly protects
+// non-LAA 2 GB 32-bit games (1.5 GB threshold) as well as 4 GB WOW64 LAA games
+// (~3.0 GB threshold).
+inline std::uint64_t ComputeX86PrivateUsageRefuseThreshold(
+    std::uint64_t totalVirtualBytes) noexcept {
+    if (totalVirtualBytes == 0) {
+        return 1536ULL * 1024 * 1024;  // conservative 75% of 2 GB fallback
+    }
+    return (totalVirtualBytes / 4ULL) * 3ULL;
+}
+
 }  // namespace Discrete::ExportHelpers

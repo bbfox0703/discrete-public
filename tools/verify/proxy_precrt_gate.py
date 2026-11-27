@@ -327,6 +327,7 @@ def check_forward(dll: str, export: str, indent: str = "  ") -> bool:
 
 def run_all(dist: str, baseline: str | None) -> int:
     failures = 0
+    tested = 0
     for dll_name in ("version.dll", "winmm.dll"):
         path = os.path.join(dist, dll_name)
         if not os.path.isfile(path):
@@ -340,6 +341,7 @@ def run_all(dist: str, baseline: str | None) -> int:
             failures += 1
             continue
 
+        tested += 1
         print("  [pre-CRT] mapped with DONT_RESOLVE_DLL_REFERENCES, DllMain never runs")
         for probe in PROBES[dll_name]:
             if not check_precrt(path, probe["name"], indent="    "):
@@ -370,9 +372,13 @@ def run_all(dist: str, baseline: str | None) -> int:
     print()
     if failures:
         print("FAILED - %d check(s) did not pass" % failures)
-    else:
-        print("PASS - every gated probe returned cleanly and every forward reached the real DLL")
-    return 1 if failures else 0
+        return 1
+    if tested == 0:
+        # A-L19: An empty dist directory must never report PASS (exit 0).
+        print("NOTHING TESTED - no proxy DLLs found in %s (build ProxyDLL first)" % dist)
+        return 2
+    print("PASS - every gated probe returned cleanly and every forward reached the real DLL")
+    return 0
 
 
 def main() -> int:
