@@ -122,6 +122,8 @@ void DoResolve(Resolver& out) {
     tryBind("mono_class_vtable",                out.class_vtable);
     tryBind("mono_vtable_get_static_field_data", out.vtable_get_static_data);
     tryBind("mono_compile_method",              out.compile_method);
+    optBind("mono_class_is_generic",            out.class_is_generic);
+    optBind("mono_method_is_generic",           out.method_is_generic);
 
     // Phase 5 follow-up: enum decode (true-optional — missing exports just
     // disable getEnumValues, don't take the whole resolver offline).

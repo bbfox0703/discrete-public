@@ -1255,16 +1255,17 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
     if (maxBackwardScan > 16 * 1024) maxBackwardScan = 16 * 1024;
 
     // Round down to 8-byte boundary. Object headers are pointer-aligned.
+    // B-L11: unified near-zero clamp so scannedFrom == rangeStart and
+    // bufIdx == (p - rangeStart) for every step i in [0, maxSteps).
     constexpr std::size_t kStride = 8;
-    std::uintptr_t start = addr & ~static_cast<std::uintptr_t>(kStride - 1);
-
-    // scannedFrom is the lowest address we'll try; scannedTo is `start + 8`
-    // (one past the highest, exclusive) so the range matches the spec's
-    // {from, to} convention.
-    std::size_t maxSteps = maxBackwardScan / kStride;
-    if (maxSteps == 0) maxSteps = 1;
-    out.scannedFrom = (start >= maxSteps * kStride) ? (start - (maxSteps - 1) * kStride) : 0;
-    out.scannedTo   = start + kStride;
+    const auto scanRange = Discrete::AddressBounds::ComputeBackwardScanRange(
+        addr, maxBackwardScan, kStride);
+    const std::uintptr_t start      = scanRange.start;
+    const std::size_t    maxSteps   = scanRange.maxSteps;
+    const std::size_t    bulkBytes  = scanRange.bulkBytes;
+    const std::uintptr_t rangeStart = scanRange.rangeStart;
+    out.scannedFrom = rangeStart;
+    out.scannedTo   = scanRange.scannedTo;
 
     const auto& r = GetResolver();
 
@@ -1286,10 +1287,6 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
     // instead of one SafeReadBytes per 8-byte step. Cuts ~2K VirtualQuery
     // syscalls down to ~4 per WhatIsAt call. On a 500-result global
     // scan, end-to-end goes from ~16s to ~4-5s.
-    const std::size_t bulkBytes = maxSteps * kStride;
-    const std::uintptr_t rangeStart = start >= (maxSteps - 1) * kStride
-        ? start - (maxSteps - 1) * kStride
-        : 0;
     std::vector<std::uint8_t> bulkBuf(bulkBytes, 0);
     {
         constexpr std::size_t kPageBytes = 4096;
@@ -1378,11 +1375,16 @@ AddressLookup WhatIsAtAcceptingArrays(std::uintptr_t addr, std::size_t maxBackwa
 
     constexpr std::size_t  kStride = 8;
     constexpr std::uintptr_t kMaxPlausibleArrayLen = 0x4000000;  // 64M elements
-    std::uintptr_t start = addr & ~static_cast<std::uintptr_t>(kStride - 1);
-    std::size_t maxSteps = maxBackwardScan / kStride;
-    if (maxSteps == 0) maxSteps = 1;
-    out.scannedFrom = (start >= maxSteps * kStride) ? (start - (maxSteps - 1) * kStride) : 0;
-    out.scannedTo   = start + kStride;
+    // B-L11: unified near-zero clamp so scannedFrom == rangeStart and
+    // bufIdx == (p - rangeStart) for every step i in [0, maxSteps).
+    const auto scanRange = Discrete::AddressBounds::ComputeBackwardScanRange(
+        addr, maxBackwardScan, kStride);
+    const std::uintptr_t start      = scanRange.start;
+    const std::size_t    maxSteps   = scanRange.maxSteps;
+    const std::size_t    bulkBytes  = scanRange.bulkBytes;
+    const std::uintptr_t rangeStart = scanRange.rangeStart;
+    out.scannedFrom = rangeStart;
+    out.scannedTo   = scanRange.scannedTo;
 
     const auto& r = GetResolver();
     Il2CppDomain* domain = GetDomain();
@@ -1390,9 +1392,6 @@ AddressLookup WhatIsAtAcceptingArrays(std::uintptr_t addr, std::size_t maxBackwa
     ThreadAttachGuard guard(domain);
     if (!guard.Attached()) { out.reason = "il2cpp_thread_attach_failed"; return out; }
 
-    const std::size_t bulkBytes = maxSteps * kStride;
-    const std::uintptr_t rangeStart = start >= (maxSteps - 1) * kStride
-        ? start - (maxSteps - 1) * kStride : 0;
     std::vector<std::uint8_t> bulkBuf(bulkBytes, 0);
     {
         constexpr std::size_t kPageBytes = 4096;

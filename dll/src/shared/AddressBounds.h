@@ -297,4 +297,39 @@ ContainingSelection<Entry> SelectContainingEntry(
     return res;
 }
 
+// ---------------------------------------------------------------------------
+// B-L11: Unified backward-scan range calculation (near-zero clamp safety)
+// ---------------------------------------------------------------------------
+
+struct BackwardScanRange {
+    std::uintptr_t start      = 0u;  // stride-aligned highest step address
+    std::uintptr_t rangeStart = 0u;  // lowest step address (== scannedFrom)
+    std::uintptr_t scannedTo  = 0u;  // start + stride (exclusive)
+    std::size_t    maxSteps   = 0u;  // clamped so start >= (maxSteps - 1) * stride
+    std::size_t    bulkBytes  = 0u;  // maxSteps * stride
+};
+
+/// Compute the backward scan window for `WhatIsAt` / `WhatIsAtAcceptingArrays`.
+/// Clamps `maxSteps` near address 0 so `rangeStart == start - (maxSteps - 1) * stride`
+/// never underflows, `scannedFrom == rangeStart`, and `bufIdx == p - rangeStart`
+/// holds for every step `i in [0, maxSteps)`.
+inline BackwardScanRange ComputeBackwardScanRange(
+    std::uintptr_t addr,
+    std::size_t    maxBackwardScan,
+    std::size_t    stride = 8u) noexcept
+{
+    BackwardScanRange r;
+    if (stride == 0u) stride = 8u;
+    r.start = addr & ~static_cast<std::uintptr_t>(stride - 1u);
+    std::size_t steps = maxBackwardScan / stride;
+    if (steps == 0u) steps = 1u;
+    const std::size_t maxPossibleSteps = static_cast<std::size_t>(r.start / stride) + 1u;
+    if (steps > maxPossibleSteps) steps = maxPossibleSteps;
+    r.maxSteps   = steps;
+    r.bulkBytes  = steps * stride;
+    r.rangeStart = r.start - (steps - 1u) * stride;
+    r.scannedTo  = r.start + stride;
+    return r;
+}
+
 }  // namespace Discrete::AddressBounds

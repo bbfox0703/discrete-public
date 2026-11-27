@@ -134,14 +134,17 @@ StaticFieldAddress ResolveStaticFieldAddress(MonoClass* klass, const std::string
 void* ResolveStaticBaseAddress(MonoClass* klass);
 
 struct CompiledMethodAddress {
-    bool          ok      = false;
-    void*         address = nullptr;   // native code pointer after JIT
+    bool          ok         = false;
+    bool          ambiguous  = false;  // true when >1 overload shares `methodName` (B-L9)
+    std::size_t   matchCount = 0;
+    void*         address    = nullptr;   // native code pointer after JIT
     std::string   name;
-    std::uint32_t token   = 0;
+    std::uint32_t token      = 0;
 };
 
-// JIT-compiles the named method (or first overload) and returns the native
-// entry-point. Wrapped in SEH; failure logs and returns ok=false.
+// JIT-compiles the uniquely-named method and returns its native entry-point.
+// Checks overload ambiguity and open-generic definitions BEFORE invoking
+// mono_compile_method (B-L9). Wrapped in SEH; failure logs and returns ok=false.
 CompiledMethodAddress CompileMethodByName(MonoClass* klass, const std::string& methodName);
 
 // --- Phase 5 follow-up: enum decode -----------------------------------------

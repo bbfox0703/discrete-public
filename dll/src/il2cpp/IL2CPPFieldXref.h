@@ -1,12 +1,14 @@
 // IL2CPPFieldXref.h — Phase 28b findFieldReferences backend (IL2CPP).
 //
-// v1: STATIC FIELDS ONLY. Resolves the field's static-storage address via
+// Static fields: resolves the field's static-storage address via
 // `il2cpp_class_get_static_data(klass) + field.offset`, then scans the
-// executable sections of `GameAssembly.dll` for `mov reg, [rip+disp32]`
-// and `lea reg, [rip+disp32]` instructions whose absolute target equals
-// that storage address. Each hit is attributed to its enclosing method
-// via binary search against a sorted method-pointer index built from
-// every class in the searched assemblies' image.
+// executable sections of `GameAssembly.dll` via three paths:
+//   - v1 direct RIP-relative loads (`mov reg, [rip+disp32]`, `lea reg, [rip+disp32]`)
+//     and stores (`mov [rip+disp32], reg` / `0x89`) targeting that address;
+//   - v2 indirect class-pointer chains (`klass -> static_fields -> +offset`);
+//   - v3 lazy-init TypeInfo slot accesses (`slot -> klass -> static_fields`).
+// Each hit is attributed to its enclosing method via `.pdata` function-start
+// lookup (x64) + binary search against a sorted method-pointer index.
 //
 // Instance fields use a separate scanner — FindInstanceFieldReferences —
 // which decodes the DECLARING CLASS's own methods looking for
@@ -14,8 +16,8 @@
 // with confidence="heuristic" because the displacement alone (no taint of
 // `this`) can collide with unrelated objects touched in the same method.
 //
-// Confidence: static path = "exact" (RIP-relative encoding is unambiguous,
-// disp32 + IP arithmetic recovers a single absolute target); instance path =
+// Confidence: static path = "exact" (RIP-relative / chain / lazy-slot
+// resolution identifies the specific static storage); instance path =
 // "heuristic" (displacement match within declaring-class scope, no taint).
 #pragma once
 

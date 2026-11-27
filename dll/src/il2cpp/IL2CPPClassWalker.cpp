@@ -608,18 +608,27 @@ MethodPointer GetMethodPointerByName(Il2CppClass* klass, const std::string& meth
     ThreadAttachGuard guard(domain);
     if (!guard.Attached()) return out;
 
+    // B-L9: scan all matching overloads and surface ambiguity rather than
+    // silently returning the first overload.
     const MethodInfo* match = nullptr;
+    std::size_t matchCount = 0;
     void* iter = nullptr;
     for (;;) {
         const MethodInfo* m = SehNextMethod(r.class_get_methods, klass, &iter);
         if (m == nullptr) break;
         const char* n = (r.method_get_name != nullptr) ? SehMethodName(r.method_get_name, m) : nullptr;
-        if (n != nullptr && methodName == n) { match = m; break; }
+        if (n != nullptr && methodName == n) {
+            if (match == nullptr) match = m;
+            ++matchCount;
+        }
     }
+    out.matchCount = matchCount;
+    out.ambiguous  = (matchCount > 1u);
     if (match == nullptr) return out;
 
     out.name  = methodName;
     out.token = (r.method_get_token != nullptr) ? SehMethodToken(r.method_get_token, match) : 0u;
+    if (out.ambiguous) return out;
     out.address = ReadMethodPointer(match);
     out.ok = (out.address != nullptr);
     return out;

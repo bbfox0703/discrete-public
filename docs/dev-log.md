@@ -12,6 +12,25 @@ this file grows too large.
 
 -----
 
+## 2026-11-27 (build 1584) — Fix B-L9 + B-L10 + B-L11 + B-L12 (completes 100% of Block B: ambiguity & open-generic guards before JIT, collision-free `MethodSignatureFormat` suffixes, near-zero backward-scan clamping, `Outer/Inner` `declaringClass` & doc sync)
+
+- **Bug fixes (`B-L9`, `B-L10`, `B-L11`, `B-L12` — completes 100% of Block B Critical/High/Medium/Low findings):**
+  - **`B-L9` (`dll/src/mono/{MonoResolver.{h,cpp},MonoClassWalker.{h,cpp},MonoMethodFinder.cpp,MonoMethodInvoker.cpp}`, `dll/src/il2cpp/IL2CPPClassWalker.{h,cpp}`, `dll/src/shared/ExportAPI.cpp`, `docs/pipe-protocol.md`):**
+    - Opt-bound `mono_class_is_generic` and `mono_method_is_generic` in `MonoResolver` (with arity backtick fallback when unbound) and guarded `MonoMethodFinder::FindMethodInstances`, `MonoMethodInvoker::ResolveOverload`, and `MonoClassWalker::CompileMethodByName` so open-generic classes/methods never invoke `mono_compile_method`.
+    - Updated `Mono::CompileMethodByName` and `IL2CPP::GetMethodPointerByName` to scan all matching overloads first, record `ambiguous` / `matchCount`, and bail out before JIT / pointer resolution on ambiguity; surfaced `"ambiguous"` and `"match_count"` in `monoCompileMethod` and updated `docs/pipe-protocol.md`.
+  - **`B-L10` (`dll/src/shared/MethodSignatureFormat.h`):**
+    - Rewrote `ShortenManagedTypeName` to peel trailing array rank specifiers (`[]`, `[,]`, jagged `[][]`) BEFORE checking the primitive table (`System.Int32[]` → `intArr`), parse and recursively shorten top-level generic arguments in both `<...>` and Mono `[...]` forms (`List`1<System.Int32>` → `List_int` vs `List_string`, `Dictionary`2<K, V>` → `Dictionary_K_V`), and slice the innermost segment after `/` or `.` at bracket depth 0 BEFORE stripping arity backticks (`Ns.Outer`1/Inner` → `Inner`).
+  - **`B-L11` (`dll/src/shared/AddressBounds.h`, `dll/src/mono/MonoAddressFinder.cpp`, `dll/src/il2cpp/IL2CPPAddressFinder.cpp`):**
+    - Added `AddressBounds::ComputeBackwardScanRange` and migrated `Mono::WhatIsAt`, `IL2CPP::WhatIsAt`, and `IL2CPP::WhatIsAtAcceptingArrays` onto it so near-zero addresses clamp `maxSteps` cleanly with `scannedFrom == rangeStart == start - (maxSteps - 1) * stride` and exact `bufIdx == p - rangeStart` alignment.
+  - **`B-L12` (`dll/src/mono/MonoMethodFinder.cpp`, `dll/src/il2cpp/IL2CPPMethodFinder.cpp`, `dll/src/il2cpp/IL2CPPFieldXref.h`):**
+    - Walked `class_get_nesting_type` (Mono) / `class_get_declaring` (IL2CPP) in `FindMethodInstances` to emit `Outer/Inner` `declaringClass` and outermost `declaringNamespace` so nested types round-trip back into `FindClass`.
+    - Updated `IL2CPPFieldXref.h` header documentation to accurately describe v1 static reads/writes (`0x89`), v2 chain, v3 lazy-init slot, and instance-field heuristic scanning.
+  - Added C++ unit test suite `Test_BL10_BL11_MethodSignatureAndScanRange` in `dll/tests/dll_core_test.cpp` (+89 checks on x64 and x86).
+  - Marked `B-L9`, `B-L10`, `B-L11`, and `B-L12` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1584) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1258 passed (0 failed, 0 skipped, locked mode); Rust core dev 118 (x64) / 119 (x86) + release `+crt-static` 118 (x64) / 119 (x86) passed; C++ `discrete_dll_test` 956 passed (x64) / 956 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
 ## 2026-11-27 (build 1583) — Fix B-L2 + B-L3 + B-L8 (rank/enum guard on array detection, dead-code & unsorted `vtableSet` cleanup, `mono_domain_get` optBind, SEH & `ResolveStaticBaseAddress` attach-guard parity)
 
 - **Bug fixes (`B-L2`, `B-L3`, `B-L8`):**

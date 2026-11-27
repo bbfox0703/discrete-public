@@ -20,6 +20,7 @@
 #include "ManagedLayout.h"
 #include "Memory.h"
 #include "MethodInvokeValidation.h"
+#include "MethodSignatureFormat.h"
 #include "MethodTokenIndex.h"
 #include "ModuleLifecycle.h"
 #include "MonoVtableFilter.h"
@@ -2686,6 +2687,82 @@ void Test_BL1_BL5_RetryThrottleAndPageFallback() {
     }
 }
 
+// ============================================================================
+// B-L10 + B-L11 — MethodSignatureFormat humanSuffix disambiguation &
+// ComputeBackwardScanRange near-zero clamping
+// ============================================================================
+void Test_BL10_BL11_MethodSignatureAndScanRange() {
+    // 1. B-L10: ShortenManagedTypeName + MakeHumanSuffix
+    {
+        using Discrete::Shared::ShortenManagedTypeName;
+        using Discrete::Shared::MakeHumanSuffix;
+
+        // Primitives + primitive arrays (strip [] BEFORE kMap lookup)
+        CHECK(ShortenManagedTypeName("System.Int32") == "int");
+        CHECK(ShortenManagedTypeName("System.Int32[]") == "intArr");
+        CHECK(ShortenManagedTypeName("System.Single[,]") == "floatArr");
+        CHECK(ShortenManagedTypeName("System.String[][]") == "stringArrArr");
+        CHECK(ShortenManagedTypeName("UnityEngine.Vector3") == "Vector3");
+        CHECK(ShortenManagedTypeName("") == "T");
+
+        // Nested types under generic outer class must not collide on Outer
+        CHECK(ShortenManagedTypeName("Ns.Outer`1/Inner") == "Inner");
+        CHECK(ShortenManagedTypeName("Ns.Outer`1/Other") == "Other");
+        CHECK(ShortenManagedTypeName("Ns.Outer`1<System.Int32>/Inner<System.String>") == "Inner_string");
+
+        // Generic instantiations preserve shortened type arguments (both <...> and Mono [...])
+        CHECK(ShortenManagedTypeName("System.Collections.Generic.List`1<System.Int32>") == "List_int");
+        CHECK(ShortenManagedTypeName("System.Collections.Generic.List`1<System.String>") == "List_string");
+        CHECK(ShortenManagedTypeName("System.Collections.Generic.List`1[System.Int32]") == "List_int");
+        CHECK(ShortenManagedTypeName("System.Collections.Generic.List`1[System.Int32][]") == "List_intArr");
+        CHECK(ShortenManagedTypeName("System.Collections.Generic.Dictionary`2<System.String, System.Int32>")
+              == "Dictionary_string_int");
+        CHECK(ShortenManagedTypeName(
+                  "System.Collections.Generic.Dictionary`2<System.String, System.Collections.Generic.List`1<System.Single>>")
+              == "Dictionary_string_List_float");
+
+        // MakeHumanSuffix distinguishes overloaded generic parameters
+        CHECK(MakeHumanSuffix({"System.Collections.Generic.List`1<System.Int32>"}) == "List_int");
+        CHECK(MakeHumanSuffix({"System.Collections.Generic.List`1<System.String>"}) == "List_string");
+        CHECK(MakeHumanSuffix({"System.Int32[]", "System.Single"}) == "intArr_float");
+        CHECK(MakeHumanSuffix({"System.Single", "System.Single", "System.Single"}) == "3float");
+        CHECK(MakeHumanSuffix({}) == "noargs");
+    }
+
+    // 2. B-L11: ComputeBackwardScanRange never underflows near address 0 and keeps
+    //    rangeStart == start - (maxSteps - 1) * stride and bufIdx == p - rangeStart.
+    {
+        using Discrete::AddressBounds::ComputeBackwardScanRange;
+        constexpr std::size_t kStride = 8u;
+
+        // Normal high address
+        const auto hi = ComputeBackwardScanRange(0x100004u, 4096u, kStride);
+        CHECK(hi.start == 0x100000u);
+        CHECK(hi.maxSteps == 512u);
+        CHECK(hi.bulkBytes == 4096u);
+        CHECK(hi.rangeStart == hi.start - (hi.maxSteps - 1u) * kStride);
+        CHECK(hi.scannedTo == hi.start + kStride);
+
+        // Near-zero addresses: 0x0, 0x4, 0x8, 0x18, 0x24
+        const std::uintptr_t nearZeroAddrs[] = {0x0u, 0x4u, 0x8u, 0x18u, 0x24u};
+        for (std::uintptr_t a : nearZeroAddrs) {
+            const auto r = ComputeBackwardScanRange(a, 4096u, kStride);
+            CHECK(r.rangeStart == 0u);
+            CHECK(r.maxSteps == static_cast<std::size_t>(r.start / kStride) + 1u);
+            CHECK(r.bulkBytes == r.maxSteps * kStride);
+            CHECK(r.start >= (r.maxSteps - 1u) * kStride);
+            CHECK(r.rangeStart == r.start - (r.maxSteps - 1u) * kStride);
+            for (std::size_t i = 0; i < r.maxSteps; ++i) {
+                const std::uintptr_t p = r.start - i * kStride;
+                const std::size_t bufIdx = (r.maxSteps - 1u - i) * kStride;
+                CHECK(p >= r.rangeStart);
+                CHECK(bufIdx == static_cast<std::size_t>(p - r.rangeStart));
+                CHECK(bufIdx + kStride <= r.bulkBytes);
+            }
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -2714,6 +2791,7 @@ int main() {
     Test_CL4_CL5_CL7_ValidationAndBuildId();
     Test_CL6_SessionOwnershipAndSharedClasses();
     Test_BL1_BL5_RetryThrottleAndPageFallback();
+    Test_BL10_BL11_MethodSignatureAndScanRange();
 
     const char* arch = (sizeof(void*) == 4) ? "x86" : "x64";
     if (g_failures == 0) {

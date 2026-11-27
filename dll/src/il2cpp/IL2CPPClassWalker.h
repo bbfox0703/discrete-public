@@ -101,10 +101,12 @@ StaticFieldAddress ResolveStaticFieldAddress(Il2CppClass* klass, const std::stri
 void* ResolveStaticBaseAddress(Il2CppClass* klass);
 
 struct MethodPointer {
-    bool          ok      = false;
-    void*         address = nullptr;
+    bool          ok         = false;
+    bool          ambiguous  = false;  // true when >1 overload shares `methodName` (B-L9)
+    std::size_t   matchCount = 0;
+    void*         address    = nullptr;
     std::string   name;
-    std::uint32_t token   = 0;
+    std::uint32_t token      = 0;
 };
 MethodPointer GetMethodPointerByName(Il2CppClass* klass, const std::string& methodName);
 

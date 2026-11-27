@@ -5343,11 +5343,26 @@ void RegisterCoreHandlers() {
         if (k == nullptr) return json{{"error", err}};
 
         auto cm = Mono::CompileMethodByName(k, methodName);
-        if (!cm.ok) return json{{"error", "mono_compile_method failed for: " + methodName}};
+        if (!cm.ok) {
+            if (cm.ambiguous) {
+                return json{
+                    {"error",       "ambiguous method (multiple overloads): " + methodName + " — use findMethodInstances"},
+                    {"ambiguous",   true},
+                    {"match_count", cm.matchCount},
+                };
+            }
+            return json{
+                {"error",       "mono_compile_method failed for: " + methodName},
+                {"ambiguous",   false},
+                {"match_count", cm.matchCount},
+            };
+        }
         return json{
-            {"method",  cm.name},
-            {"token",   cm.token},
-            {"address", formatHex(reinterpret_cast<std::uintptr_t>(cm.address))},
+            {"method",      cm.name},
+            {"token",       cm.token},
+            {"address",     formatHex(reinterpret_cast<std::uintptr_t>(cm.address))},
+            {"ambiguous",   cm.ambiguous},
+            {"match_count", cm.matchCount},
         };
     });
 

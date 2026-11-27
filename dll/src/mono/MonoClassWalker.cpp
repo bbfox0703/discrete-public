@@ -582,18 +582,58 @@ CompiledMethodAddress CompileMethodByName(MonoClass* klass, const std::string& m
     ThreadAttachGuard guard(domain);
     if (!guard.Attached()) return out;
 
+    // B-L9: scan all overloads first so ambiguity is detected BEFORE calling
+    // mono_compile_method (avoiding side-effectful JIT on ambiguous lookups).
     MonoMethod* match = nullptr;
+    std::size_t matchCount = 0;
     void* iter = nullptr;
     for (;;) {
         MonoMethod* m = SehNextMethod(r.class_get_methods, klass, &iter);
         if (m == nullptr) break;
         const char* n = (r.method_get_name != nullptr) ? SehCall(r.method_get_name, m) : nullptr;
-        if (n != nullptr && methodName == n) { match = m; break; }
+        if (n != nullptr && methodName == n) {
+            if (match == nullptr) match = m;
+            ++matchCount;
+        }
     }
+    out.matchCount = matchCount;
+    out.ambiguous  = (matchCount > 1u);
     if (match == nullptr) return out;
 
     out.name  = methodName;
     out.token = (r.method_get_token != nullptr) ? SehCall(r.method_get_token, match) : 0u;
+    if (out.ambiguous) {
+        Discrete::Log::Write(MagicStrings::LogCategoryWalk,
+            "CompileMethodByName: ambiguous method '" + methodName + "' (" +
+            std::to_string(matchCount) + " overloads) — skipped JIT");
+        return out;
+    }
+
+    // B-L9: never JIT-compile an open generic class or open generic method
+    // (older Mono runtimes may raise a managed exception inside compile_method).
+    bool isOpenGeneric = false;
+    if (r.class_is_generic != nullptr && SehCall(r.class_is_generic, klass) != 0) {
+        isOpenGeneric = true;
+    } else if (r.class_is_generic == nullptr && r.class_get_name != nullptr) {
+        if (const char* cn = SehCall(r.class_get_name, klass)) {
+            std::string cname(cn);
+            if (cname.find('`') != std::string::npos &&
+                cname.find('<') == std::string::npos &&
+                cname.find('[') == std::string::npos) {
+                isOpenGeneric = true;
+            }
+        }
+    }
+    if (!isOpenGeneric && r.method_is_generic != nullptr &&
+        SehCall(r.method_is_generic, match) != 0) {
+        isOpenGeneric = true;
+    }
+    if (isOpenGeneric) {
+        Discrete::Log::Write(MagicStrings::LogCategoryWalk,
+            "CompileMethodByName: skipped open generic method '" + methodName + "'");
+        return out;
+    }
+
     void* p = SehCompile(r.compile_method, match);
     if (p == nullptr) {
         Discrete::Log::Write(MagicStrings::LogCategoryWalk,

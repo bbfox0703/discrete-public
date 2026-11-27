@@ -412,11 +412,14 @@ pipe RPC (used by batch SDK header / symbol exporters).
 
 ### `monoCompileMethod` *(Mono)*
 
-Args: class spec + `"method": "<name>"`. JIT-compiles the named method (or
-the first overload) and returns the native entry-point.
+Args: class spec + `"method": "<name>"`. JIT-compiles the uniquely-named
+method and returns its native entry-point. Overload ambiguity and open-generic
+definitions are rejected **before** calling `mono_compile_method` (returning
+`"error"` with `"ambiguous": true` / `"match_count": <n>`; use
+`findMethodInstances` for overloaded methods).
 
 ```jsonc
-// → { "method": "...", "token": <uint>, "address": "0x..." }
+// → { "method": "...", "token": <uint>, "address": "0x...", "ambiguous": false, "match_count": 1 }
 ```
 
 ### `monoGetVTable` *(Mono)*

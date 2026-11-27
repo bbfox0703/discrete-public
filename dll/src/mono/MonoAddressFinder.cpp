@@ -937,11 +937,16 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
     if (maxBackwardScan > 16 * 1024) maxBackwardScan = 16 * 1024;
 
     constexpr std::size_t kStride = 8;
-    std::uintptr_t start = addr & ~static_cast<std::uintptr_t>(kStride - 1);
-    std::size_t maxSteps = maxBackwardScan / kStride;
-    if (maxSteps == 0) maxSteps = 1;
-    out.scannedFrom = (start >= maxSteps * kStride) ? (start - (maxSteps - 1) * kStride) : 0;
-    out.scannedTo   = start + kStride;
+    // B-L11: unified near-zero clamp so scannedFrom == rangeStart and
+    // bufIdx == (p - rangeStart) for every step i in [0, maxSteps).
+    const auto scanRange = Discrete::AddressBounds::ComputeBackwardScanRange(
+        addr, maxBackwardScan, kStride);
+    const std::uintptr_t start      = scanRange.start;
+    const std::size_t    maxSteps   = scanRange.maxSteps;
+    const std::size_t    bulkBytes  = scanRange.bulkBytes;
+    const std::uintptr_t rangeStart = scanRange.rangeStart;
+    out.scannedFrom = rangeStart;
+    out.scannedTo   = scanRange.scannedTo;
 
     const auto& r = GetResolver();
     MonoDomain* domain = GetRootDomain();
@@ -988,10 +993,6 @@ AddressLookup WhatIsAt(std::uintptr_t addr, std::size_t maxBackwardScan) {
     // result scan dropped from 16 s to ~4-5 s. Pages that AV are zero-
     // filled so the inner loop sees "no candidate" — same effective
     // behavior as the old per-step code.
-    const std::size_t bulkBytes = maxSteps * kStride;
-    const std::uintptr_t rangeStart = start >= (maxSteps - 1) * kStride
-        ? start - (maxSteps - 1) * kStride
-        : 0;
     std::vector<std::uint8_t> bulkBuf(bulkBytes, 0);
     {
         constexpr std::size_t kPageBytes = 4096;

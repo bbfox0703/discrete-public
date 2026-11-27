@@ -358,23 +358,23 @@
 - `IL2CPP::ResolveStaticBaseAddress`（`IL2CPPClassWalker.cpp:522-527`）沒有 attach guard，Mono 版（`MonoClassWalker.cpp:478-483`）有；`ReadClassInfo` 只有 Mono 有 `forceSetup`。
 - 修法：IL2CPP 的 invoker 改用 `ManagedLayout`；accessor 統一走 `SehCall`。
 
-**B-L9 · 方法解析：只取第一個 overload、先 JIT 再判斷是否歧義**
+**B-L9 · 方法解析：只取第一個 overload、先 JIT 再判斷是否歧義 — ✅ FIXED (2026-11-27)**
 - 位置：`MonoClassWalker.cpp:503-523`（`CompileMethodByName`）、`IL2CPPClassWalker.cpp:545-559`（`GetMethodPointerByName`）；`MonoMethodInvoker.cpp:199-205`；`MonoMethodFinder.cpp:191-201`
 - 成因：前兩者遇到 overload 時靜默回傳第一個符合的方法；`ResolveOverload` 會先對每個候選呼叫 `mono_compile_method`，之後才因為 `ambiguous_method` 放棄（多做一次 JIT，產生副作用）。`FindMethodInstances` 只排除 abstract，不排除 open generic method / generic type definition 的方法；在舊版 Mono 上，`mono_compile_method` 失敗時可能用 `mono_raise_exception` 丟出 managed exception，而不是回傳 NULL（待驗證）。
 - 修法：歧義判斷放在 JIT 之前；跳過 `is_generic` / generic container 的方法；overload API 回傳 `ambiguous` 狀態。
 
-**B-L10 · `MethodSignatureFormat` 的 humanSuffix 碰撞**
+**B-L10 · `MethodSignatureFormat` 的 humanSuffix 碰撞 — ✅ FIXED (2026-11-27)**
 - 位置：`dll/src/shared/MethodSignatureFormat.h:30-42`
 - 成因：`System.Int32[]` 不在對照表中，所以變成 `Int32Arr` 而不是 `intArr`（與 scalar 的 keyword 規則不一致）；`Ns.Outer`1/Inner<…>` 先在 `<` 截斷、再在 `` ` `` 截斷，結果只剩 `Outer`，同一個泛型外層類別下的不同巢狀型別會得到相同的 suffix；`List<int>` / `List<string>` 都變成 `List`。CE 符號名稱可能因此重複。
 - 修法：先剝掉 `[]` 再查表；先處理 `/` 取最後一段，再處理 `` ` `` 與 `<`；泛型引數縮寫後併入 suffix（例如 `List_int`）。
 
-**B-L11 · 小型邊界問題**
+**B-L11 · 小型邊界問題 — ✅ FIXED (2026-11-27)**
 - `MonoFieldXref.cpp:124-127`：`switch` 的 `count * 4` 在 x86 的 `size_t` 下可能溢位，只影響畸形 IL 的對齊。
 - `MonoFieldXref.cpp:305`、`IL2CPPFieldXref.cpp:492`：`limit == 0` 時第一筆就 truncated（上層已驗證，屬防禦性問題）。
 - `MonoAddressFinder.cpp:630` vs `:681-683`、`IL2CPPAddressFinder.cpp:908` vs `:932-934`：`scannedFrom` 與 `rangeStart` 在接近位址 0 時用不同的條件計算，buffer index 與 `p` 會錯位（實際上碰不到）。
 - `MonoMethodInvoker.cpp:605-626`、`IL2CPPMethodInvoker.cpp:615-645`：提早返回的錯誤路徑沒有填 `elapsedMs`，也沒有寫 log。
 
-**B-L12 · 過時 / 錯誤的註解**
+**B-L12 · 過時 / 錯誤的註解 — ✅ FIXED (2026-11-27)**
 - `IL2CPPFieldXref.h:30-37`：說 v1 不偵測寫入（`0x89`），但 `IL2CPPFieldXref.cpp:54-61` 已經把它分類為 `write`。
 - `MonoMethodFinder.h:29`：`declaringClass` 寫的是「Outer/Inner form」，實作（`MonoMethodFinder.cpp:106-113`、`IL2CPPMethodFinder.cpp:113-120`）只取葉節點名稱，沒有走 nesting chain，巢狀類別的 overload 因此無法直接 round-trip 回 `FindClass`。
 - `MonoDomain.cpp:18-19`：「Pipe worker is single-threaded today」，與多 client 的現況不符。
