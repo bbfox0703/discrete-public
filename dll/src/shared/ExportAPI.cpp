@@ -324,6 +324,7 @@ json CaptureMonoStructFields(const StructDecodeFieldFn& decodeField,
         if (f.flags & 0x10u) continue;          // skip statics
         if (produced >= memberCap) break;
         const long relOff = static_cast<long>(f.offset) - hdr;
+        if (relOff < 0) continue;               // C-L8: skip torn-class negative struct offsets
         std::uintptr_t memberAddr = structBase + static_cast<std::uintptr_t>(relOff);
         const std::string& decType = (f.isEnum && !f.underlyingTypeName.empty())
             ? f.underlyingTypeName : f.typeName;
@@ -565,6 +566,7 @@ json CaptureIl2cppStructFields(const StructDecodeFieldFn& decodeField,
         if (f.flags & 0x10u) continue;          // skip statics
         if (produced >= memberCap) break;
         const long relOff = static_cast<long>(f.offset) - hdr;
+        if (relOff < 0) continue;               // C-L8: skip torn-class negative struct offsets
         std::uintptr_t memberAddr = structBase + static_cast<std::uintptr_t>(relOff);
         const std::string& decType = (f.isEnum && !f.underlyingTypeName.empty())
             ? f.underlyingTypeName : f.typeName;
@@ -2014,6 +2016,9 @@ json BuildHandshakeJson() {
 #else
     j["stable_module_relative_methods"] = false;
 #endif
+    // C-L8: advertise every registered RPC command name so the UI can probe
+    // capabilities without switching on the backend string.
+    j["commands"] = PipeServer::RegisteredCommands();
     return j;
 }
 
@@ -2220,7 +2225,7 @@ void RegisterCoreHandlers() {
                 rows.push_back(EmitCandidateRow(cands[i], dt, fmtHex));
             }
             dtStrOut = std::string(ValueDataTypeClrName(dt));
-        });
+        }, PipeServer::CurrentClientId());
 
         if (!ok)               return json{{"error", "session_not_found"}};
         if (!errorOut.empty()) return json{{"error", errorOut}};
@@ -2254,7 +2259,7 @@ void RegisterCoreHandlers() {
         try {
             sessionId = std::stoull(args["sessionId"].get<std::string>());
         } catch (...) { return json{{"error", "invalid 'sessionId'"}}; }
-        bool dropped = ValueScan::SessionManager::Instance().End(sessionId);
+        bool dropped = ValueScan::SessionManager::Instance().End(sessionId, PipeServer::CurrentClientId());
         return json{
             {"ok",        true},
             {"sessionId", std::to_string(sessionId)},
@@ -2386,7 +2391,7 @@ void RegisterCoreHandlers() {
             std::size_t toShow = std::min(totalCands, emitLimit);
             for (std::size_t i = 0; i < toShow; ++i)
                 rows.push_back(EmitGroupCandidateRow(cands[i], slots, fmtHex));
-        });
+        }, PipeServer::CurrentClientId());
 
         if (!ok)               return json{{"error", "session_not_found"}};
         if (!errorOut.empty()) return json{{"error", errorOut}};
@@ -2433,7 +2438,7 @@ void RegisterCoreHandlers() {
                 : (offset + std::min(totalCands - offset, limit));
             for (std::size_t i = offset; i < end; ++i)
                 rows.push_back(EmitGroupCandidateRow(cands[i], slots, fmtHex));
-        });
+        }, PipeServer::CurrentClientId());
         if (!ok) return json{{"error", "session_not_found"}};
         return json{
             {"ok",              true},
@@ -2452,7 +2457,7 @@ void RegisterCoreHandlers() {
         std::uint64_t sessionId = 0;
         try { sessionId = std::stoull(args["sessionId"].get<std::string>()); }
         catch (...) { return json{{"error", "invalid 'sessionId'"}}; }
-        bool dropped = GroupScan::SessionManager::Instance().End(sessionId);
+        bool dropped = GroupScan::SessionManager::Instance().End(sessionId, PipeServer::CurrentClientId());
         return json{
             {"ok",        true},
             {"sessionId", std::to_string(sessionId)},
@@ -4789,7 +4794,17 @@ void RegisterCoreHandlers() {
             });
         }
 
-        std::uint64_t sid = Snapshot::SessionManager::Instance().Begin(std::move(session));
+        // C-L6: Mono decoded every class payload during Begin, so `plan` is no
+        // longer needed — free it immediately to reduce 32-bit peak memory, and
+        // wrap `classes` in an immutable shared_ptr so snapshotChunk can slice
+        // outside SessionManager's global mutex.
+        session->plan.clear();
+        session->plan.shrink_to_fit();
+        session->sharedClasses = std::make_shared<const std::vector<Snapshot::ClassPayload>>(
+            std::move(session->classes));
+
+        std::uint64_t sid = Snapshot::SessionManager::Instance().Begin(
+            std::move(session), PipeServer::CurrentClientId());
 
         json scanStats = {
             {"regionsTotal",     bulk.regionsTotal},
@@ -4886,18 +4901,32 @@ void RegisterCoreHandlers() {
         json classes = json::array();
         std::size_t totalPlan   = 0;
         std::size_t startCursor = 0;
+        std::shared_ptr<const std::vector<Snapshot::ClassPayload>> sharedClasses;
         bool found = Snapshot::SessionManager::Instance().View(sid,
             [&](Snapshot::Session& s) {
-                totalPlan = s.classes.size();
                 startCursor = (cursorIn < 0) ? 0 : static_cast<std::size_t>(cursorIn);
-                if (startCursor > totalPlan) startCursor = totalPlan;
-                std::size_t end = std::min(totalPlan, startCursor + limit);
-                for (std::size_t i = startCursor; i < end; ++i) {
-                    classes.push_back(s.classes[i]);   // json copy — small per entry
+                if (s.sharedClasses) {
+                    sharedClasses = s.sharedClasses;
+                } else {
+                    totalPlan = s.classes.size();
+                    if (startCursor > totalPlan) startCursor = totalPlan;
+                    std::size_t end = std::min(totalPlan, startCursor + limit);
+                    for (std::size_t i = startCursor; i < end; ++i) {
+                        classes.push_back(s.classes[i]);
+                    }
                 }
-            });
+            }, PipeServer::CurrentClientId());
         if (!found) {
             return json{{"error", "session_not_found"}, {"snapshotId", sidStr}};
+        }
+        // C-L6: Perform the JSON slice copy outside SessionManager::mu_.
+        if (sharedClasses) {
+            totalPlan = sharedClasses->size();
+            if (startCursor > totalPlan) startCursor = totalPlan;
+            std::size_t end = std::min(totalPlan, startCursor + limit);
+            for (std::size_t i = startCursor; i < end; ++i) {
+                classes.push_back((*sharedClasses)[i]);
+            }
         }
         std::size_t nextCursor = startCursor + static_cast<std::size_t>(classes.size());
         bool done = (nextCursor >= totalPlan);
@@ -4919,7 +4948,7 @@ void RegisterCoreHandlers() {
         try { sid = std::stoull(sidStr); } catch (...) {
             return json{{"error", "bad 'snapshotId'"}};
         }
-        bool dropped = Snapshot::SessionManager::Instance().End(sid);
+        bool dropped = Snapshot::SessionManager::Instance().End(sid, PipeServer::CurrentClientId());
         return json{
             {"ok",         true},
             {"snapshotId", sidStr},
@@ -5393,8 +5422,10 @@ void RegisterCoreHandlers() {
         // is never WORSE than the default, instead of returning a misleading 0.
         bool liveWalkEmpty = false;
         if (usedLiveWalk && matches.empty()) { usedLiveWalk = false; liveWalkEmpty = true; }
+        const bool skipMapped = args.value("skipMapped", true);
         if (!usedLiveWalk) {
-            matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(vtable), limit, &stats);
+            matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(vtable),
+                                             limit, &stats, 0, 0, skipMapped);
         }
         if (ScanCancel::IsCancelRequested()) {
             return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
@@ -5446,10 +5477,10 @@ void RegisterCoreHandlers() {
             char line[256];
             std::snprintf(line, sizeof(line),
                 "findInstances(Mono) class=%p vtable=%p matches=%zu "
-                "regions total=%zu scanned=%zu skipImage=%zu skipStack=%zu bytes=%zu stacks=%zu",
+                "regions total=%zu scanned=%zu skipImage=%zu skipMapped=%zu skipStack=%zu bytes=%zu stacks=%zu",
                 static_cast<const void*>(k), static_cast<const void*>(vtable),
                 matches.size(), stats.regionsTotal, stats.regionsScanned,
-                stats.regionsSkipImage, stats.regionsSkipStack,
+                stats.regionsSkipImage, stats.regionsSkipMapped, stats.regionsSkipStack,
                 stats.bytesScanned, stats.threadStacks);
             Discrete::Log::Write(MagicStrings::LogCategoryScan, line);
         }
@@ -5467,12 +5498,13 @@ void RegisterCoreHandlers() {
             {"matches",  std::move(arr)},
             {"filter",   std::move(filterStats)},
             {"scan_stats", json{
-                {"regions_total",      stats.regionsTotal},
-                {"regions_scanned",    stats.regionsScanned},
-                {"regions_skip_image", stats.regionsSkipImage},
-                {"regions_skip_stack", stats.regionsSkipStack},
-                {"bytes_scanned",      stats.bytesScanned},
-                {"thread_stacks",      stats.threadStacks},
+                {"regions_total",       stats.regionsTotal},
+                {"regions_scanned",     stats.regionsScanned},
+                {"regions_skip_image",  stats.regionsSkipImage},
+                {"regions_skip_mapped", stats.regionsSkipMapped},
+                {"regions_skip_stack",  stats.regionsSkipStack},
+                {"bytes_scanned",       stats.bytesScanned},
+                {"thread_stacks",       stats.threadStacks},
             }},
         };
     });
@@ -5485,7 +5517,7 @@ void RegisterCoreHandlers() {
     // as walkInstance, so primitives come back as `value`, strings as `ptr`
     // + `string`, references as `ptr`, unreadable rows as `error: unreadable`.
     PipeServer::RegisterHandler(MagicStrings::CmdListFieldValuesAcrossInstances,
-        [resolveClassFromArgs, formatHex, decodeField](const json& args) -> json {
+        [resolveClassFromArgs, formatHex, decodeField, filterMatches](const json& args) -> json {
         if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
         std::string err;
         Mono::MonoClass* k = resolveClassFromArgs(args, err);
@@ -5518,11 +5550,15 @@ void RegisterCoreHandlers() {
             limit = std::min<std::size_t>(args["limit"].get<std::size_t>(), 4096);
         }
         // C-M1: own a ScanCancel::Scope across the heap scan + row decode.
+        // C-L3: match findInstances's skipMapped=true and post-scan validation.
+        const bool skipMapped = args.value("skipMapped", true);
         ScanCancel::Scope scanCancelScope;
-        auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(vtable), limit, nullptr);
+        auto matches = Memory::ScanForPointer(reinterpret_cast<std::uintptr_t>(vtable),
+                                              limit, nullptr, 0, 0, skipMapped);
         if (ScanCancel::IsCancelRequested()) {
             return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
         }
+        (void)filterMatches(matches, reinterpret_cast<std::uintptr_t>(vtable), args, {}, {});
 
         json rows = json::array();
         for (const void* p : matches) {
@@ -6130,7 +6166,8 @@ void RegisterCoreHandlers() {
 
         if (ScanCancel::IsCancelRequested())
             return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
-        std::uint64_t sessionId = ValueScan::SessionManager::Instance().Begin(dt, std::move(sessionCands));
+        std::uint64_t sessionId = ValueScan::SessionManager::Instance().Begin(
+            dt, std::move(sessionCands), PipeServer::CurrentClientId());
 
         // Re-render the same rows for immediate display — caller doesn't have
         // to make a second RPC to see the initial set. ViewWith locks the
@@ -6144,7 +6181,7 @@ void RegisterCoreHandlers() {
             shown = std::min(kept, emitLimit);          // DISPLAYED (sent to UI)
             for (std::size_t i = 0; i < shown; ++i)
                 rows.push_back(EmitCandidateRow(cands[i], d, fmtHex));
-        });
+        }, PipeServer::CurrentClientId());
 
         {
             char line[320];
@@ -6341,7 +6378,8 @@ void RegisterCoreHandlers() {
 
         auto cands = BuildGroupCandidates(hits, static_cast<int>(slotSpecs.size()), retainCap, perInstanceLeafCap);
         std::size_t totalCands = cands.size();
-        std::uint64_t sessionId = GroupScan::SessionManager::Instance().Begin(slotSpecs, std::move(cands));
+        std::uint64_t sessionId = GroupScan::SessionManager::Instance().Begin(
+            slotSpecs, std::move(cands), PipeServer::CurrentClientId());
 
         json rows = json::array();
         std::size_t shown = 0;
@@ -6351,7 +6389,7 @@ void RegisterCoreHandlers() {
             shown = std::min(cs.size(), emitLimit);
             for (std::size_t i = 0; i < shown; ++i)
                 rows.push_back(EmitGroupCandidateRow(cs[i], sl, fmtHex));
-        });
+        }, PipeServer::CurrentClientId());
 
         {
             char line[256];
@@ -6435,15 +6473,17 @@ void RegisterCoreHandlers() {
         // types so member addresses + reported offsets are struct-relative.
         // Reference-type walks: `addr` is the object base (incl header) and
         // offsets are header-inclusive, so addr+offset is already correct → 0.
-        const long structHeaderAdjust =
-            (r.class_is_valuetype != nullptr && r.class_is_valuetype(k) != 0)
-                ? static_cast<long>(ManagedLayout::kObjectHeader) : 0;
-
-        // Walk parent chain (cap at 16 levels — defends against pathological loops).
+        // Walk parent chain (cap at 16 levels — defends against pathological loops)
+        // and query class_is_valuetype under the SAME ThreadAttachGuard (C-L3:
+        // direct Mono r.class_* calls must never run outside an attach guard).
+        long structHeaderAdjust = 0;
         std::vector<Mono::MonoClass*> chain;
         {
             Mono::ThreadAttachGuard guard(domain);
             if (!guard.Attached()) return json{{"error", "mono_thread_attach failed"}};
+            if (r.class_is_valuetype != nullptr && r.class_is_valuetype(k) != 0) {
+                structHeaderAdjust = static_cast<long>(ManagedLayout::kObjectHeader);
+            }
             for (Mono::MonoClass* cur = k; cur != nullptr && chain.size() < 16; ) {
                 chain.push_back(cur);
                 if (r.class_get_parent == nullptr) break;
@@ -6632,25 +6672,32 @@ void RegisterCoreHandlers() {
     });
 
     // Phase 5 segment 3 — getMetadataStats (Mono).
-    // Walks every class across every loaded assembly. Each Mono helper does
-    // its own thread attach, so we deliberately don't hold an outer guard
-    // (nested attach/detach destroyed BongoCat in build #54).
+    // C-L3: Hold ONE outer ThreadAttachGuard across the whole assembly/class
+    // walk (matching searchSymbols / dumpClassInfo / snapshot) so nested
+    // Mono helpers reuse the thread attachment via ThreadAttachGuard's
+    // thread-local depth counter instead of attach/detaching once per assembly.
     PipeServer::RegisterHandler("getMetadataStats",
         [updateStats, buildStatsJson](const json&) -> json {
         if (!Mono::IsResolved()) return json{{"error", "mono runtime not resolved"}};
+        Mono::MonoDomain* domain = Mono::GetRootDomain();
+        if (domain == nullptr) return json{{"error", "no mono root domain"}};
 
         NameStats s;
-        auto assemblies = Mono::EnumerateAssemblies();
         std::size_t scanned = 0;
-        for (const auto& a : assemblies) {
-            // Use the image the enumeration already handed back — a per-name
-            // FindImageByName here re-walked the domain 337× per call
-            // (the documented "23K EnumerateAssemblies → freeze" shape).
-            Mono::MonoImage* img = a.image;
-            if (img == nullptr) continue;
-            auto classes = Mono::EnumerateClasses(img);
-            for (const auto& c : classes) updateStats(s, c.ns, c.name);
-            ++scanned;
+        {
+            Mono::ThreadAttachGuard guard(domain);
+            if (!guard.Attached()) return json{{"error", "mono_thread_attach failed"}};
+            auto assemblies = Mono::EnumerateAssemblies();
+            for (const auto& a : assemblies) {
+                // Use the image the enumeration already handed back — a per-name
+                // FindImageByName here re-walked the domain 337× per call
+                // (the documented "23K EnumerateAssemblies → freeze" shape).
+                Mono::MonoImage* img = a.image;
+                if (img == nullptr) continue;
+                auto classes = Mono::EnumerateClasses(img);
+                for (const auto& c : classes) updateStats(s, c.ns, c.name);
+                ++scanned;
+            }
         }
         json out = buildStatsJson(s);
         out["scope"]               = "all_assemblies";
@@ -8425,7 +8472,8 @@ void RegisterCoreHandlers() {
         if (ScanCancel::IsCancelRequested()) {
             return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
         }
-        std::uint64_t sid = Snapshot::SessionManager::Instance().Begin(std::move(session));
+        std::uint64_t sid = Snapshot::SessionManager::Instance().Begin(
+            std::move(session), PipeServer::CurrentClientId());
 
         json scanStats = {
             {"regionsTotal",     bulk.regionsTotal},
@@ -8516,11 +8564,14 @@ void RegisterCoreHandlers() {
         // DropAll() are never blocked, while the local shared_ptr prevents
         // use-after-free if the session is ended or expired mid-chunk.
         std::shared_ptr<Snapshot::ISnapshotStreamDecoder> decoder;
+        std::shared_ptr<const std::vector<Snapshot::ClassPayload>> sharedClasses;
         bool found = Snapshot::SessionManager::Instance().View(sid,
             [&](Snapshot::Session& s) {
                 startCursor = (cursorIn < 0) ? 0 : static_cast<std::size_t>(cursorIn);
                 if (s.streamDecoder) {
                     decoder = s.streamDecoder;
+                } else if (s.sharedClasses) {
+                    sharedClasses = s.sharedClasses;
                 } else {
                     // Legacy decode-in-Begin slicer (pre-built payloads).
                     totalPlan = s.classes.size();
@@ -8532,11 +8583,20 @@ void RegisterCoreHandlers() {
                     nextCursor = startCursor + static_cast<std::size_t>(classes.size());
                     done = (nextCursor >= totalPlan);
                 }
-            });
+            }, PipeServer::CurrentClientId());
         if (!found) {
             return json{{"error", "session_not_found"}, {"snapshotId", sidStr}};
         }
-        if (decoder) {
+        if (sharedClasses) {
+            totalPlan = sharedClasses->size();
+            if (startCursor > totalPlan) startCursor = totalPlan;
+            std::size_t end = std::min(totalPlan, startCursor + limit);
+            for (std::size_t i = startCursor; i < end; ++i) {
+                classes.push_back((*sharedClasses)[i]);
+            }
+            nextCursor = startCursor + static_cast<std::size_t>(classes.size());
+            done = (nextCursor >= totalPlan);
+        } else if (decoder) {
             totalPlan = decoder->PlanSize();
             if (startCursor > totalPlan) startCursor = totalPlan;
             nextCursor = decoder->DecodeRange(startCursor, limit, classes);
@@ -8579,7 +8639,7 @@ void RegisterCoreHandlers() {
         try { sid = std::stoull(sidStr); } catch (...) {
             return json{{"error", "bad 'snapshotId'"}};
         }
-        bool dropped = Snapshot::SessionManager::Instance().End(sid);
+        bool dropped = Snapshot::SessionManager::Instance().End(sid, PipeServer::CurrentClientId());
         return json{
             {"ok",         true},
             {"snapshotId", sidStr},
@@ -8887,6 +8947,12 @@ void RegisterCoreHandlers() {
         // Phase 32 — generic post-scan filter (validate / aliveOnly / sane / fieldFilter).
         // expectedHeader = Il2CppClass* (the first qword of a real IL2CPP object).
         json filterStats = filterMatches(matches, reinterpret_cast<std::uintptr_t>(k), args, refOffsets, boolOffsets);
+        if (args.value("liveOnly", false)) {
+            // C-L3: IL2CPP does not expose a live-heap walk API; report this
+            // explicitly to mirror the Mono handler's filter stats contract.
+            filterStats["live_walk"] = false;
+            filterStats["live_walk_unavailable"] = true;
+        }
         json arr = json::array();
         for (const void* p : matches) {
             arr.push_back(formatHex(reinterpret_cast<std::uintptr_t>(p)));
@@ -8930,7 +8996,7 @@ void RegisterCoreHandlers() {
     //   * heap scan target is the Il2CppClass* (not a VTable).
     //   * `vtable` is not emitted (Mono-specific).
     PipeServer::RegisterHandler(MagicStrings::CmdListFieldValuesAcrossInstances,
-        [resolveClassFromArgs, formatHex, decodeField, computeArenaExclude](const json& args) -> json {
+        [resolveClassFromArgs, formatHex, decodeField, computeArenaExclude, filterMatches](const json& args) -> json {
         if (!IL2CPP::IsResolved()) return json{{"error", "il2cpp runtime not resolved"}};
         std::string err;
         IL2CPP::Il2CppClass* k = resolveClassFromArgs(args, err);
@@ -8966,6 +9032,9 @@ void RegisterCoreHandlers() {
         if (ScanCancel::IsCancelRequested()) {
             return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
         }
+        // C-L3: apply the same default post-scan header validation as findInstances
+        // so listing field values across instances matches the instance list.
+        (void)filterMatches(matches, reinterpret_cast<std::uintptr_t>(k), args, {}, {});
 
         json rows = json::array();
         for (const void* p : matches) {
@@ -9535,7 +9604,8 @@ void RegisterCoreHandlers() {
 
         if (ScanCancel::IsCancelRequested())
             return json{{"ok", false}, {"cancelled", true}, {"error", "cancelled"}};
-        std::uint64_t sessionId = ValueScan::SessionManager::Instance().Begin(dt, std::move(sessionCands));
+        std::uint64_t sessionId = ValueScan::SessionManager::Instance().Begin(
+            dt, std::move(sessionCands), PipeServer::CurrentClientId());
 
         json rows = json::array();
         std::size_t kept = 0, shown = 0;
@@ -9546,7 +9616,7 @@ void RegisterCoreHandlers() {
             shown = std::min(kept, emitLimit);          // DISPLAYED (sent to UI)
             for (std::size_t i = 0; i < shown; ++i)
                 rows.push_back(EmitCandidateRow(cands[i], d, fmtHex));
-        });
+        }, PipeServer::CurrentClientId());
 
         {
             char line[256];
@@ -9739,7 +9809,8 @@ void RegisterCoreHandlers() {
 
         auto cands = BuildGroupCandidates(hits, static_cast<int>(slotSpecs.size()), retainCap, perInstanceLeafCap);
         std::size_t totalCands = cands.size();
-        std::uint64_t sessionId = GroupScan::SessionManager::Instance().Begin(slotSpecs, std::move(cands));
+        std::uint64_t sessionId = GroupScan::SessionManager::Instance().Begin(
+            slotSpecs, std::move(cands), PipeServer::CurrentClientId());
 
         json rows = json::array();
         std::size_t shown = 0;
@@ -9749,7 +9820,7 @@ void RegisterCoreHandlers() {
             shown = std::min(cs.size(), emitLimit);
             for (std::size_t i = 0; i < shown; ++i)
                 rows.push_back(EmitGroupCandidateRow(cs[i], sl, fmtHex));
-        });
+        }, PipeServer::CurrentClientId());
 
         {
             char line[256];
@@ -10529,13 +10600,25 @@ int Discrete_Init() {
     // begins a session inside the resulting window would lose it and have to
     // re-run — the same collateral-cancel trade ScanCancel already documents,
     // and far cheaper than the retention it prevents.
+    // C-L6: Drop ONLY sessions owned by the disconnecting client (eliminating
+    // the concurrent-disconnect ActiveClientCount() > 1 race and preventing one
+    // client from wiping another client's active sessions), and run a lazy
+    // expiry sweep across all three session managers.
     Discrete::PipeServer::RegisterDisconnectHook([]() {
-        if (Discrete::PipeServer::ActiveClientCount() > 1) return;
-        Discrete::Snapshot::SessionManager::Instance().DropAll();
-        Discrete::ValueScan::SessionManager::Instance().DropAll();
-        Discrete::GroupScan::SessionManager::Instance().DropAll();
-        Discrete::Log::Write(Discrete::MagicStrings::LogCategoryPipe,
-            "last client disconnected — dropped snapshot / value-scan / group-scan sessions");
+        const std::uint64_t cid = Discrete::PipeServer::CurrentClientId();
+        const std::size_t dSnap = Discrete::Snapshot::SessionManager::Instance().DropForOwner(cid);
+        const std::size_t dVal  = Discrete::ValueScan::SessionManager::Instance().DropForOwner(cid);
+        const std::size_t dGrp  = Discrete::GroupScan::SessionManager::Instance().DropForOwner(cid);
+        Discrete::Snapshot::SessionManager::Instance().ExpireOldSessions();
+        Discrete::ValueScan::SessionManager::Instance().ExpireOldSessions();
+        Discrete::GroupScan::SessionManager::Instance().ExpireOldSessions();
+        if (dSnap + dVal + dGrp > 0) {
+            Discrete::Log::Write(Discrete::MagicStrings::LogCategoryPipe,
+                "client " + std::to_string(cid) + " disconnected — dropped sessions"
+                " snap=" + std::to_string(dSnap) +
+                " val=" + std::to_string(dVal) +
+                " grp=" + std::to_string(dGrp));
+        }
     });
 
     return 0;

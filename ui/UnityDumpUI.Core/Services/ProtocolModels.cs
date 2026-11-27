@@ -75,7 +75,14 @@ public sealed class HandshakeResult
     /// <summary>E-L10 — backend-agnostic capability flag: true when managed
     /// methods have stable module-relative RVAs (supports symbol export).</summary>
     [JsonPropertyName("stable_module_relative_methods")] public bool? StableModuleRelativeMethods { get; set; }
+    /// <summary>C-L8 — sorted list of RPC command names registered on the DLL
+    /// pipe server, so the UI can probe command availability without branching
+    /// on backend names. Null on older DLLs.</summary>
+    [JsonPropertyName("commands")]             public List<string>? Commands      { get; set; }
     [JsonPropertyName("error")]                public string? Error               { get; set; }
+
+    public bool SupportsCommand(string cmd)
+        => Commands is not null && Commands.Contains(cmd);
 }
 
 /// <summary>

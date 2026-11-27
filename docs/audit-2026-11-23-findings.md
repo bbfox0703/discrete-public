@@ -524,7 +524,7 @@
   - `ExportAPI.cpp:2993-2994` 的註解宣稱「otherwise treat as ref by default below」，實際上不會成立（見 C-H2）。
 - 修法：逐條修正；`pipe-protocol.md` 補上這 17 個指令的 request / response 章節（可以直接搬 `MagicStrings.h` 中的註解，再讓 `MagicStrings.h` 只保留指向文件的連結）。
 
-**C-L3 · 次要的雙胞胎漂移（AUDIT 訊號 1 的實例）**
+**C-L3 · 次要的雙胞胎漂移（AUDIT 訊號 1 的實例） — ✅ FIXED (2026-11-27)**
 - `findInstances`：IL2CPP 預設排除 metadata arena 並 `skipMapped=true`（`ExportAPI.cpp:8854-8861`），Mono 直接 `ScanForPointer(vt, limit, &stats)`（`:5307`），不排除 `MEM_MAPPED`，但 Mono snapshot 的 fast path 自己又加了 `skipMapped=true`（`:4182-4184`，註解說這樣是為了「和 wide walk 結果一致」）。同一個類別在 `findInstances` 和 snapshot 中的 instance 集合因此不同。
 - `listFieldValuesAcrossInstances` 兩個 backend 都**沒有**套用 `filterMatches`（`:5426`、`:8970`），而 `findInstances` 預設 `validate=true`。對同一個類別，「列出所有 instance」和「列出所有 instance 的某個欄位」得到的 instance 集合不同（後者含有 stale 的 stack slot）。
 - `liveOnly` 只有 Mono 實作（`:5276-5308`），IL2CPP 會靜默忽略。
@@ -548,7 +548,7 @@
 - `PipeServer::Dispatch` 遇到 `"args": null` 時直接把 null 傳給 handler（`PipeServer.cpp:155`），handler 中的 `args.value(...)` 會丟 `type_error 306`，結果變成 `-32000`，而不是「沒有參數」。
 - 修法：一律 clamp 到上限；`offset` 用 `int64` 讀取並拒絕負值；`elementSize` 上限設為 4096；`dictLimit` 上限設為 4096；`uint*` 拒絕負數；`char` 改用 UTF-8 → UTF-16 解碼取第一個 code unit；`Dispatch` 在 `args` 為 null 或不是 object 時改成 `json::object()`。
 
-**C-L6 · Session 管理的語意與資源**
+**C-L6 · Session 管理的語意與資源 — ✅ FIXED (2026-11-27)**
 - 位置：`dll/src/shared/ValueScanSession.h:76-95`、`:124`；`GroupScanSession.h:87-106`；`SnapshotSession.h:181-189`；`ValueScanSession.cpp:27`、`GroupScanSession.cpp:20`、`SnapshotSession.cpp:26`；`ExportAPI.cpp:4274`、`:4829`
 - 成因：
   1. Session 沒有 owner，id 是全域遞增的小整數。任何 client 都能 refine 或 end 別人的 session（CE bridge 和 UI 共用同一個 id 空間），而且 `ActiveClientCount() > 1` 的判斷在兩個 client 同時斷線時，兩邊都會看到 2，於是都不會 drop。
@@ -563,7 +563,7 @@
   2. `ComputeGameBuildId` 找不到模組時會改用 host EXE，所以永遠不會回傳空字串；`if (id.empty())` 的 legacy `mono.dll` fallback 是 dead code，Unity < 5.4 的遊戲實際上 hash 的是 EXE。
 - 修法：門檻改成以 `GlobalMemoryStatusEx().ullTotalVirtual` 的某個比例計算（例如 75%）；`ComputeGameBuildId` 在找不到指定模組時回傳空字串，把 fallback 決定權交給呼叫端（handshake 與 snapshot 需要一起改，才能維持兩邊一致）。
 
-**C-L8 · `PipeClient` / `BackendAdapter` 的小問題**
+**C-L8 · `PipeClient` / `BackendAdapter` 的小問題 — ✅ FIXED (2026-11-27)**
 - `SnapshotChunkAsync` 在 `Send` 回傳、`_gate` 已釋放之後，才讀取 `PipeFor("snapshotChunk").LastReadMs` 等欄位（`BackendAdapter.cs:1287-1290`）。bulk pipe 是共用的，這段期間如果有其他 bulk RPC（例如 `findInstances`）完成，telemetry 就會被覆蓋。`PipeClient.cs:58-60` 宣稱「single-flight, so plain fields are safe right after the call」並不成立。修法：讓 `SendAsync` 回傳一個 telemetry struct，或把數值放在 envelope 外的 out 參數。
 - `CancelScanAsync` 每次都新開一條連線（`BackendAdapter.cs:1036-1047`），斷線時會觸發 DLL 的 full GC disconnect hook（見 A-L20），而且 `cancelScan` 沒有目標 id，會連 CE bridge 的 scan 一起取消（見 C-M1）。
 - Handshake 沒有 capability 清單（`ExportAPI.cpp:1904-1950`），UI 只能用 `backend` 字串判斷 `dumpIl2cppSymbols` / `diagnoseClassReferences` / `monoCompileMethod` 等只有單一 backend 才有的指令，這和「UI 必須 backend-agnostic」的規則相衝突（Block E 的訊號 1 部分源自這裡）。修法：handshake 加上 `"commands": [...]`，內容就是 `g_handlers` 的 key。

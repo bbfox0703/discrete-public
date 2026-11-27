@@ -11,6 +11,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <string>
@@ -38,6 +39,8 @@ HANDLE g_stopEvent = nullptr;
 // (the "Unload Discrete DLL" path) can't unmap the module while a client
 // thread is still running its code — that race was the unload-time CTD.
 std::atomic<int> g_activeClients{0};
+// C-L6: Per-worker connection id (0 off-worker / in unit tests).
+thread_local std::uint64_t t_currentClientId = 0;
 
 constexpr DWORD kPipeBufferSize = 64 * 1024;
 
@@ -414,8 +417,18 @@ void WorkerThread() {
             // g_activeClients reflects every live worker — no spawn can slip
             // in after Stop() starts waiting.
             g_activeClients.fetch_add(1, std::memory_order_relaxed);
+            static std::atomic<std::uint64_t> g_nextClientId{1};
+            const std::uint64_t workerClientId = g_nextClientId.fetch_add(1, std::memory_order_relaxed);
             try {
-              std::thread([pipe]() {
+              std::thread([pipe, workerClientId]() {
+                // C-L6: Bind this worker's unique connection id for the full
+                // lifetime of its RPCs AND disconnect hooks so session managers
+                // enforce ownership and DropForOwner(CurrentClientId()) drops
+                // only this disconnecting client's sessions.
+                struct ClientIdGuard {
+                    explicit ClientIdGuard(std::uint64_t id) noexcept { t_currentClientId = id; }
+                    ~ClientIdGuard() noexcept { t_currentClientId = 0; }
+                } clientIdGuard(workerClientId);
                 // Exception barrier for the WHOLE thread body. This is a detached
                 // std::thread, so anything escaping its function calls
                 // std::terminate and takes the GAME process down with it. Dispatch
@@ -506,6 +519,23 @@ void ClearDisconnectHooks() {
 
 int ActiveClientCount() {
     return g_activeClients.load(std::memory_order_relaxed);
+}
+
+std::vector<std::string> RegisteredCommands() {
+    std::vector<std::string> names;
+    {
+        std::lock_guard lock(g_mutex);
+        names.reserve(g_handlers.size());
+        for (const auto& kv : g_handlers) {
+            names.push_back(kv.first);
+        }
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+std::uint64_t CurrentClientId() noexcept {
+    return t_currentClientId;
 }
 
 bool Start() {

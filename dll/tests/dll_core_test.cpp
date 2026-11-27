@@ -15,6 +15,7 @@
 #include "AddressBounds.h"
 #include "ExportHelpers.h"
 #include "FieldXrefHelpers.h"
+#include "GroupScanSession.h"
 #include "MainThreadDispatcher.h"
 #include "ManagedLayout.h"
 #include "Memory.h"
@@ -30,6 +31,7 @@
 #include "ScanCancel.h"
 #include "SehFilter.h"
 #include "SnapshotSession.h"
+#include "ValueScanSession.h"
 
 #include <windows.h>
 
@@ -2519,6 +2521,98 @@ void Test_CL4_CL5_CL7_ValidationAndBuildId() {
     }
 }
 
+// ============================================================================
+// C-L6 — Session ownership isolation, per-owner DropForOwner cleanup, and
+// Snapshot sharedClasses off-lock payload lifetime
+// ============================================================================
+void Test_CL6_SessionOwnershipAndSharedClasses() {
+    // 1. Snapshot::SessionManager owner enforcement + DropForOwner + sharedClasses survival
+    {
+        auto& mgr = Discrete::Snapshot::SessionManager::Instance();
+        mgr.DropAll();
+
+        auto s1 = std::make_unique<Discrete::Snapshot::Session>();
+        std::vector<Discrete::Snapshot::ClassPayload> payloads;
+        payloads.push_back(nlohmann::json{{"name", "Hero"}});
+        payloads.push_back(nlohmann::json{{"name", "Enemy"}});
+        s1->sharedClasses = std::make_shared<const std::vector<Discrete::Snapshot::ClassPayload>>(
+            std::move(payloads));
+        const std::uint64_t id1 = mgr.Begin(std::move(s1), /*ownerClientId=*/101u);
+
+        auto s2 = std::make_unique<Discrete::Snapshot::Session>();
+        const std::uint64_t id2 = mgr.Begin(std::move(s2), /*ownerClientId=*/202u);
+
+        // Wrong owner cannot View or End session 1
+        bool viewedWrong = mgr.View(id1, [](Discrete::Snapshot::Session&) {}, /*callerClientId=*/202u);
+        CHECK(!viewedWrong);
+        CHECK(!mgr.End(id1, /*callerClientId=*/202u));
+
+        // Right owner grabs sharedClasses, then session is ended; local shared_ptr stays valid
+        std::shared_ptr<const std::vector<Discrete::Snapshot::ClassPayload>> held;
+        bool viewedRight = mgr.View(id1, [&](Discrete::Snapshot::Session& s) {
+            held = s.sharedClasses;
+        }, /*callerClientId=*/101u);
+        CHECK(viewedRight);
+        CHECK(held && held->size() == 2u);
+
+        // DropForOwner(101) drops only id1, leaving id2 intact
+        CHECK(mgr.DropForOwner(101u) == 1u);
+        CHECK(mgr.DropForOwner(101u) == 0u);
+        CHECK(held->at(0).at("name") == "Hero");
+        CHECK(held->at(1).at("name") == "Enemy");
+        CHECK(!mgr.View(id1, [](Discrete::Snapshot::Session&) {}, 101u));
+        CHECK(mgr.View(id2, [](Discrete::Snapshot::Session&) {}, 202u));
+        CHECK(mgr.End(id2, 202u));
+        mgr.DropAll();
+    }
+
+    // 2. ValueScan::SessionManager owner enforcement + DropForOwner
+    {
+        auto& mgr = Discrete::ValueScan::SessionManager::Instance();
+        mgr.DropAll();
+
+        std::vector<Discrete::ValueScan::Candidate> c1(1);
+        c1[0].addr = 0x1000u;
+        const std::uint64_t id1 = mgr.Begin(Discrete::Memory::ValueDataType::Int32, std::move(c1), 11u);
+        const std::uint64_t id2 = mgr.Begin(Discrete::Memory::ValueDataType::Int32, {}, 22u);
+
+        CHECK(!mgr.RefineWith(id1, [](Discrete::Memory::ValueDataType, std::vector<Discrete::ValueScan::Candidate>&) {}, 22u));
+        CHECK(!mgr.ViewWith(id1, [](Discrete::Memory::ValueDataType, const std::vector<Discrete::ValueScan::Candidate>&) {}, 22u));
+        CHECK(!mgr.End(id1, 22u));
+
+        std::size_t seen = 0;
+        CHECK(mgr.ViewWith(id1, [&](Discrete::Memory::ValueDataType, const std::vector<Discrete::ValueScan::Candidate>& v) {
+            seen = v.size();
+        }, 11u));
+        CHECK(seen == 1u);
+
+        CHECK(mgr.DropForOwner(11u) == 1u);
+        CHECK(!mgr.End(id1, 11u));
+        CHECK(mgr.End(id2, 22u));
+        mgr.DropAll();
+    }
+
+    // 3. GroupScan::SessionManager owner enforcement + DropForOwner
+    {
+        auto& mgr = Discrete::GroupScan::SessionManager::Instance();
+        mgr.DropAll();
+
+        std::vector<Discrete::GroupScan::SlotSpec> slots(2);
+        const std::uint64_t id1 = mgr.Begin(slots, {}, 33u);
+        const std::uint64_t id2 = mgr.Begin(slots, {}, 44u);
+
+        CHECK(!mgr.RefineWith(id1, [](std::vector<Discrete::GroupScan::SlotSpec>&, std::vector<Discrete::GroupScan::Candidate>&) {}, 44u));
+        CHECK(!mgr.ViewWith(id1, [](std::vector<Discrete::GroupScan::SlotSpec>&, std::vector<Discrete::GroupScan::Candidate>&) {}, 44u));
+        CHECK(!mgr.End(id1, 44u));
+        CHECK(mgr.ViewWith(id1, [](std::vector<Discrete::GroupScan::SlotSpec>&, std::vector<Discrete::GroupScan::Candidate>&) {}, 33u));
+
+        CHECK(mgr.DropForOwner(33u) == 1u);
+        CHECK(!mgr.End(id1, 33u));
+        CHECK(mgr.End(id2, 44u));
+        mgr.DropAll();
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -2545,6 +2639,7 @@ int main() {
     Test_CM4_CM5_SnapshotArrayLayoutAndStreamingSafety();
     Test_DM6_MethodTokenPointerIndex();
     Test_CL4_CL5_CL7_ValidationAndBuildId();
+    Test_CL6_SessionOwnershipAndSharedClasses();
 
     const char* arch = (sizeof(void*) == 4) ? "x86" : "x64";
     if (g_failures == 0) {

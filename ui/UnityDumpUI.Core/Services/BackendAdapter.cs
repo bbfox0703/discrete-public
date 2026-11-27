@@ -1033,14 +1033,30 @@ public sealed class BackendAdapter : ILiveExportSource
             valueTo.HasValue ? Dbl(valueTo.Value) : null,
             limit, tolerance, reuseIndexMs, retainCap, parallel, ct);
 
-    /// <summary>Cancel an in-flight value scan. The primary connection is busy
-    /// running the scan, so this opens a SHORT-LIVED second pipe connection (the
-    /// DLL allows multiple instances) and sends <c>cancelScan</c>, which arms the
-    /// DLL's cooperative cancel flag so the long loops bail + free their work.
-    /// Best-effort / fire-and-forget — connect/IO failures are swallowed (if the
-    /// UI itself is going away, the DLL's disconnect monitor aborts the scan).</summary>
+    /// <summary>Cancel an in-flight value/group/snapshot scan. In dual-pipe mode
+    /// (normal UI runtime), scans run on <c>_bulk</c> while <c>_pipe</c> stays
+    /// free, so we prefer sending <c>cancelScan</c> on the already-open
+    /// interactive <c>_pipe</c> (waiting briefly on its gate without tearing it
+    /// down) — avoiding a short-lived extra connection and its server-side
+    /// disconnect GC hook (C-L8). Falls back to a short-lived connection in
+    /// single-pipe mode or if <c>_pipe</c> is busy/disconnected. Best-effort —
+    /// failures are swallowed.</summary>
     public async Task CancelScanAsync(CancellationToken ct = default)
     {
+        if (!ReferenceEquals(_bulk, _pipe) && _pipe.IsConnected)
+        {
+            try
+            {
+                using var gateCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                gateCts.CancelAfter(500);
+                await _pipe.SendAsync(
+                    "cancelScan", null,
+                    ProtocolJsonContext.Default.RpcEnvelopeCancelScanResult, gateCts.Token)
+                    .ConfigureAwait(false);
+                return;
+            }
+            catch { /* fall back to short-lived cancel connection */ }
+        }
         try
         {
             await using var cancelPipe = new PipeClient(_pipe.PipeName);
@@ -1295,18 +1311,17 @@ public sealed class BackendAdapter : ILiveExportSource
         };
         if (limit.HasValue) args["limit"] = Int(limit.Value);
 
-        var env = await Send(
+        // C-L8: Capture per-call telemetry atomically inside PipeClient's
+        // single-flight gate rather than reading mutable instance properties
+        // after the call returns (prevents interleaving races on shared pipes).
+        var (env, telemetry) = await PipeFor("snapshotChunk").SendWithTelemetryAsync(
             "snapshotChunk", args,
             ProtocolJsonContext.Default.RpcEnvelopeSnapshotChunkResult, ct).ConfigureAwait(false);
         ThrowIfError(env.Error);
         var result = env.Result ?? throw new PipeProtocolException("snapshotChunk returned no result");
-        // Phase 30d telemetry — copy the round-trip split off the pipe that handled
-        // this call (deterministic via PipeFor) so the capture summary can attribute
-        // the per-chunk cost to wire/server (read) vs JSON deserialize vs payload size.
-        var chunkPipe = PipeFor("snapshotChunk");
-        result.ReadMs        = chunkPipe.LastReadMs;
-        result.ParseMs       = chunkPipe.LastParseMs;
-        result.ResponseChars = chunkPipe.LastResponseChars;
+        result.ReadMs        = telemetry.ReadMs;
+        result.ParseMs       = telemetry.ParseMs;
+        result.ResponseChars = telemetry.ResponseChars;
         // Phase 30a — re-expand the deduped wire (schema-once + per-instance value
         // arrays) back into the inline SnapshotFieldEntry model the rest of the UI
         // + SQLite expect. No-op for old (non-deduped) chunks.

@@ -11,10 +11,12 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 namespace Discrete::PipeServer {
 
@@ -22,6 +24,15 @@ using Handler = std::function<nlohmann::json(const nlohmann::json& args)>;
 
 // Register a command handler. Overwrites any previous handler for the same name.
 void RegisterHandler(std::string name, Handler handler);
+
+// C-L8: Sorted list of all currently registered command names (emitted in
+// handshake `"commands"` so the UI can query capabilities without branching
+// on backend strings).
+std::vector<std::string> RegisteredCommands();
+
+// C-L6: Per-client worker connection id (non-zero inside a client worker's
+// RPC handlers and disconnect hooks; 0 outside PipeServer workers).
+std::uint64_t CurrentClientId() noexcept;
 
 /// Per-client cleanup hook. Fired after EVERY accepted client disconnects
 /// (clean exit OR pipe error), on the per-client worker thread, after

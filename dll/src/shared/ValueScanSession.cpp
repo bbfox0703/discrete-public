@@ -21,37 +21,54 @@ SessionManager& SessionManager::Instance() {
 }
 
 std::uint64_t SessionManager::Begin(Memory::ValueDataType dt,
-                                     std::vector<Candidate> candidates) {
-    // Opportunistic expiry pass on every Begin so abandoned sessions
-    // don't pile up. Cheap when the table is small.
-    ExpireOldSessions();
-
+                                     std::vector<Candidate> candidates,
+                                     std::uint64_t ownerClientId) {
+    auto now = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> lk(mu_);
+    ExpireOldSessionsLocked(now);
     std::uint64_t id = nextId_++;
     auto sess = std::make_unique<Session>();
-    sess->id         = id;
-    sess->dt         = dt;
-    sess->candidates = std::move(candidates);
-    sess->lastUse    = std::chrono::steady_clock::now();
+    sess->id            = id;
+    sess->ownerClientId = ownerClientId;
+    sess->dt            = dt;
+    sess->candidates    = std::move(candidates);
+    sess->lastUse       = now;
     sessions_.emplace(id, std::move(sess));
     return id;
 }
 
-bool SessionManager::End(std::uint64_t sessionId) {
+bool SessionManager::End(std::uint64_t sessionId, std::uint64_t callerClientId) {
     std::lock_guard<std::mutex> lk(mu_);
-    return sessions_.erase(sessionId) > 0;
+    ExpireOldSessionsLocked(std::chrono::steady_clock::now());
+    auto it = sessions_.find(sessionId);
+    if (it == sessions_.end()) return false;
+    if (it->second->ownerClientId != 0 && callerClientId != 0 &&
+        it->second->ownerClientId != callerClientId) {
+        return false;
+    }
+    sessions_.erase(it);
+    return true;
+}
+
+std::size_t SessionManager::DropForOwner(std::uint64_t ownerClientId) {
+    if (ownerClientId == 0) return 0;
+    std::lock_guard<std::mutex> lk(mu_);
+    std::size_t dropped = 0;
+    for (auto it = sessions_.begin(); it != sessions_.end(); ) {
+        if (it->second->ownerClientId == ownerClientId) {
+            it = sessions_.erase(it);
+            ++dropped;
+        } else {
+            ++it;
+        }
+    }
+    return dropped;
 }
 
 void SessionManager::ExpireOldSessions() {
     auto now = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> lk(mu_);
-    for (auto it = sessions_.begin(); it != sessions_.end(); ) {
-        if (now - it->second->lastUse > kExpirySeconds) {
-            it = sessions_.erase(it);
-        } else {
-            ++it;
-        }
-    }
+    ExpireOldSessionsLocked(now);
 }
 
 void SessionManager::DropAll() {

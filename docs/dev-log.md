@@ -12,6 +12,29 @@ this file grows too large.
 
 -----
 
+## 2026-11-27 (build 1579) — Fix C-L3 + C-L6 + C-L8 (twin-handler alignment, per-client session ownership/off-lock snapshot slicing, atomic RPC telemetry, handshake `commands` list, dual-pipe `cancelScan` reuse)
+
+- **Bug fixes (`C-L3`, `C-L6`, `C-L8`):**
+  - **`C-L3` (`dll/src/shared/ExportAPI.cpp`):**
+    - Aligned Mono `findInstances` and `listFieldValuesAcrossInstances` with IL2CPP's `skipMapped = true` default (and surfaced `regions_skip_mapped` in Mono `findInstances` logs + `scan_stats`).
+    - Wired `filterMatches` post-scan header validation into `listFieldValuesAcrossInstances` on both Mono and IL2CPP so instance lists and per-field value listings match.
+    - Reported `filter.live_walk = false` + `filter.live_walk_unavailable = true` in IL2CPP `findInstances` when `liveOnly = true` is requested.
+    - Moved `r.class_is_valuetype(k)` inside Mono `walkInstance`'s existing `ThreadAttachGuard` (eliminating an unattached Mono runtime call), and wrapped Mono `getMetadataStats` in a single outer `ThreadAttachGuard`.
+  - **`C-L6` (`dll/src/shared/PipeServer.{h,cpp}`, `dll/src/shared/{SnapshotSession,ValueScanSession,GroupScanSession}.{h,cpp}`, `dll/src/shared/ExportAPI.cpp`):**
+    - Assigned every accepted pipe worker a unique `workerClientId` bound to `thread_local t_currentClientId` (accessible via `PipeServer::CurrentClientId()`) for the full lifetime of its RPCs and disconnect hooks.
+    - Enforced per-client `ownerClientId` across `Snapshot`, `ValueScan`, and `GroupScan` `Begin` / `View` / `RefineWith` / `ViewWith` / `End` (with opportunistic expiry on every operation) and replaced the racy `ActiveClientCount() > 1` + `DropAll()` disconnect hook with per-owner `DropForOwner(cid)` + `ExpireOldSessions()`.
+    - Released Mono `snapshotBegin`'s `session->plan` (`clear()` + `shrink_to_fit()`) right after decode, moved `session->classes` into immutable `std::shared_ptr<const std::vector<ClassPayload>> sharedClasses`, and moved `snapshotChunk` JSON slice copying outside `SessionManager`'s global mutex.
+  - **`C-L8` (`dll/src/shared/PipeServer.{h,cpp}`, `dll/src/shared/ExportAPI.cpp`, `ui/UnityDumpUI.Core/Services/{PipeClient,BackendAdapter,ProtocolModels}.cs`):**
+    - Added `PipeClient.SendWithTelemetryAsync<TResult>` returning `(RpcEnvelope<TResult>, RpcTelemetry)` captured atomically inside `_gate`, and switched `BackendAdapter.SnapshotChunkAsync` to consume it instead of reading mutable `LastReadMs` / `LastParseMs` / `LastResponseChars` properties off-gate.
+    - Updated `BackendAdapter.CancelScanAsync` to prefer the already-open interactive `_pipe` in dual-pipe mode (falling back to a short-lived connection if single-pipe or busy) to avoid spawning a new pipe + triggering the DLL disconnect GC hook on every cancel.
+    - Added `PipeServer::RegisteredCommands()`, emitted `"commands"` in `BuildHandshakeJson`, and exposed `HandshakeResult.Commands` + `SupportsCommand(string)` on the UI side.
+    - Skipped negative `relOff < 0` struct member offsets in `CaptureMonoStructFields` and `CaptureIl2cppStructFields` so torn class metadata cannot emit negative numbers into `SnapshotFieldEntry.Offset` (`ulong`).
+  - Added C++ unit test suite `Test_CL6_SessionOwnershipAndSharedClasses` in `dll/tests/dll_core_test.cpp` (linked `ValueScanSession.cpp` + `GroupScanSession.cpp`, +26 checks on x64 and x86) and C# unit tests `SendWithTelemetryAsync_ReturnsCallScopedTelemetryInsideGate` & `HandshakeResult_DeserializesCommandsAndSupportsCommand` in `ui/UnityDumpUI.Tests/PipeClientReliabilityTests.cs`.
+  - Marked `C-L3`, `C-L6`, and `C-L8` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1579) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1257 passed (0 failed, 0 skipped, locked mode); Rust core dev 118 (x64) / 119 (x86) + release `+crt-static` 118 (x64) / 119 (x86) passed; C++ `discrete_dll_test` 853 passed (x64) / 853 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
 ## 2026-11-27 (build 1578) — Fix C-L4 + C-L5 + C-L7 (strict `ParseAddress`, RPC parameter bounds/UTF-16 char/null args hardening, dynamic 32-bit OOM threshold & `ComputeGameBuildId` module fallback)
 
 - **Bug fixes (`C-L4`, `C-L5`, `C-L7`):**

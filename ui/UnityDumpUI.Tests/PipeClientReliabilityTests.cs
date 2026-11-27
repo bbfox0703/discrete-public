@@ -272,4 +272,57 @@ public class PipeClientReliabilityTests
             await serverTask.ConfigureAwait(true);
         }
     }
+
+    [Fact]
+    public async Task SendWithTelemetryAsync_ReturnsCallScopedTelemetryInsideGate()
+    {
+        string pipeName = UniquePipeName();
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        const string payload = "{\"id\":1,\"result\":{\"pong\":true}}";
+
+        await using var server = new NamedPipeServerStream(
+            pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+
+        Task serverTask = Task.Run(async () =>
+        {
+            await server.WaitForConnectionAsync(ct).ConfigureAwait(false);
+            using var reader = new StreamReader(server, Encoding.UTF8, false, 1024, leaveOpen: true);
+            using var writer = new StreamWriter(server, new UTF8Encoding(false), 1024, leaveOpen: true)
+            {
+                NewLine = "\n",
+                AutoFlush = true,
+            };
+            _ = await reader.ReadLineAsync(ct).ConfigureAwait(false);
+            await writer.WriteLineAsync(payload).ConfigureAwait(false);
+        }, ct);
+
+        await using var client = new PipeClient(pipeName);
+        await client.ConnectAsync(5000, ct).ConfigureAwait(true);
+
+        var (env, telemetry) = await client.SendWithTelemetryAsync(
+            "ping", null, ProtocolJsonContext.Default.RpcEnvelopePingResult, ct).ConfigureAwait(true);
+
+        Assert.True(env.Result?.Pong);
+        Assert.Equal(payload.Length, telemetry.ResponseChars);
+        Assert.True(telemetry.ReadMs >= 0);
+        Assert.True(telemetry.ParseMs >= 0);
+        await serverTask.ConfigureAwait(true);
+    }
+
+    [Fact]
+    public void HandshakeResult_DeserializesCommandsAndSupportsCommand()
+    {
+        const string json = """
+            {"id":1,"result":{"backend":"mono","commands":["handshake","ping","snapshotBegin"]}}
+            """;
+        var env = System.Text.Json.JsonSerializer.Deserialize(
+            json, ProtocolJsonContext.Default.RpcEnvelopeHandshakeResult);
+
+        Assert.NotNull(env?.Result);
+        Assert.NotNull(env!.Result!.Commands);
+        Assert.Equal(3, env.Result.Commands!.Count);
+        Assert.True(env.Result.SupportsCommand("snapshotBegin"));
+        Assert.False(env.Result.SupportsCommand("dumpIl2cppSymbols"));
+        Assert.False(env.Result.SupportsCommand(""));
+    }
 }
