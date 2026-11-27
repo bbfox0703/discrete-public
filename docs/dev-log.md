@@ -12,6 +12,27 @@ this file grows too large.
 
 -----
 
+## 2026-11-27 (build 1565) — Fix C-M6 + C-M7 + C-M8 (`searchSymbols` single-assembly `truncated`, handler-level `result.error` & `SnapshotClassEntry.truncated` DTOs, lossless 64-bit value/group scans + tests)
+
+- **Bug fixes (`C-M6`, `C-M7`, `C-M8`):**
+  - **`C-M6` (`dll/src/shared/ExportHelpers.h`, `dll/src/shared/ExportAPI.cpp`):**
+    - Added `RecordSearchSymbolsAsmCap` in `ExportHelpers.h` and wired it into both Mono and IL2CPP `CmdSearchSymbols`: when a single-assembly query hits the per-assembly match cap, it now sets `truncated: true` (leaving `truncated_assemblies` absent) instead of putting the assembly in `truncated_assemblies` with `truncated: false`. Multi-assembly queries continue to populate `truncated_assemblies`.
+  - **`C-M7` (`ui/UnityDumpUI.Core/Services/ProtocolModels.cs`, `ui/UnityDumpUI/ViewModels/AssemblyBrowserViewModel.cs`, `ui/UnityDumpUI/ViewModels/SnapshotViewModel.cs`, `docs/pipe-protocol.md`):**
+    - Added `[JsonPropertyName("error")]` (`Error`) to `GetAssembliesResult`, `ClassRangeStatsResult`, `HandshakeResult` (alongside `RuntimePoisoned` / `RuntimeFaultReason`), `PingResult`, and `CancelScanResult`, and added `[JsonPropertyName("truncated")]` (`Truncated`) to `SnapshotClassEntry` so `"memory_budget"` / `"instance_budget"` reasons are preserved.
+    - Updated `AssemblyBrowserViewModel` and `SnapshotViewModel` to check `res.Error` after `GetAssembliesAsync` and surface/log backend faults instead of silently treating them as 0 assemblies.
+    - Documented the handler-level `result.error` convention in [pipe-protocol.md](pipe-protocol.md).
+  - **`C-M8` (`dll/src/shared/ExportHelpers.h`, `dll/src/shared/ExportAPI.cpp`, `ui/UnityDumpUI.Core/Services/ValueScanWireEncoder.cs`, `ui/UnityDumpUI.Core/Services/ProtocolModels.cs`, `ui/UnityDumpUI.Core/Services/BackendAdapter.cs`, `ui/UnityDumpUI/ViewModels/ValueSearchViewModel.cs`, `ui/UnityDumpUI/ViewModels/ValueSearchViewModel.Group.cs`):**
+    - Added strict non-truncating JSON numeric parsers (`ParseStrictJsonInt64`, `ParseStrictJsonUInt64`, `ParseStrictJsonDouble`, plus string/double helpers) in `ExportHelpers.h` and switched `PackJsonValueToBytes` in `ExportAPI.cpp` to use them — rejecting NaN/Inf, fractional doubles for integer widths (e.g. `3.7` for `int32`), out-of-range doubles (eliminating C++ UB), trailing string garbage, negative strings for `uint64`, and `> INT64_MAX` values for `int64`.
+    - Added Native AOT-safe `ValueScanWireEncoder.TryEncodeNumericArg` encoding integer widths directly as `Int64`/`UInt64` JSON numbers (preserving full 64-bit precision above `2^53`, supporting `0x` hex, rejecting decimals and range overflows) and floating-point widths as `Double` (rejecting NaN/Infinity).
+    - Changed `GroupSlotRequest.Value` / `ValueTo` to `JsonElement?`, added lossless `JsonElement` overloads of `BeginValueScanAsync` / `RefineValueScanAsync` in `BackendAdapter`, and updated single-width, aggregate, and group scan paths in `ValueSearchViewModel` to encode per concrete width.
+  - **Tests:**
+    - Added `Test_CM6_CM8_SearchSymbolsTruncAndStrictJsonNumerics` (+31 checks on x64 and x86) to `dll/tests/dll_core_test.cpp`.
+    - Added `ui/UnityDumpUI.Tests/ValueScanWireAndDtoContractTests.cs` (+6 xUnit v3 tests covering single-assembly `searchSymbols` truncation, result-level `error` & `SnapshotClassEntry.Truncated` DTOs, 64-bit `ValueScanWireEncoder` precision, and exact JSON integer emission over a live named pipe).
+  - Marked `C-M6`, `C-M7`, and `C-M8` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1565) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1223 passed (0 failed, 0 skipped); Rust core tests 110 passed (x64) / 111 passed (i686); C++ `discrete_dll_test` 738 checks passed (x64) / 738 checks passed (x86).
+
+-----
+
 ## 2026-11-27 (build 1562) — Fix B-M8 + B-M9 (+ B-L7) (Mono MemberRef `0x0A` generic/cross-assembly field xref resolution, IL2CPP `.pdata`-bounded exact enclosing-method attribution via `RtlLookupFunctionEntry`, IL2CPP struct unboxed offset & `Il2CppClass*` nested-class matching + tests)
 
 - **Bug fixes (`B-M8`, `B-M9`, `B-L7` + field-xref parts of `B-L11` & `B-L12` — completes 100% of Block B High & Medium findings, 2/2 High + 11/11 Medium):**

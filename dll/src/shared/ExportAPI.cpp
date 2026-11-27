@@ -1417,50 +1417,18 @@ const char* ValueDataTypeClrName(Memory::ValueDataType dt) {
 // on 64-bit ints. Returns false if the value is out of range or wrong kind.
 bool PackJsonValueToBytes(const json& v, Memory::ValueDataType dt, std::uint8_t out[8]) {
     std::memset(out, 0, 8);
-    // For signed ints, allow negative JSON numbers; for unsigned-64 we may
-    // need to accept hex strings to cover the > 2^53 range that JSON
-    // doubles can't represent exactly.
+    // C-M8: strict non-truncating numeric parsing — preserves full 64-bit
+    // integer precision (both JSON integers and decimal/hex strings) and
+    // rejects fractional floats, NaN/Inf, out-of-range doubles (avoiding UB),
+    // and trailing garbage instead of silently truncating.
     auto asI64 = [&](std::int64_t& iv) -> bool {
-        if (v.is_number_integer())        { iv = v.get<std::int64_t>(); return true; }
-        if (v.is_number_unsigned())       { iv = static_cast<std::int64_t>(v.get<std::uint64_t>()); return true; }
-        if (v.is_number_float())          { iv = static_cast<std::int64_t>(v.get<double>()); return true; }
-        if (v.is_string()) {
-            const std::string& s = v.get_ref<const std::string&>();
-            try {
-                if (s.size() > 2 && (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))) {
-                    iv = static_cast<std::int64_t>(std::stoll(s.substr(2), nullptr, 16));
-                } else {
-                    iv = std::stoll(s, nullptr, 10);
-                }
-                return true;
-            } catch (...) { return false; }
-        }
-        return false;
+        return Discrete::ExportHelpers::ParseStrictJsonInt64(v, iv);
     };
     auto asU64 = [&](std::uint64_t& uv) -> bool {
-        if (v.is_number_unsigned())       { uv = v.get<std::uint64_t>(); return true; }
-        if (v.is_number_integer())        { auto s = v.get<std::int64_t>(); if (s < 0) return false; uv = static_cast<std::uint64_t>(s); return true; }
-        if (v.is_number_float())          { auto d = v.get<double>(); if (d < 0.0) return false; uv = static_cast<std::uint64_t>(d); return true; }
-        if (v.is_string()) {
-            const std::string& s = v.get_ref<const std::string&>();
-            try {
-                if (s.size() > 2 && (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))) {
-                    uv = std::stoull(s.substr(2), nullptr, 16);
-                } else {
-                    uv = std::stoull(s, nullptr, 10);
-                }
-                return true;
-            } catch (...) { return false; }
-        }
-        return false;
+        return Discrete::ExportHelpers::ParseStrictJsonUInt64(v, uv);
     };
     auto asF64 = [&](double& dv) -> bool {
-        if (v.is_number())                { dv = v.get<double>(); return true; }
-        if (v.is_string()) {
-            const std::string& s = v.get_ref<const std::string&>();
-            try { dv = std::stod(s); return true; } catch (...) { return false; }
-        }
-        return false;
+        return Discrete::ExportHelpers::ParseStrictJsonDouble(v, dv);
     };
 
     switch (dt) {
@@ -5078,7 +5046,8 @@ void RegisterCoreHandlers() {
                 }
             }
 
-            if (thisAsmCapped) truncatedAssemblies.push_back(assemblyName);
+            Discrete::ExportHelpers::RecordSearchSymbolsAsmCap(
+                multiAsm, thisAsmCapped, assemblyName, truncated, truncatedAssemblies);
             if (truncated) break;  // global ceiling — abandon remaining assemblies
         }
         json response = {
@@ -7421,7 +7390,8 @@ void RegisterCoreHandlers() {
                 }
             }
 
-            if (thisAsmCapped) truncatedAssemblies.push_back(assemblyName);
+            Discrete::ExportHelpers::RecordSearchSymbolsAsmCap(
+                multiAsm, thisAsmCapped, assemblyName, truncated, truncatedAssemblies);
             if (truncated) break;
         }
         json response = {

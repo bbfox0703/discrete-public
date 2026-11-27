@@ -2123,6 +2123,77 @@ void Test_BM8_BM9_BL7_FieldXrefMemberRefPdataAndStructOffset() {
     }
 }
 
+// ============================================================================
+// C-M6 + C-M8 — searchSymbols single-assembly truncation & strict lossless
+// 64-bit integer / non-truncating float JSON parsing
+// ============================================================================
+void Test_CM6_CM8_SearchSymbolsTruncAndStrictJsonNumerics() {
+    using namespace Discrete::ExportHelpers;
+    using nlohmann::json;
+
+    // 1. C-M6: single-assembly cap sets truncated=true and leaves truncatedAssemblies empty;
+    //    multi-assembly cap appends to truncatedAssemblies and leaves global truncated=false.
+    {
+        bool trunc = false;
+        std::vector<std::string> truncAsms;
+        RecordSearchSymbolsAsmCap(/*multiAsm=*/false, /*thisAsmCapped=*/true,
+                                  "Assembly-CSharp", trunc, truncAsms);
+        CHECK(trunc);
+        CHECK(truncAsms.empty());
+
+        bool multiTrunc = false;
+        std::vector<std::string> multiTruncAsms;
+        RecordSearchSymbolsAsmCap(/*multiAsm=*/true, /*thisAsmCapped=*/true,
+                                  "Assembly-CSharp", multiTrunc, multiTruncAsms);
+        CHECK(!multiTrunc);
+        CHECK(multiTruncAsms.size() == 1u && multiTruncAsms[0] == "Assembly-CSharp");
+    }
+
+    // 2. C-M8: full 64-bit integer precision (values > 2^53) via JSON int and string
+    {
+        std::int64_t iv = 0;
+        const std::int64_t ticks = 638500000000000123LL;  // > 2^53 (loses bits in double!)
+        CHECK(ParseStrictJsonInt64(json(ticks), iv) && iv == ticks);
+        CHECK(ParseStrictJsonInt64(json("638500000000000123"), iv) && iv == ticks);
+        CHECK(ParseStrictJsonInt64(json("-9223372036854775808"), iv) && iv == std::numeric_limits<std::int64_t>::min());
+        CHECK(ParseStrictJsonInt64(json("0x7FFFFFFFFFFFFFFF"), iv) && iv == std::numeric_limits<std::int64_t>::max());
+
+        // Exact integral doubles succeed; fractional / non-finite / out-of-range doubles fail!
+        CHECK(ParseStrictJsonInt64(json(42.0), iv) && iv == 42);
+        CHECK(!ParseStrictJsonInt64(json(3.7), iv));
+        CHECK(!ParseStrictJsonInt64(json(-3.1), iv));
+        CHECK(!ParseStrictInt64FromDouble(std::numeric_limits<double>::quiet_NaN(), iv));
+        CHECK(!ParseStrictInt64FromDouble(std::numeric_limits<double>::infinity(), iv));
+        CHECK(!ParseStrictInt64FromDouble(1e30, iv));
+        CHECK(!ParseStrictInt64FromDouble(9223372036854775808.0, iv));  // 2^63 overflows int64
+
+        // Strings with fractional or trailing garbage fail; > INT64_MAX unsigned fails
+        CHECK(!ParseStrictJsonInt64(json("3.7"), iv));
+        CHECK(!ParseStrictJsonInt64(json("123abc"), iv));
+        CHECK(!ParseStrictJsonInt64(json(UINT64_MAX), iv));
+
+        // Unsigned 64-bit precision (Steam IDs / full uint64 range)
+        std::uint64_t uv = 0;
+        const std::uint64_t steamId = 76561198012345679ULL;  // > 2^53
+        CHECK(ParseStrictJsonUInt64(json(steamId), uv) && uv == steamId);
+        CHECK(ParseStrictJsonUInt64(json("18446744073709551615"), uv) && uv == UINT64_MAX);
+        CHECK(ParseStrictJsonUInt64(json("0xFFFFFFFFFFFFFFFF"), uv) && uv == UINT64_MAX);
+        CHECK(ParseStrictJsonUInt64(json(100.0), uv) && uv == 100u);
+        CHECK(!ParseStrictJsonUInt64(json(3.7), uv));
+        CHECK(!ParseStrictJsonUInt64(json(-1), uv));
+        CHECK(!ParseStrictJsonUInt64(json("-1"), uv));
+        CHECK(!ParseStrictUInt64FromDouble(18446744073709551616.0, uv));  // 2^64 overflows uint64
+        CHECK(!ParseStrictUInt64FromDouble(std::numeric_limits<double>::quiet_NaN(), uv));
+
+        // Strict double parser
+        double dv = 0.0;
+        CHECK(ParseStrictJsonDouble(json(3.75), dv) && dv == 3.75);
+        CHECK(ParseStrictJsonDouble(json("3.75"), dv) && dv == 3.75);
+        CHECK(!ParseStrictJsonDouble(json("3.75xyz"), dv));
+        CHECK(!ParseStrictJsonDouble(json("NaN"), dv));
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -2145,6 +2216,7 @@ int main() {
     Test_BM1_BM2_BM3_MethodInvokeValidationAndGcRoots();
     Test_BM6_BM7_BM11_RuntimeHealthSafePeScanAndVtableValidation();
     Test_BM8_BM9_BL7_FieldXrefMemberRefPdataAndStructOffset();
+    Test_CM6_CM8_SearchSymbolsTruncAndStrictJsonNumerics();
 
     const char* arch = (sizeof(void*) == 4) ? "x86" : "x64";
     if (g_failures == 0) {

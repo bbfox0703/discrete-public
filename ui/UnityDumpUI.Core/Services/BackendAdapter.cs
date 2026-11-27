@@ -989,13 +989,13 @@ public sealed class BackendAdapter : ILiveExportSource
 
     /// <summary>
     /// `beginValueScan` — initial scan, opens a session for `refineValueScan`.
-    /// Numeric path: dataType is one of int8..uint64 / float / double; value
-    /// is a double (typed into the right bitness server-side via PackJsonValueToBytes).
-    /// String path: dataType = "string", value = the search string.
+    /// C-M8 lossless overload accepting a pre-encoded <see cref="JsonElement"/>
+    /// (Int64/UInt64 for integer widths, Double for float/double) so 64-bit
+    /// integers > 2^53 never lose precision through double.
     /// </summary>
     public async Task<BeginValueScanResult> BeginValueScanAsync(
-        string dataType, string scanType, double value,
-        double? valueTo = null, int? limit = null, double? tolerance = null,
+        string dataType, string scanType, JsonElement value,
+        JsonElement? valueTo = null, int? limit = null, double? tolerance = null,
         int? reuseIndexMs = null, int? retainCap = null, bool? parallel = null,
         CancellationToken ct = default)
     {
@@ -1003,21 +1003,13 @@ public sealed class BackendAdapter : ILiveExportSource
         {
             ["dataType"] = Str(dataType),
             ["scanType"] = Str(scanType),
-            ["value"]    = Dbl(value),
+            ["value"]    = value,
         };
-        if (valueTo.HasValue)   args["valueTo"]   = Dbl(valueTo.Value);
+        if (valueTo.HasValue)   args["valueTo"]   = valueTo.Value;
         if (limit.HasValue)     args["limit"]     = Int(limit.Value);
         if (tolerance.HasValue) args["tolerance"] = Dbl(tolerance.Value);
-        // Value Search "Parallel" toggle (default on server-side). Only sent when
-        // the user turned it OFF → server caps the scan to a single thread.
         if (parallel.HasValue)  args["parallel"]  = Bool(parallel.Value);
-        // Decoupled retain cap (how many managed candidates the DLL KEEPS for
-        // refine, separate from `limit` which is the display count). Bitness-
-        // gated server-side; null = server default.
         if (retainCap.HasValue) args["retainCap"] = Int(retainCap.Value);
-        // Opt the DLL into reusing a recently-built reverse-lookup index across
-        // back-to-back scans (the aggregate "any numeric width" fan-out). 0 /
-        // null = always a fresh heap walk.
         if (reuseIndexMs.HasValue) args["reuseIndexMs"] = Int(reuseIndexMs.Value);
 
         var env = await Send(
@@ -1026,6 +1018,20 @@ public sealed class BackendAdapter : ILiveExportSource
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("beginValueScan returned no result");
     }
+
+    /// <summary>
+    /// Convenience overload for float/double or small numeric values; forwards
+    /// to the lossless <see cref="JsonElement"/> overload.
+    /// </summary>
+    public Task<BeginValueScanResult> BeginValueScanAsync(
+        string dataType, string scanType, double value,
+        double? valueTo = null, int? limit = null, double? tolerance = null,
+        int? reuseIndexMs = null, int? retainCap = null, bool? parallel = null,
+        CancellationToken ct = default)
+        => BeginValueScanAsync(
+            dataType, scanType, Dbl(value),
+            valueTo.HasValue ? Dbl(valueTo.Value) : null,
+            limit, tolerance, reuseIndexMs, retainCap, parallel, ct);
 
     /// <summary>Cancel an in-flight value scan. The primary connection is busy
     /// running the scan, so this opens a SHORT-LIVED second pipe connection (the
@@ -1077,13 +1083,12 @@ public sealed class BackendAdapter : ILiveExportSource
     }
 
     /// <summary>
-    /// `refineValueScan` — narrow an existing session by scanType.
-    /// scanType ∈ exact / range / changed / unchanged / increased / decreased / newValue.
-    /// `value` / `valueTo` only required for exact / range / newValue.
+    /// `refineValueScan` — C-M8 lossless overload accepting pre-encoded
+    /// <see cref="JsonElement"/> bounds so 64-bit integers never pass through double.
     /// </summary>
     public async Task<RefineValueScanResult> RefineValueScanAsync(
         string sessionId, string scanType,
-        double? value = null, double? valueTo = null, int? limit = null,
+        JsonElement? value = null, JsonElement? valueTo = null, int? limit = null,
         CancellationToken ct = default)
     {
         var args = new Dictionary<string, JsonElement>
@@ -1091,8 +1096,8 @@ public sealed class BackendAdapter : ILiveExportSource
             ["sessionId"] = Str(sessionId),
             ["scanType"]  = Str(scanType),
         };
-        if (value.HasValue)   args["value"]   = Dbl(value.Value);
-        if (valueTo.HasValue) args["valueTo"] = Dbl(valueTo.Value);
+        if (value.HasValue)   args["value"]   = value.Value;
+        if (valueTo.HasValue) args["valueTo"] = valueTo.Value;
         if (limit.HasValue)   args["limit"]   = Int(limit.Value);
 
         var env = await Send(
@@ -1101,6 +1106,20 @@ public sealed class BackendAdapter : ILiveExportSource
         ThrowIfError(env.Error);
         return env.Result ?? throw new PipeProtocolException("refineValueScan returned no result");
     }
+
+    /// <summary>
+    /// Convenience overload for double bounds; forwards to the lossless
+    /// <see cref="JsonElement"/> overload.
+    /// </summary>
+    public Task<RefineValueScanResult> RefineValueScanAsync(
+        string sessionId, string scanType,
+        double? value, double? valueTo = null, int? limit = null,
+        CancellationToken ct = default)
+        => RefineValueScanAsync(
+            sessionId, scanType,
+            value.HasValue ? Dbl(value.Value) : null,
+            valueTo.HasValue ? Dbl(valueTo.Value) : null,
+            limit, ct);
 
     /// <summary>`endValueScan` — release the session's candidate buffer.</summary>
     public async Task<EndValueScanResult> EndValueScanAsync(

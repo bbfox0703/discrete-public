@@ -63,6 +63,12 @@ Error codes raised by the dispatcher itself:
 | `-32700` | request line was not valid JSON |
 | `-32600` | request had no `cmd` field |
 | `-32601` | `cmd` not registered (unknown command) |
+
+**Handler-level errors (`result.error`):** Once a command dispatches to its handler,
+business/runtime failures (e.g. runtime not resolved, class not found, bad arg
+value, runtime poisoned) are returned inside `result` with an `"error": "<message>"`
+string field. Every typed result DTO in `ProtocolModels.cs` exposes `Error` so
+callers can always inspect handler-level failures alongside envelope errors.
 | `-32000` | handler threw a C++ exception (message is `what()`) |
 | `-32603` | internal: response failed to serialize (rare; should not happen with `error_handler_t::replace`) |
 

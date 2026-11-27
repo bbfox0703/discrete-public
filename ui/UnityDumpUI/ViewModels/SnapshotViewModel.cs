@@ -579,6 +579,12 @@ public sealed partial class SnapshotViewModel : ObservableObject
         try
         {
             var res = await _backend.GetAssembliesAsync(ct).ConfigureAwait(true);
+            if (!string.IsNullOrEmpty(res.Error))
+            {
+                _logger.Write(SnapshotStore.LogCategory,
+                    $"LoadScopeAssembliesAsync error: {res.Error}");
+                return;
+            }
             var names = res.Assemblies
                 .Select(a => a.Name)
                 .Where(n => !string.IsNullOrEmpty(n))

@@ -493,17 +493,17 @@
   3. 最後一個 chunk 的 `gc_collect` 和 500 ms sleep 都在 `SessionManager` 的全域 mutex 內，這段期間其他 client 的 `snapshotBegin` / `snapshotEnd`，以及 disconnect hook 的 `DropAll()`（`:10596-10603`，在 worker thread 上執行），都會被一起擋住。
 - 修法：(1) 在 `DecodeOneClass` 的 instance 迴圈中，先 `SafeReadBytes(instAddr) == klass` 再解碼，不符合就跳過，並累計 `staleInstances` 寫進 `decodeStats`。(2) 記住「已解碼到的最大 cursor」，重送已解碼過的範圍時只解碼、不累加統計和 budget；或者明確拒絕倒退的 cursor。(3) `View` 只用來取出 decoder 的 `shared_ptr`（session 內改用 `shared_ptr` 持有），decode / GC / sleep 都在鎖外執行。
 
-**C-M6 · `searchSymbols` 單一 assembly 模式下 `truncated` 永遠是 false（兩個 backend 都一樣）**
+**C-M6 · `searchSymbols` 單一 assembly 模式下 `truncated` 永遠是 false（兩個 backend 都一樣） — ✅ FIXED (2026-11-27)**
 - 位置：`dll/src/shared/ExportAPI.cpp:4934-4938`、`:5019-5020`、`:5038-5039`、`:5045`（Mono）；`:7269-7273`、`:7322-7323`、`:7342-7343`、`:7349`（IL2CPP）；UI 契約在 `ui/UnityDumpUI.Core/Services/ProtocolModels.cs:556-567`
 - 成因：單一 assembly 時 `globalCap == perAsmLimit`，命中上限時一定先執行 `isAsmCapped()` → `thisAsmCapped = true; break`，`matches.size() >= globalCap` 那一行永遠輪不到；外層迴圈也沒有下一個 assembly 可以補設。所以回應是 `truncated:false` + `truncated_assemblies:[asm]`。這與 DTO 文件「單一 assembly 模式請看 `Truncated`，`truncated_assemblies` 會是空的」正好相反，UI 會把被截斷的結果當成完整結果顯示。
 - 修法：在 `if (thisAsmCapped) truncatedAssemblies.push_back(...)` 之後加上 `if (!multiAsm && thisAsmCapped) truncated = true;`，或者在單一 assembly 模式下不要用 per-asm 預算判斷。兩個 backend 一起改，並補一個 C# 端測試，鎖住 DTO 的語意。
 
-**C-M7 · 錯誤有兩種管道（envelope `error` 與 result 內的 `"error"` 字串），而部分 UI DTO 沒有 `Error` 欄位，錯誤與截斷狀態會被靜默丟掉**
+**C-M7 · 錯誤有兩種管道（envelope `error` 與 result 內的 `"error"` 字串），而部分 UI DTO 沒有 `Error` 欄位，錯誤與截斷狀態會被靜默丟掉 — ✅ FIXED (2026-11-27)**
 - 位置：`ui/UnityDumpUI.Core/Services/BackendAdapter.cs:1317-1324`（`ThrowIfError` 只檢查 envelope）；`ProtocolModels.cs:109-113`（`GetAssembliesResult` 沒有 `Error`）、`:480-490`（`ClassRangeStatsResult` 沒有 `Error`）、`:1530-1546`（`SnapshotClassEntry` 沒有 `truncated`）；DLL 端 `dll/src/shared/ExportAPI.cpp:3714-3719`、`:7072-7077`（`getAssemblies` 回 `{"error":…,"assemblies":[]}`）、`:988-993`、`:4457-4464`（budget 截斷的類別帶 `"truncated":"memory_budget"|"instance_budget"`）
 - 成因：DLL 的 handler 幾乎都用「result 內含 `error` 字串」回報業務錯誤，只有例外才走 envelope。UI 的 DTO 是否宣告 `Error` 屬性全看當初誰寫的：runtime 尚未 resolve 時，`getAssemblies` 在 UI 上看起來就是「0 個 assembly」，沒有任何原因；snapshot 中被 budget 截斷的類別也看起來和「沒有 instance 的類別」一模一樣（`truncated` 這個 key 直接被 STJ 忽略）。
 - 修法：定一條規則並寫進 `pipe-protocol.md`：handler 層級的失敗一律有 `result.error`，UI 每個 result DTO 都要宣告 `Error`（可以抽成 `IResultWithError` 介面，由 `BackendAdapter` 統一檢查），或者反過來讓 `PipeServer::Dispatch` 把 `result.error` 提升成 envelope error。`SnapshotClassEntry` 加上 `[JsonPropertyName("truncated")] string? Truncated`，讓 UI 能標示被截斷的類別。
 
-**C-M8 · 數值掃描的值在 UI 端一律是 `double`：64-bit 整數失去精度，小數對整數型別被靜默截斷**
+**C-M8 · 數值掃描的值在 UI 端一律是 `double`：64-bit 整數失去精度，小數對整數型別被靜默截斷 — ✅ FIXED (2026-11-27)**
 - 位置：`ui/UnityDumpUI.Core/Services/BackendAdapter.cs:996-1008`（`BeginValueScanAsync(double value, double? valueTo)` → `Dbl(...)`）、`:1084-1096`（refine）、`ProtocolModels.cs:881-883`（`GroupSlotRequest.Value` / `ValueTo` 是 `double?`）；DLL 端 `dll/src/shared/ExportAPI.cpp:1397`、`:1414`（`static_cast<int64_t/uint64_t>(double)`）
 - 成因：大於 2^53 的 `Int64` / `UInt64`（例如 `DateTime.Ticks` 約 6.3e17、Steam ID）經過 `double` 之後尾數會被捨入，exact scan 永遠找不到。DLL 端的 `PackJsonValueToBytes` 在 JSON 為浮點數時直接截斷（int32 掃 `3.7` 會變成 `3`，不會拒絕）；超出範圍的 double 轉整數在 C++ 中是 UB（例如 `1e30`、NaN），之後的 range 檢查也沒有意義。DLL 其實已經支援字串形式的數值（`:1398-1407`），只是 UI 沒有用。
 - 修法：UI 端整數 dataType 改送字串（`"123456789012345678"`）或 `long` / `ulong` 的 JSON number（`JsonSerializer.SerializeToElement(long, ...Int64)`），只有 float / double 才送 double；DLL 端在 `asI64` / `asU64` 中，遇到浮點 JSON 時先檢查 `std::isfinite`、確認 `trunc(d) == d`，並且落在目標範圍內，否則回 false。

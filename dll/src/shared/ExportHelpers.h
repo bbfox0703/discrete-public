@@ -6,11 +6,14 @@
 
 #include <nlohmann/json.hpp>
 
+#include <charconv>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <string>
+#include <string_view>
 #include <type_traits>
 
 namespace Discrete::ExportHelpers {
@@ -273,6 +276,177 @@ inline bool DecodeIl2CppFieldDefaultByTag(std::int32_t metadataVersion,
         default:
             return false;
     }
+}
+
+// C-M6: normalize per-assembly cap into global `truncated` vs multi-assembly
+// `truncatedAssemblies` matching the SearchSymbolsResult DTO contract:
+// single-assembly mode sets `truncated = true` (leaving `truncatedAssemblies`
+// empty), while multi-assembly mode records the capped assembly name in
+// `truncatedAssemblies` so other assemblies can still be scanned.
+inline void RecordSearchSymbolsAsmCap(bool multiAsm,
+                                      bool thisAsmCapped,
+                                      const std::string& assemblyName,
+                                      bool& truncated,
+                                      std::vector<std::string>& truncatedAssemblies) {
+    if (!thisAsmCapped) return;
+    if (multiAsm) {
+        truncatedAssemblies.push_back(assemblyName);
+    } else {
+        truncated = true;
+    }
+}
+
+// C-M8: strict JSON numeric-value parsers for value/group scans.
+// Rejects non-finite doubles (NaN/Inf), fractional floats for integer scans
+// (3.7 will NOT silently truncate to 3), out-of-range doubles (avoiding C++
+// float-to-int UB), trailing garbage in strings ("3.7", "12abc"), negative
+// strings for unsigned targets ("-1"), and >INT64_MAX unsigned values for
+// signed targets. Preserves full 64-bit integer precision.
+inline std::string_view TrimAsciiWs(std::string_view s) noexcept {
+    while (!s.empty() && (s.front() == ' ' || s.front() == '\t' || s.front() == '\r' || s.front() == '\n')) {
+        s.remove_prefix(1);
+    }
+    while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r' || s.back() == '\n')) {
+        s.remove_suffix(1);
+    }
+    return s;
+}
+
+inline bool ParseStrictInt64FromDouble(double d, std::int64_t& out) noexcept {
+    if (!std::isfinite(d)) return false;
+    if (std::trunc(d) != d) return false;
+    // Exact IEEE-754 bounds: -2^63 is representable; +2^63 is strictly > INT64_MAX.
+    if (d < -9223372036854775808.0 || d >= 9223372036854775808.0) return false;
+    out = static_cast<std::int64_t>(d);
+    return true;
+}
+
+inline bool ParseStrictUInt64FromDouble(double d, std::uint64_t& out) noexcept {
+    if (!std::isfinite(d)) return false;
+    if (d < 0.0) return false;
+    if (std::trunc(d) != d) return false;
+    // Exact IEEE-754 upper bound: 2^64 is strictly > UINT64_MAX.
+    if (d >= 18446744073709551616.0) return false;
+    out = static_cast<std::uint64_t>(d);
+    return true;
+}
+
+inline bool ParseStrictInt64FromString(std::string_view raw, std::int64_t& out) noexcept {
+    std::string_view s = TrimAsciiWs(raw);
+    if (s.empty()) return false;
+    bool neg = false;
+    if (s.front() == '+') {
+        s.remove_prefix(1);
+    } else if (s.front() == '-') {
+        neg = true;
+        s.remove_prefix(1);
+    }
+    if (s.empty()) return false;
+    int base = 10;
+    if (s.size() > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        base = 16;
+        s.remove_prefix(2);
+    }
+    if (s.empty()) return false;
+    std::uint64_t mag = 0;
+    const char* first = s.data();
+    const char* last  = s.data() + s.size();
+    auto res = std::from_chars(first, last, mag, base);
+    if (res.ec != std::errc{} || res.ptr != last) return false;
+    if (neg) {
+        constexpr std::uint64_t kAbsMin = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) + 1ull;
+        if (mag > kAbsMin) return false;
+        if (mag == kAbsMin) {
+            out = std::numeric_limits<std::int64_t>::min();
+        } else {
+            out = -static_cast<std::int64_t>(mag);
+        }
+        return true;
+    }
+    if (mag > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) return false;
+    out = static_cast<std::int64_t>(mag);
+    return true;
+}
+
+inline bool ParseStrictUInt64FromString(std::string_view raw, std::uint64_t& out) noexcept {
+    std::string_view s = TrimAsciiWs(raw);
+    if (s.empty()) return false;
+    if (s.front() == '+') s.remove_prefix(1);
+    if (s.empty() || s.front() == '-') return false;
+    int base = 10;
+    if (s.size() > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        base = 16;
+        s.remove_prefix(2);
+    }
+    if (s.empty()) return false;
+    std::uint64_t val = 0;
+    const char* first = s.data();
+    const char* last  = s.data() + s.size();
+    auto res = std::from_chars(first, last, val, base);
+    if (res.ec != std::errc{} || res.ptr != last) return false;
+    out = val;
+    return true;
+}
+
+inline bool ParseStrictJsonInt64(const nlohmann::json& v, std::int64_t& out) noexcept {
+    if (v.is_number_unsigned()) {
+        std::uint64_t u = v.get<std::uint64_t>();
+        if (u > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) return false;
+        out = static_cast<std::int64_t>(u);
+        return true;
+    }
+    if (v.is_number_integer()) {
+        out = v.get<std::int64_t>();
+        return true;
+    }
+    if (v.is_number_float()) {
+        return ParseStrictInt64FromDouble(v.get<double>(), out);
+    }
+    if (v.is_string()) {
+        return ParseStrictInt64FromString(v.get_ref<const std::string&>(), out);
+    }
+    return false;
+}
+
+inline bool ParseStrictJsonUInt64(const nlohmann::json& v, std::uint64_t& out) noexcept {
+    if (v.is_number_unsigned()) {
+        out = v.get<std::uint64_t>();
+        return true;
+    }
+    if (v.is_number_integer()) {
+        std::int64_t s = v.get<std::int64_t>();
+        if (s < 0) return false;
+        out = static_cast<std::uint64_t>(s);
+        return true;
+    }
+    if (v.is_number_float()) {
+        return ParseStrictUInt64FromDouble(v.get<double>(), out);
+    }
+    if (v.is_string()) {
+        return ParseStrictUInt64FromString(v.get_ref<const std::string&>(), out);
+    }
+    return false;
+}
+
+inline bool ParseStrictJsonDouble(const nlohmann::json& v, double& out) noexcept {
+    if (v.is_number()) {
+        double d = v.get<double>();
+        if (!std::isfinite(d)) return false;
+        out = d;
+        return true;
+    }
+    if (v.is_string()) {
+        std::string_view s = TrimAsciiWs(v.get_ref<const std::string&>());
+        if (s.empty()) return false;
+        double d = 0.0;
+        const char* first = s.data();
+        const char* last  = s.data() + s.size();
+        auto res = std::from_chars(first, last, d);
+        if (res.ec != std::errc{} || res.ptr != last || !std::isfinite(d)) return false;
+        out = d;
+        return true;
+    }
+    return false;
 }
 
 }  // namespace Discrete::ExportHelpers

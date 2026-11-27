@@ -378,6 +378,13 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
         try
         {
             GetAssembliesResult result = await _backend.GetAssembliesAsync().ConfigureAwait(true);
+            if (!string.IsNullOrEmpty(result.Error))
+            {
+                ErrorMessage = result.Error;
+                _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
+                    $"refreshAssemblies error: {result.Error}");
+                return;
+            }
             Assemblies.Clear();
             // Sort alphabetically (case-insensitive). Backend order is image-load
             // order which is engine-implementation-defined; the user expects

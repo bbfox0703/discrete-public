@@ -68,6 +68,11 @@ public sealed class HandshakeResult
     /// address-space pressure that triggers OOM. Used by the DLL's
     /// snapshotBegin pre-check (>3 GB on x86 refuses the snapshot).</summary>
     [JsonPropertyName("game_private_usage")] public ulong? GamePrivateUsage { get; set; }
+
+    /// <summary>B-M6 / C-M7 — non-null when a runtime lock fault poisoned the DLL.</summary>
+    [JsonPropertyName("runtime_poisoned")]     public bool    RuntimePoisoned     { get; set; }
+    [JsonPropertyName("runtime_fault_reason")] public string? RuntimeFaultReason  { get; set; }
+    [JsonPropertyName("error")]                public string? Error               { get; set; }
 }
 
 /// <summary>
@@ -75,14 +80,16 @@ public sealed class HandshakeResult
 /// </summary>
 public sealed class PingResult
 {
-    [JsonPropertyName("pong")] public bool Pong { get; set; }
+    [JsonPropertyName("pong")]  public bool    Pong  { get; set; }
+    [JsonPropertyName("error")] public string? Error { get; set; }
 }
 
 /// <summary>`cancelScan` ack — arms the DLL's cooperative scan-cancel flag.</summary>
 public sealed class CancelScanResult
 {
-    [JsonPropertyName("ok")]        public bool Ok        { get; set; }
-    [JsonPropertyName("cancelled")] public bool Cancelled { get; set; }
+    [JsonPropertyName("ok")]        public bool    Ok        { get; set; }
+    [JsonPropertyName("cancelled")] public bool    Cancelled { get; set; }
+    [JsonPropertyName("error")]     public string? Error     { get; set; }
 }
 
 /// <summary>
@@ -110,6 +117,8 @@ public sealed class GetAssembliesResult
 {
     [JsonPropertyName("count")]      public int                       Count      { get; set; }
     [JsonPropertyName("assemblies")] public List<AssemblyEntry>       Assemblies { get; set; } = new();
+    /// <summary>C-M7: handler-level error string (e.g. runtime not resolved).</summary>
+    [JsonPropertyName("error")]      public string?                   Error      { get; set; }
 }
 
 public sealed class AssemblyEntry
@@ -493,6 +502,8 @@ public sealed class ClassRangeStatsResult
     [JsonPropertyName("max_klass")]    public string? MaxKlass    { get; set; }
     [JsonPropertyName("min_vtable")]   public string? MinVtable   { get; set; }
     [JsonPropertyName("max_vtable")]   public string? MaxVtable   { get; set; }
+    /// <summary>C-M7: handler-level error string.</summary>
+    [JsonPropertyName("error")]        public string? Error       { get; set; }
 }
 
 /// <summary>
@@ -885,11 +896,12 @@ public sealed class EndValueScanResult
 /// ignores dataType (the session remembers each slot's width).</summary>
 public sealed class GroupSlotRequest
 {
-    [JsonPropertyName("dataType")]  public string  DataType  { get; set; } = "int32";
-    [JsonPropertyName("scanType")]  public string  ScanType  { get; set; } = "exact";
-    [JsonPropertyName("value")]     public double? Value     { get; set; }
-    [JsonPropertyName("valueTo")]   public double? ValueTo   { get; set; }
-    [JsonPropertyName("tolerance")] public double? Tolerance { get; set; }
+    [JsonPropertyName("dataType")]  public string       DataType  { get; set; } = "int32";
+    [JsonPropertyName("scanType")]  public string       ScanType  { get; set; } = "exact";
+    /// <summary>C-M8: exact typed JSON value (Int64/UInt64 for integer slots, Double for float/double).</summary>
+    [JsonPropertyName("value")]     public JsonElement? Value     { get; set; }
+    [JsonPropertyName("valueTo")]   public JsonElement? ValueTo   { get; set; }
+    [JsonPropertyName("tolerance")] public double?      Tolerance { get; set; }
 }
 
 /// <summary>One slot's match within a group candidate. <see cref="MatchedOffsets"/>
@@ -1546,6 +1558,9 @@ public sealed class SnapshotClassEntry
     [JsonPropertyName("statics")]   public List<SnapshotFieldEntry>?    Statics   { get; set; }
     [JsonPropertyName("instances")] public List<SnapshotInstanceEntry>? Instances { get; set; }
     [JsonPropertyName("error")]     public string?                      Error     { get; set; }
+    /// <summary>C-M7: non-null when the DLL skipped/truncated this class under
+    /// budget pressure ("memory_budget" or "instance_budget").</summary>
+    [JsonPropertyName("truncated")] public string?                      Truncated { get; set; }
 
     /// <summary>Phase 30a deduped wire — field metadata emitted once per class.
     /// When non-null, each instance's <see cref="SnapshotInstanceEntry.V"/> is
