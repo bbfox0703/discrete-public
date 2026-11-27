@@ -16,7 +16,7 @@
 //   codeGenModules: ptr → array of `Il2CppCodeGenModule*`
 //     each `Il2CppCodeGenModule`:
 //       0x00  ptr   moduleName              (always — first field)
-//       0x08  i64   methodPointerCount
+//       0x08  u32   methodPointerCount      (+ 4-byte alignment pad on x64)
 //       0x10  ptr   methodPointers          (array of native func ptrs)
 //       0x18+ ... version-variable tail (adjustorThunks etc.)
 //
@@ -57,7 +57,8 @@ struct Module {
 struct Found {
     std::uint64_t        arrayRva      = 0;    // RVA of the codeGenModules pointer-array itself
     std::uint64_t        arrayVa       = 0;
-    std::size_t          moduleCount   = 0;
+    std::size_t          moduleCount   = 0;    // non-null Il2CppCodeGenModule* entries
+    std::size_t          arraySlots    = 0;    // D-L11: total array slots (incl. intermediate nulls)
     std::vector<Module>  modules;
     std::string          sectionName;          // section the array lived in
 };

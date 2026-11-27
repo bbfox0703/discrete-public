@@ -38,9 +38,10 @@
 //! ParamIndex joins the variable-width family (per Perfare/Il2CppDumper#903).
 //!
 //! All layouts cross-checked against Unity's official IL2CPP source in
-//! vendor/libil2cpp/ + the Il2CppDumperV35plus community fork (pinned at
-//! bbd9c0c2 in vendor/Il2CppDumperV35plus/) — see
-//! docs/il2cpp-metadata-crosscheck.md for the field-by-field comparison.
+//! vendor/libil2cpp/ + the Il2CppDumperV35plus community fork (line numbers
+//! cited below refer to commit `bbd9c0c2`; `sync_vendor.ps1` tracks upstream
+//! tip for reference clones) — see docs/il2cpp-metadata-crosscheck.md for
+//! the field-by-field comparison.
 
 /// `Il2CppGlobalMetadataHeader.sanity` magic.
 pub const SANITY: u32 = 0xFAB1_1BAF;

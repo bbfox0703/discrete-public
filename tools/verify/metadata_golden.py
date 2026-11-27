@@ -291,9 +291,14 @@ def main() -> int:
     ap.add_argument("--exe", help="check this binary instead (skips the Rust-marker guard; not with --record)")
     ap.add_argument("-j", "--jobs", type=int, default=max(1, min(4, os.cpu_count() or 1)))
     ap.add_argument("--record", action="store_true",
-                    help="write the hashes of this run into metadata_golden.json (see the docstring)")
+                    help="add missing fixture entries into metadata_golden.json (refuses to overwrite changed entries without --rebaseline)")
+    ap.add_argument("--rebaseline", action="store_true",
+                    help="with --record: explicitly allow overwriting existing changed golden entries and print the diff")
     args = ap.parse_args()
 
+    if args.rebaseline and not args.record:
+        print("--rebaseline requires --record", file=sys.stderr)
+        return 2
     if args.exe and args.record:
         print("--exe cannot be combined with --record", file=sys.stderr)
         return 2
@@ -360,11 +365,46 @@ def main() -> int:
         if fails:
             print("\nnot recorded: fix the failing fixture(s) first", file=sys.stderr)
             return 1
+        added, rebaselined, unchanged = 0, 0, 0
+        blocked: list[str] = []
         for r in results:
-            golden[r.key] = {"fixture": r.hint, "checks": {c.key: c.digest for c in r.checks}}
+            new_checks = {c.key: c.digest for c in r.checks}
+            old_entry = golden.get(r.key)
+            if old_entry is None:
+                golden[r.key] = {"fixture": r.hint, "checks": new_checks}
+                added += 1
+                continue
+            old_checks = old_entry.get("checks", {})
+            diffs: list[str] = []
+            label_by_key = {c.key: c.label for c in r.checks}
+            for k in sorted(set(old_checks) | set(new_checks)):
+                if k not in old_checks:
+                    diffs.append(f"  + {k} ({label_by_key.get(k, k)}): added {new_checks[k][:16]}..")
+                elif k not in new_checks:
+                    diffs.append(f"  - {k}: removed (was {old_checks[k][:16]}..)")
+                elif old_checks[k] != new_checks[k]:
+                    diffs.append(f"  ~ {k} ({label_by_key.get(k, k)}): {old_checks[k][:16]}.. -> {new_checks[k][:16]}..")
+            if not diffs:
+                unchanged += 1
+                continue
+            if not args.rebaseline:
+                blocked.append(f"{r.fixture} ({r.key[:16]}..): {len(diffs)} check(s) changed:\n" + "\n".join(diffs[:20]))
+                continue
+            print(f"\n[REBASELINE] {r.fixture} ({len(diffs)} check(s) changed):")
+            for d in diffs[:20]:
+                print(d)
+            if len(diffs) > 20:
+                print(f"  ... {len(diffs) - 20} more")
+            golden[r.key] = {"fixture": r.hint, "checks": new_checks}
+            rebaselined += 1
+        if blocked:
+            print("\nrefusing to overwrite existing golden entries without --rebaseline:", file=sys.stderr)
+            for b in blocked:
+                print(b, file=sys.stderr)
+            return 1
         golden_doc["entries"] = dict(sorted(golden.items()))
         GOLDEN.write_text(json.dumps(golden_doc, indent=1) + "\n", encoding="utf-8", newline="\n")
-        print(f"\nrecorded {len(results)} fixture(s) into {GOLDEN}")
+        print(f"\nrecorded into {GOLDEN}: {added} added, {rebaselined} rebaselined, {unchanged} unchanged")
         return 0
 
     compared = sum(r.status == "PASS" for r in results)

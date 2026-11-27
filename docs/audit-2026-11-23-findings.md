@@ -664,7 +664,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 
 ### Low
 
-**D-L1 · `Cargo.toml` 宣告 `rust-version = "1.85"`，但程式碼用了 Rust 1.88 才穩定的 let-chains**
+**D-L1 · `Cargo.toml` 宣告 `rust-version = "1.85"`，但程式碼用了 Rust 1.88 才穩定的 let-chains — ✅ FIXED (2026-11-27)**
 - 位置：`dll/rust/Cargo.toml:17`；`dll/rust/src/chain/decode.rs:547`、`:703`、`:896-897`（`if … && let Some(..) = …`）
 - 成因：MSRV 宣告過時。實際建置有 `rust-toolchain.toml`（1.100.0）保護，但 `rust-version` 會誤導 `cargo` 的 MSRV 檢查和讀者。
 - 修法：改成實際的最低版本（≥ 1.88），或直接和 toolchain pin 保持一致。
@@ -694,12 +694,12 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：chain detector 與 RIP xref 會逐 MiB 掃描整個 `GameAssembly.dll`（可達數百 MB），C ABI 沒有 cancel 參數，`ScanCancel::RequestCancel()` 或 client 斷線都停不下來，worker thread 會一直佔著直到掃描完成。
 - 修法：C ABI 加一個 `const volatile int32_t* cancel` 參數（或 `dc_cancel_fn` callback），每個 chunk 開始時檢查一次；取消時回傳的 handle 帶 `cancelled=1`，C++ 端再對應到既有的 `ScanCancel` 語意。
 
-**D-L7 · 非建置類 target 也會遞增 build number，`dist\build_number.txt` 和 `dist\` 中的 binary 對不起來**
+**D-L7 · 非建置類 target 也會遞增 build number，`dist\build_number.txt` 和 `dist\` 中的 binary 對不起來 — ✅ FIXED (2026-11-27)**
 - 位置：`build.ps1:431-438`（只要沒有 `-NoBumpBuildNumber`，任何 target 都會 bump）、`:769-771`、`:823-826`、`:848`
 - 成因：`build test`、`build deploy`、`build deploy-scripts`、`build ui` 都會讓 `build_number.txt` 加 1，接著 `Copy-CompanionArtifacts` 把新號碼複製到 `dist\`（`deploy` 還會再複製到 CE 目錄），但 DLL 仍是上一個號碼。之後回報問題時，用 build number 對照 binary 就會對錯。
 - 修法：只有 `DLL` / `ProxyDLL` / `MetadataCli` / `UI` / `All` 才 bump；`Test` / `Deploy*` 一律當成 `-NoBumpBuildNumber`。
 
-**D-L8 · 過時的變數、註解與文件**
+**D-L8 · 過時的變數、註解與文件 — ✅ FIXED (2026-11-27)**
 - `build.ps1:113`：`$SLN` 指向不存在的 `ui\Discrete.sln`（實際是 `ui\UnityCEDumper.sln`），而且沒有任何地方使用（§7 訊號確認）。修法：刪除。
 - `CMakeLists.txt:144-152`、`tools/metadata-cli/CMakeLists.txt:31-33`：仍以「避免 `/external:I` 洩漏到 Zydis vendor 子目錄」作為理由，但 Zydis 已經移除。修法：改寫成現況（只剩 MinHook）。
 - `tools/metadata-cli/SymbolPipeline.h:11-15`：描述「每個 method 呼叫 `FindImageContainingMethod`」，實作（`SymbolPipeline.cpp:202-219`）改成以 image 為主走訪。修法：同步註解。
@@ -710,12 +710,12 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：build 步驟會執行 repo 腳本、clone 第三方 repo、下載 crate，這些步驟都持有可寫 release 的 token；actions 使用可移動的 major tag。這和專案其他地方「精確釘版」的政策不一致。
 - 修法：actions 改用 commit SHA 釘版；拆成兩個 job：`build`（`contents: read`，產出 artifact）與 `release`（`contents: write`，只下載 artifact 並呼叫 `gh`）。`rustup self update` 改成檢查版本，不足時才更新。
 
-**D-L10 · `metadata_golden.py --record` 會直接覆蓋既有的 golden entry，不做任何比對**
+**D-L10 · `metadata_golden.py --record` 會直接覆蓋既有的 golden entry，不做任何比對 — ✅ FIXED (2026-11-27)**
 - 位置：`tools/verify/metadata_golden.py:359-368`
 - 成因：如果有人在回歸發生後執行 `--record`（例如以為只是新增 fixture），同一個檔案雜湊下的舊 golden 會被新雜湊直接蓋掉，閘門就失效了，而 diff 只會顯示 JSON 變更。
 - 修法：`--record` 預設只新增 key 不存在的 entry；要覆蓋既有 entry 時，必須加上 `--rebaseline` 並印出哪些 check 改變了。`r2_golden.py` 這次沒有檢查是否有同樣的問題，請一併確認。
 
-**D-L11 · `CodeGenModulesFinder` 的小問題**
+**D-L11 · `CodeGenModulesFinder` 的小問題 — ✅ FIXED (2026-11-27)**
 - 位置：`tools/metadata-cli/CodeGenModulesFinder.cpp:86-91`、`:109`、`:239-257`
 - 成因：(a) `Il2CppCodeGenModule::methodPointerCount` 是 `uint32_t`，後面接 4 bytes padding，這裡用 `u64` 讀取，等於假設 padding 一定是 0（MSVC 的常數初始化資料通常如此，但沒有保證）。(b) `off = cursor; continue;` 之後，迴圈本身還會再 `off += 8`，跳過一個 slot；目前只會跳過剛驗證失敗的那一格，無害，但很脆弱。(c) `moduleCount` 不含中間的 null slot，不等於實際的陣列長度。
 - 修法：只讀 4 bytes 的 count；在迴圈內改成 `off = cursor - 8`，或把迴圈改成 while；另外回報 `arraySlots`（含 null）。

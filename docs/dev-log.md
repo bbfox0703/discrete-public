@@ -12,6 +12,19 @@ this file grows too large.
 
 -----
 
+## 2026-11-27 (build 1574) — Fix D-L1 + D-L7 + D-L8 + D-L10 + D-L11 (Rust MSRV 1.88, build-only `build_number.txt` bump, stale comments/vars cleanup, golden `--rebaseline` guard, `CodeGenModulesFinder` u32 count + loop/slots fix)
+
+- **Bug fixes (`D-L1`, `D-L7`, `D-L8`, `D-L10`, `D-L11`):**
+  - **`D-L1` (`dll/rust/Cargo.toml`):** Updated `rust-version` from `"1.85"` to `"1.88"` to accurately match let-chains in `chain/decode.rs`.
+  - **`D-L7` (`build.ps1`):** Restricted `Bump-BuildNumber` to actual binary-producing targets (`DLL`, `ProxyDLL`, `MetadataCli`, `UI`, `All`) so `Test`, `CppTest`, `Deploy`, and `DeployScripts` leave `build_number.txt` aligned with the binaries in `dist\`.
+  - **`D-L8` (`build.ps1`, `CMakeLists.txt`, `tools/metadata-cli/CMakeLists.txt`, `dll/rust/src/metadata/layout.rs`):** Removed unused `$SLN` pointing to non-existent `ui\Discrete.sln`, updated Zydis-era include comments to reflect current MinHook-only `dll/vendor/`, and clarified that `layout.rs`'s `Il2CppDumperV35plus` line citations correspond to commit `bbd9c0c2`.
+  - **`D-L10` (`tools/verify/metadata_golden.py`, `tools/verify/r2_golden.py`):** Changed `--record` to add missing keys only and refuse overwriting changed existing golden entries unless `--rebaseline` is also passed (printing a per-check diff summary on rebaseline; rejecting `--rebaseline` without `--record`).
+  - **`D-L11` (`tools/metadata-cli/CodeGenModulesFinder.{h,cpp}`, `tools/metadata-cli/main.cpp`):** Read `Il2CppCodeGenModule::methodPointerCount` as 4-byte `uint32_t` (ignoring x64 alignment padding), guarded `methodPointersRva` against underflow when `methodPtrsVa == 0`, replaced the fragile `for` loop with an explicit `while` advance (`off = cursor`), and exposed `Found::arraySlots` (`array_slots` in `CmdCodeModules`) including intermediate null slots.
+  - Marked `D-L1`, `D-L7`, `D-L8`, `D-L10`, and `D-L11` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1574) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1254 passed (0 failed, 0 skipped, locked mode); Rust core dev 112/113 + release `+crt-static` 112/113 passed; C++ `discrete_dll_test` 789 passed (x64) / 789 passed (x86); `r2_golden.py --no-images` 7/7 passed; verified `--rebaseline` guard on both golden scripts.
+
+-----
+
 ## 2026-11-27 (build 1573) — Fix E-L5 + E-L7 + E-L10 + E-L11 (completes 100% of Block E: CE math-struct expansion, Lua UTF-16 surrogate & JSON hardening, handshake capability flag, dead-code & doc cleanup + tests)
 
 - **Bug fixes (`E-L5`, `E-L7`, `E-L10`, `E-L11` — completes 100% of Block E Critical/High/Medium/Low findings):**
