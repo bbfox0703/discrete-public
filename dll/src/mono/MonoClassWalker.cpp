@@ -23,11 +23,20 @@ const char* SafeStr(const char* s) { return s ? s : ""; }
 
 #pragma warning(push)
 #pragma warning(disable: 4509)
+template <typename R, typename A>
+R SehCall(R (*fn)(A), A arg) {
+    __try { return fn(arg); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return R{}; }
+}
 MonoClass* SehNesting(fn_class_get_nesting_type fn, MonoClass* k) {
     __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 MonoClass* SehNextNested(fn_class_get_nested_types fn, MonoClass* k, void** iter) {
     __try { return fn(k, iter); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+std::uint32_t SehMethodFlags(fn_method_get_flags fn, MonoMethod* m, std::uint32_t* iflags) {
+    __try { return fn(m, iflags); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
 }
 #pragma warning(pop)
 
@@ -41,7 +50,7 @@ bool DescribeClass(MonoClass* klass, std::uint32_t token, ClassEntry& out) {
     out.token = token;
     if (r.class_get_name == nullptr) return true;
 
-    std::string leaf = SafeStr(r.class_get_name(klass));
+    std::string leaf = SafeStr(SehCall(r.class_get_name, klass));
 
     MonoClass* cur = klass;
     MonoClass* outer = klass;
@@ -49,14 +58,14 @@ bool DescribeClass(MonoClass* klass, std::uint32_t token, ClassEntry& out) {
         for (int i = 0; i < 16; ++i) {
             MonoClass* n = SehNesting(r.class_get_nesting_type, cur);
             if (n == nullptr) break;
-            std::string nm = SafeStr(r.class_get_name(n));
+            std::string nm = SafeStr(SehCall(r.class_get_name, n));
             if (!nm.empty()) leaf = nm + "/" + leaf;
             outer = n;
             cur = n;
         }
     }
     out.name = std::move(leaf);
-    if (r.class_get_namespace != nullptr) out.ns = SafeStr(r.class_get_namespace(outer));
+    if (r.class_get_namespace != nullptr) out.ns = SafeStr(SehCall(r.class_get_namespace, outer));
     return true;
 }
 
@@ -70,7 +79,7 @@ MonoClass* FindNestedByName(MonoClass* outer, const std::string& nestedName) {
     for (;;) {
         MonoClass* k = SehNextNested(r.class_get_nested_types, outer, &iter);
         if (k == nullptr) return nullptr;
-        const char* n = r.class_get_name(k);
+        const char* n = SehCall(r.class_get_name, k);
         if (n != nullptr && nestedName == n) return k;
     }
 }
@@ -339,10 +348,10 @@ ClassInfoResult ReadClassInfo(MonoClass* klass, bool forceSetup) {
             MonoClassField* f = SehNextField(r.class_get_fields, klass, &iter);
             if (f == nullptr) break;
             FieldEntry fe;
-            if (r.field_get_name != nullptr)   fe.name = SafeStr(r.field_get_name(f));
-            if (r.field_get_offset != nullptr) fe.offset = Discrete::ManagedLayout::NormalizeFieldOffset32(r.field_get_offset(f));
-            if (r.field_get_flags != nullptr)  fe.flags = r.field_get_flags(f);
-            MonoType* ft = (r.field_get_type != nullptr) ? r.field_get_type(f) : nullptr;
+            if (r.field_get_name != nullptr)   fe.name = SafeStr(SehCall(r.field_get_name, f));
+            if (r.field_get_offset != nullptr) fe.offset = Discrete::ManagedLayout::NormalizeFieldOffset32(SehCall(r.field_get_offset, f));
+            if (r.field_get_flags != nullptr)  fe.flags = SehCall(r.field_get_flags, f);
+            MonoType* ft = (r.field_get_type != nullptr) ? SehCall(r.field_get_type, f) : nullptr;
             if (ft != nullptr) fe.typeName = TypeName(ft);
             // Field-class introspection — drives the inspector's classifier.
             // Skipped for STATIC fields (they're filtered out at emit time
@@ -437,11 +446,11 @@ ClassInfoResult ReadClassInfo(MonoClass* klass, bool forceSetup) {
             MonoMethod* m = SehNextMethod(r.class_get_methods, klass, &iter);
             if (m == nullptr) break;
             MethodEntry me;
-            if (r.method_get_name != nullptr)  me.name = SafeStr(r.method_get_name(m));
-            if (r.method_get_token != nullptr) me.token = r.method_get_token(m);
+            if (r.method_get_name != nullptr)  me.name = SafeStr(SehCall(r.method_get_name, m));
+            if (r.method_get_token != nullptr) me.token = SehCall(r.method_get_token, m);
             if (r.method_get_flags != nullptr) {
                 std::uint32_t iflags = 0;
-                me.flags = r.method_get_flags(m, &iflags);
+                me.flags = SehMethodFlags(r.method_get_flags, m, &iflags);
             }
             result.info.methods.push_back(std::move(me));
         }
@@ -491,16 +500,17 @@ StaticFieldAddress ResolveStaticFieldAddress(MonoClass* klass, const std::string
     for (;;) {
         MonoClassField* f = SehNextField(r.class_get_fields, klass, &iter);
         if (f == nullptr) break;
-        const char* n = (r.field_get_name != nullptr) ? r.field_get_name(f) : nullptr;
+        const char* n = (r.field_get_name != nullptr) ? SehCall(r.field_get_name, f) : nullptr;
         if (n != nullptr && fieldName == n) { match = f; break; }
     }
     if (match == nullptr) return out;
 
-    std::uint32_t flags = (r.field_get_flags != nullptr) ? r.field_get_flags(match) : 0u;
+    std::uint32_t flags = (r.field_get_flags != nullptr) ? SehCall(r.field_get_flags, match) : 0u;
     std::int32_t offset = (r.field_get_offset != nullptr)
-        ? Discrete::ManagedLayout::NormalizeFieldOffset32(r.field_get_offset(match))
+        ? Discrete::ManagedLayout::NormalizeFieldOffset32(SehCall(r.field_get_offset, match))
         : -1;
-    std::string typeName = (r.field_get_type != nullptr) ? TypeName(r.field_get_type(match)) : std::string{};
+    MonoType* matchType = (r.field_get_type != nullptr) ? SehCall(r.field_get_type, match) : nullptr;
+    std::string typeName = (matchType != nullptr) ? TypeName(matchType) : std::string{};
     out.offset   = offset;
     out.flags    = flags;
     out.typeName = typeName;
@@ -577,13 +587,13 @@ CompiledMethodAddress CompileMethodByName(MonoClass* klass, const std::string& m
     for (;;) {
         MonoMethod* m = SehNextMethod(r.class_get_methods, klass, &iter);
         if (m == nullptr) break;
-        const char* n = (r.method_get_name != nullptr) ? r.method_get_name(m) : nullptr;
+        const char* n = (r.method_get_name != nullptr) ? SehCall(r.method_get_name, m) : nullptr;
         if (n != nullptr && methodName == n) { match = m; break; }
     }
     if (match == nullptr) return out;
 
     out.name  = methodName;
-    out.token = (r.method_get_token != nullptr) ? r.method_get_token(match) : 0u;
+    out.token = (r.method_get_token != nullptr) ? SehCall(r.method_get_token, match) : 0u;
     void* p = SehCompile(r.compile_method, match);
     if (p == nullptr) {
         Discrete::Log::Write(MagicStrings::LogCategoryWalk,
@@ -622,13 +632,15 @@ std::vector<LiteralFieldEntry> EnumerateLiteralFields(MonoClass* klass) {
     for (;;) {
         MonoClassField* f = SehNextField(r.class_get_fields, klass, &iter);
         if (f == nullptr) break;
-        std::uint32_t flags = (r.field_get_flags != nullptr) ? r.field_get_flags(f) : 0u;
+        std::uint32_t flags = (r.field_get_flags != nullptr) ? SehCall(r.field_get_flags, f) : 0u;
         // FIELD_ATTRIBUTE_LITERAL = 0x40 (ECMA-335 §II.23.1.5).
         if (!(flags & 0x40u)) continue;
 
         LiteralFieldEntry e;
-        if (r.field_get_name != nullptr)  e.name     = SafeStr(r.field_get_name(f));
-        if (r.field_get_type != nullptr)  e.typeName = TypeName(r.field_get_type(f));
+        if (r.field_get_name != nullptr)  e.name     = SafeStr(SehCall(r.field_get_name, f));
+        if (r.field_get_type != nullptr) {
+            if (MonoType* ft = SehCall(r.field_get_type, f)) e.typeName = TypeName(ft);
+        }
         e.data = SehFieldData(r.field_get_data, f);
         if (e.name.empty()) continue;
         out.push_back(std::move(e));

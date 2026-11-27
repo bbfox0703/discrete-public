@@ -160,11 +160,16 @@ std::uint32_t SehObjectGetSizeProbe(fn_object_get_size fn, MonoObject* o) {
     __try { return fn(o); }
     __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
 }
-// Phase 27c — array element class lookup. Non-null result means klass is
-// an array type (System.Object[], int[], etc).
+// Phase 27c — array element class lookup + B-L2 rank check (enums also have
+// element_class != klass, pointing at their underlying integer type, so rank
+// or !is_enum is required to avoid misclassifying boxed enums as arrays).
 MonoClass* SehElementClassProbe(fn_class_get_element_class fn, MonoClass* k) {
     __try { return fn(k); }
     __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+int SehClassRankProbe(fn_class_get_rank fn, MonoClass* k) {
+    __try { return fn(k); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
 }
 // Phase 27d follow-up — walk nesting chain for nested-class name resolution.
 MonoClass* SehNestingProbe(fn_class_get_nesting_type fn, MonoClass* k) {
@@ -312,6 +317,25 @@ bool TryAcceptDynamicMonoKlass(
     return ok;
 }
 
+// B-L2: Distinguish genuine managed arrays from enums (Mono sets an enum's
+// element_class to its underlying integer type, so element_class != k alone
+// misclassifies boxed enums as arrays). Caller holds a ThreadAttachGuard.
+bool IsMonoArrayClass(MonoClass* k, MonoClass*& outElemClass) {
+    outElemClass = nullptr;
+    if (k == nullptr) return false;
+    const auto& r = GetResolver();
+    if (r.class_get_element_class == nullptr) return false;
+    if (r.class_get_rank != nullptr) {
+        if (SehClassRankProbe(r.class_get_rank, k) <= 0) return false;
+    } else if (r.class_is_enum != nullptr && SehIsEnumProbe(r.class_is_enum, k) != 0) {
+        return false;
+    }
+    MonoClass* elem = SehElementClassProbe(r.class_get_element_class, k);
+    if (elem == nullptr || elem == k) return false;
+    outElemClass = elem;
+    return true;
+}
+
 // Compute (and cache per-class) the byte extent of a confirmed Mono object
 // so WhatIsAt and ReverseLookupIndex reject out-of-bounds neighbor hits.
 // Caller holds a ThreadAttachGuard.
@@ -325,17 +349,15 @@ ClassExtentInfo GetMonoClassExtentInfo(MonoClass* k) {
 
     ClassExtentInfo info;
     const auto& r = GetResolver();
-    if (r.class_get_element_class != nullptr) {
-        MonoClass* elem = SehElementClassProbe(r.class_get_element_class, k);
-        if (elem != nullptr && elem != k) {
-            info.isArray = true;
-            info.arrayElemSize = ManagedLayout::kPointerSize;
-            if (r.class_is_valuetype != nullptr &&
-                SehIsValueTypeProbe(r.class_is_valuetype, elem) != 0 &&
-                r.class_value_size != nullptr) {
-                int sz = SehValueSizeProbe(r.class_value_size, elem);
-                if (sz > 0) info.arrayElemSize = static_cast<std::size_t>(sz);
-            }
+    MonoClass* elem = nullptr;
+    if (IsMonoArrayClass(k, elem)) {
+        info.isArray = true;
+        info.arrayElemSize = ManagedLayout::kPointerSize;
+        if (r.class_is_valuetype != nullptr &&
+            SehIsValueTypeProbe(r.class_is_valuetype, elem) != 0 &&
+            r.class_value_size != nullptr) {
+            int sz = SehValueSizeProbe(r.class_value_size, elem);
+            if (sz > 0) info.arrayElemSize = static_cast<std::size_t>(sz);
         }
     }
     if (!info.isArray) {
@@ -726,9 +748,9 @@ void ResolveInstanceLookup(std::uintptr_t addr, std::uintptr_t instance,
     // class is genuinely a DIFFERENT class. This mirrors the IL2CPP idiom at
     // IL2CPPAddressFinder.cpp (`SehElementClassProbe(...) != ce.klass`).
     bool resolvedAsArray = false;
-    if (r.class_get_element_class != nullptr) {
-        MonoClass* elemClass = SehElementClassProbe(r.class_get_element_class, k);
-        if (elemClass != nullptr && elemClass != k) {
+    MonoClass* elemClass = nullptr;
+    if (IsMonoArrayClass(k, elemClass)) {
+        {
             std::ptrdiff_t dataOff = static_cast<std::ptrdiff_t>(ManagedLayout::kArrayDataOffset);
             if (out.fieldOffset >= dataOff) {
                 std::uintptr_t arrayLength = 0;
@@ -798,7 +820,9 @@ bool BuildClassRangeCache() {
         cache().vtableToKlass.clear();
         g_minKlass  = static_cast<std::uintptr_t>(-1);
         g_maxKlass  = 0;
-        g_minVtable = static_cast<std::uintptr_t>(-1);
+        // B-L3: Match InvalidateClassRangeCache's 0 sentinel (all min updates
+        // check `g_minVtable == 0 || vt < g_minVtable`).
+        g_minVtable = 0;
         g_maxVtable = 0;
 
         auto assemblies = EnumerateAssemblies();
@@ -1343,25 +1367,24 @@ BulkInstancesResult FindAllInstances(std::size_t perClassCap) {
     // follow-up WhatIsAt calls don't pay the deref again.
     {
         std::lock_guard<std::mutex> lk(cache().mu);
+        // B-L3: Deduplicate via vtableToKlass.emplace().second in O(1) instead
+        // of calling std::binary_search on vtableSet while mutating it unsorted.
+        bool addedAny = false;
         for (const auto& [vt, kl] : vtMemo) {
             if (kl == 0) continue;
-            cache().vtableToKlass.emplace(vt, kl);
-            // Maintain the vtableSet alongside the map so callers that
-            // binary-search via ContainsVtable benefit too.
-            if (cache().vtableSet.empty() ||
-                !std::binary_search(cache().vtableSet.begin(),
-                                    cache().vtableSet.end(), vt)) {
+            if (cache().vtableToKlass.emplace(vt, kl).second) {
                 cache().vtableSet.push_back(vt);
                 if (g_minVtable == 0 || vt < g_minVtable) g_minVtable = vt;
                 if (vt > g_maxVtable) g_maxVtable = vt;
+                addedAny = true;
             }
         }
-        // Re-sort the vtable vector if we added anything (cheap; vector
-        // is typically tens of thousands).
-        std::sort(cache().vtableSet.begin(), cache().vtableSet.end());
-        cache().vtableSet.erase(
-            std::unique(cache().vtableSet.begin(), cache().vtableSet.end()),
-            cache().vtableSet.end());
+        if (addedAny) {
+            std::sort(cache().vtableSet.begin(), cache().vtableSet.end());
+            cache().vtableSet.erase(
+                std::unique(cache().vtableSet.begin(), cache().vtableSet.end()),
+                cache().vtableSet.end());
+        }
     }
 
     Log::Write(MagicStrings::LogCategoryScan,

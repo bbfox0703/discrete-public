@@ -7924,14 +7924,6 @@ void RegisterCoreHandlers() {
                     {"kindName", kindName},
                     {"index",    s.tokenIndex},
                 };
-                if (s.tokenKind == static_cast<std::uint8_t>(
-                        IL2CPP::MetadataUsageKind::TypeInfo)) {
-                    if (IL2CPP::Il2CppClass* k =
-                            IL2CPP::ResolveTypeInfoSlotClass(s)) {
-                        tokenJson["resolvedClassPtr"] =
-                            formatHex(reinterpret_cast<std::uintptr_t>(k));
-                    }
-                }
             }
 
             slotsJson.push_back({

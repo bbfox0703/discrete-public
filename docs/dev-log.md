@@ -12,6 +12,23 @@ this file grows too large.
 
 -----
 
+## 2026-11-27 (build 1583) — Fix B-L2 + B-L3 + B-L8 (rank/enum guard on array detection, dead-code & unsorted `vtableSet` cleanup, `mono_domain_get` optBind, SEH & `ResolveStaticBaseAddress` attach-guard parity)
+
+- **Bug fixes (`B-L2`, `B-L3`, `B-L8`):**
+  - **`B-L2` (`dll/src/mono/{MonoResolver.{h,cpp},MonoAddressFinder.cpp}`, `dll/src/il2cpp/{IL2CPPResolver.{h,cpp},IL2CPPAddressFinder.cpp}`):**
+    - Bound optional `mono_class_get_rank` / `il2cpp_class_get_rank` in both resolvers and added `IsMonoArrayClass` / `IsIl2CppArrayClass` helpers requiring `class_get_rank > 0` (or `!isEnum` fallback when `class_get_rank` is unbound) before trusting `element_class != k`, eliminating boxed-enum-as-array misclassification in both `ResolveInstanceLookup` and `Get*ClassExtentInfo`.
+  - **`B-L3` (`dll/src/il2cpp/{IL2CPPLazyInitSlotScanner.{h,cpp},IL2CPPFieldXref.cpp}`, `dll/src/shared/ExportAPI.cpp`, `dll/src/mono/{MonoAddressFinder.cpp,MonoResolver.cpp}`):**
+    - Removed dead `g_mapOnce` / `g_typeDefMap` / `BuildTypeDefMap()` and the redundant `ResolveTypeInfoSlotClass` fallback (which only re-read slots v3.0 had just checked) from `IL2CPPLazyInitSlotScanner`, `IL2CPPFieldXref`, and `ExportAPI::dumpLazyInitSlots`.
+    - Unified `g_minVtable = 0` initialization in `MonoAddressFinder::BuildClassRangeCache` (matching `InvalidateClassRangeCache`) and replaced the unsorted `std::binary_search` on `cache().vtableSet` inside `FindAllInstances` with O(1) deduplication via `cache().vtableToKlass.emplace(vt, kl).second` followed by a single sort.
+    - Demoted unused `mono_domain_get` from `tryBind` to `optBind` in `MonoResolver.cpp`.
+  - **`B-L8` (`dll/src/il2cpp/IL2CPPClassWalker.cpp`, `dll/src/mono/{MonoClassWalker.cpp,MonoFieldXref.cpp}`):**
+    - Added reentrant `ThreadAttachGuard` to `IL2CPP::ResolveStaticBaseAddress` (matching `MonoClassWalker::ResolveStaticBaseAddress`).
+    - Wrapped remaining bare resolver accessor calls across `IL2CPPClassWalker.cpp` (`FindNestedByName`, `ReadClassInfo`, `ResolveStaticFieldAddress`, `GetMethodPointerByName`) and `MonoClassWalker.cpp` (`DescribeClass`, `FindNestedByName`, `ReadClassInfo`, `ResolveStaticFieldAddress`, `CompileMethodByName`, `EnumerateLiteralFields`) in SEH leaf helpers, and routed `MonoFieldXref.cpp`'s `r.type_get_name` through SEH-safe `TypeName()`.
+  - Marked `B-L2`, `B-L3`, and `B-L8` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1583) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1258 passed (0 failed, 0 skipped, locked mode); Rust core dev 118 (x64) / 119 (x86) + release `+crt-static` 118 (x64) / 119 (x86) passed; C++ `discrete_dll_test` 867 passed (x64) / 867 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
 ## 2026-11-27 (build 1581) — Fix B-L1 + B-L4 + B-L5 (race-free throttled-retry resolvers & discoveries, `IsKnownNotArray` cap enforcement & heap-leaked memos, 4 KiB page-fallback chunk scanning)
 
 - **Bug fixes (`B-L1`, `B-L4`, `B-L5`):**

@@ -74,6 +74,7 @@ using fn_class_from_mono_type   = MonoClass*     (*)(MonoType*);
 
 // --- Mono array element metadata (Phase 10 follow-up) ----------------------
 using fn_class_get_element_class = MonoClass*    (*)(MonoClass*);
+using fn_class_get_rank         = int            (*)(MonoClass*);
 using fn_class_value_size       = int            (*)(MonoClass*, std::uint32_t* /*align*/);
 using fn_class_instance_size    = std::int32_t   (*)(MonoClass*);
 using fn_class_is_valuetype     = int            (*)(MonoClass*);
@@ -206,6 +207,7 @@ struct Resolver {
     fn_class_enum_basetype    class_enum_basetype    = nullptr;
     fn_class_from_mono_type   class_from_mono_type   = nullptr;
     fn_class_get_element_class class_get_element_class = nullptr;
+    fn_class_get_rank         class_get_rank         = nullptr;
     fn_class_value_size       class_value_size       = nullptr;
     fn_class_instance_size    class_instance_size    = nullptr;
     fn_class_is_valuetype     class_is_valuetype     = nullptr;

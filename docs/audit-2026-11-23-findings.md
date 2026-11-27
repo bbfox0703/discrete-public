@@ -320,12 +320,12 @@
 - 成因：Mono 端特地修掉了「`call_once` 在第一次**呼叫**就鎖定結果」的 bug（註解寫得很清楚），IL2CPP 端的 resolver 與四個 discovery 仍然是 `call_once`：如果在 runtime 還沒初始化完成時被觸發（static_fields 都還是 null、class cache 還是空的），失敗結果會保留到行程結束，`scan` RPC 也救不回來。反過來，Mono 只要缺少任何一個 required export，**每一次** `GetResolver()` 都會重跑 `DoResolve`：重寫 `g_resolver`（包含 `std::wstring moduleName`），而其他 thread 正在沒有鎖的狀態下讀它（data race），同時每次都寫「missing export」log（log 洪水）。
 - 修法：統一成「成功才鎖定，失敗時以節流的方式重試」（例如記錄上次嘗試的 tick，間隔 ≥ 1 秒才重試）；Mono 的 `DoResolve` 先在 local `Resolver` 上完成，再在鎖內整體 swap，讀取端也改成拿一份 snapshot（或 `std::shared_ptr<const Resolver>`）。
 
-**B-L2 · `ResolveInstanceLookup` 的陣列分支對「boxed enum」誤判；對真正的陣列則永遠到不了（實質 dead code）**
+**B-L2 · `ResolveInstanceLookup` 的陣列分支對「boxed enum」誤判；對真正的陣列則永遠到不了（實質 dead code） — ✅ FIXED (2026-11-27)**
 - 位置：`MonoAddressFinder.cpp:467-509`；`IL2CPPAddressFinder.cpp:828-870`
 - 成因：兩個 runtime 都把 enum 類別的 `element_class` 設為其底層整數型別的類別，所以 `elemClass != k` 對 enum 成立。boxed enum 物件（enum 被存進 `object` 欄位、`Dictionary<object, …>` 等情況）會被回報成 `"[0]"`、`array-element`，`len=` 是從錯誤的 offset 讀出來的。真正的陣列 class 不在 classSet（見 B-H2），而 `ExportAPI` 沒有直接呼叫 `ResolveInstanceLookup`（grep 確認），所以這個分支實際上只會在 enum 上觸發。
 - 修法：改成判斷 rank（Mono：`mono_class_get_rank`；IL2CPP：`il2cpp_class_get_rank`，或在 `il2cpp_class_is_enum` / `mono_class_is_enum` 為真時排除）；與 B-H2 的 classSet 擴充一起處理，讓陣列真的能走到這個分支。
 
-**B-L3 · Dead code / 只寫不讀的狀態**
+**B-L3 · Dead code / 只寫不讀的狀態 — ✅ FIXED (2026-11-27)**
 - `IL2CPPLazyInitSlotScanner.cpp:401-491`：`g_mapOnce`、`g_typeDefMap`、`BuildTypeDefMap()` 完全沒有呼叫者（grep 確認）。
 - `IL2CPPLazyInitSlotScanner.cpp:559-577` + `IL2CPPFieldXref.cpp:605-617`：v3.1 的 `ResolveTypeInfoSlotClass` 只在 slot「已經是 heap 指標」時才回傳 class，但 v3.0（`:594-603`）剛讀過同一個 slot 並且比對失敗，所以 v3.1 實際上不可能新增命中（只差兩次讀取之間的時間窗口）。
 - `MonoAddressFinder.cpp:136-146`：`ContainsKlass` / `ContainsVtable` 沒有呼叫者；`vtableSet`、`g_minVtable/g_maxVtable` 只用於 `GetClassRangeStats`。`:1091-1096` 在迴圈中對**未排序**的 `vtableSet` 做 `binary_search`（結果靠最後的 sort + unique 修正）；`g_minVtable` 在 Build 時是 -1、在 Invalidate 時是 0，兩處更新規則（`:750` 與 `:1095`）不一致。
@@ -352,7 +352,7 @@
 - 成因：(1) 宣告類別是 **struct** 時，`this` 是 unboxed 指標，AOT 碼的 disp 是 `offset - kObjectHeader`，scanner 卻用含 header 的 offset，所以會全部漏掉，同時產生 false positive。(2) 透過 `FindClass` 的 `.` → nested fallback（ns = `Ns.Outer`、name = `Inner`）解析出來的巢狀類別，method index 裡記錄的是 `ns = "Ns"`、`className = "Outer/Inner"`，`m.ns != ns` 會讓宣告類別的方法數變成 0，靜默回傳 0 筆。
 - 修法：值型別時 disp 減去 header；比對改用 `ce.klass == target.klass`（在 `MethodIndexEntry` 中記錄 `Il2CppClass*`），不要比字串。
 
-**B-L8 · 兩個 backend 的實作細節漂移**
+**B-L8 · 兩個 backend 的實作細節漂移 — ✅ FIXED (2026-11-27)**
 - `IL2CPPMethodInvoker.cpp:218`、`:222`、`:298`：仍然寫死 `0x10` / `0x14` / `0x18`；Mono 端已改用 `ManagedLayout`（`MonoMethodInvoker.cpp:227`、`:231`、`:307`）。
 - `IL2CPPClassWalker.cpp:449`（`method_get_flags` 直接呼叫）、`:91`、`:486`、`:550`、`:556`；`MonoClassWalker.cpp:316-319`、`:378-383`；`MonoFieldXref.cpp:205-224`、`:371-380`；`IL2CPPFieldXref.cpp:220-233`：同一份檔案裡有的 accessor 包了 SEH、有的沒有，與 `IL2CPPClassWalker.cpp:24-30` 的政策註解不符。
 - `IL2CPP::ResolveStaticBaseAddress`（`IL2CPPClassWalker.cpp:522-527`）沒有 attach guard，Mono 版（`MonoClassWalker.cpp:478-483`）有；`ReadClassInfo` 只有 Mono 有 `forceSetup`。

@@ -73,7 +73,9 @@ void DoResolve(Resolver& out) {
     };
 
     tryBind("mono_get_root_domain",        out.get_root_domain);
-    tryBind("mono_domain_get",             out.domain_get);
+    // B-L3: mono_domain_get is unused by the Mono backend (root domain is used
+    // everywhere); demote to optBind so missing it never disables the backend.
+    optBind("mono_domain_get",             out.domain_get);
     tryBind("mono_thread_attach",          out.thread_attach);
     tryBind("mono_thread_detach",          out.thread_detach);
     tryBind("mono_assembly_foreach",       out.assembly_foreach);
@@ -127,8 +129,9 @@ void DoResolve(Resolver& out) {
     optBind("mono_class_is_enum",               out.class_is_enum);
     optBind("mono_class_enum_basetype",         out.class_enum_basetype);
     optBind("mono_class_from_mono_type",        out.class_from_mono_type);
-    // Phase 10 follow-up: array element-class metadata for walkArray.
+    // Phase 10 follow-up: array element-class metadata for walkArray + B-L2 rank check.
     optBind("mono_class_get_element_class",     out.class_get_element_class);
+    optBind("mono_class_get_rank",              out.class_get_rank);
     optBind("mono_class_value_size",            out.class_value_size);
     optBind("mono_class_instance_size",         out.class_instance_size);
     optBind("mono_class_is_valuetype",          out.class_is_valuetype);

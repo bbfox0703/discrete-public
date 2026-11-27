@@ -23,6 +23,7 @@
 #include "MonoDomain.h"
 #include "MonoResolver.h"
 #include "MonoThreadAttach.h"
+#include "MonoTypeParser.h"
 #include "../shared/FieldXrefHelpers.h"
 #include "../shared/Logger.h"
 #include "../shared/MagicStrings.h"
@@ -311,12 +312,9 @@ ResolvedField ResolveTargetField(MonoImage* image,
             if (r.field_get_offset != nullptr) {
                 out.offset = SehFieldOffset(r.field_get_offset, f);
             }
-            if (r.field_get_type != nullptr && r.type_get_name != nullptr) {
+            if (r.field_get_type != nullptr) {
                 if (MonoType* ft = SehFieldType(r.field_get_type, f)) {
-                    if (char* tn = r.type_get_name(ft)) {
-                        out.typeName = tn;
-                        if (r.free != nullptr) r.free(tn);
-                    }
+                    out.typeName = TypeName(ft);
                 }
             }
             break;

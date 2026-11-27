@@ -99,8 +99,9 @@ void DoResolve(Resolver& out) {
     bindOpt("il2cpp_class_get_declaring_type",  out.class_get_declaring);
     bindOpt("il2cpp_class_get_nested_types",    out.class_get_nested_types);
     bindOpt("il2cpp_class_get_static_field_data", out.class_get_static_data);
-    // Phase 10 follow-up: array element-class metadata for walkArray.
+    // Phase 10 follow-up: array element-class metadata for walkArray + B-L2 rank check.
     bindOpt("il2cpp_class_get_element_class",   out.class_get_element_class);
+    bindOpt("il2cpp_class_get_rank",            out.class_get_rank);
     bindOpt("il2cpp_class_value_size",          out.class_value_size);
     bindOpt("il2cpp_class_instance_size",       out.class_instance_size);
     bindOpt("il2cpp_object_get_size",           out.object_get_size);

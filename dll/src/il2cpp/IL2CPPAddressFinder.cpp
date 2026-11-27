@@ -147,13 +147,50 @@ std::uint32_t SehObjectGetSizeProbe(fn_object_get_size fn, Il2CppObject* o) {
     __try { return fn(o); }
     __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
 }
-// Phase 27c — array element class lookup. Non-null result means klass is
-// an array type.
+// Phase 27c — array element class lookup + B-L2 rank/enum checks.
 Il2CppClass* SehElementClassProbe(fn_class_get_element_class fn, Il2CppClass* k) {
     __try { return fn(k); }
     __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
+int SehClassRankProbe(fn_class_get_rank fn, const Il2CppClass* k) {
+    __try { return fn(k); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
+}
+bool SehIsEnumProbe(fn_class_is_enum fn, const Il2CppClass* k) {
+    __try { return fn(k); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return false; }
+}
 #pragma warning(pop)
+
+// B-L2: Distinguish genuine managed arrays from enums (IL2CPP sets an enum's
+// element_class to its underlying integer type, so element_class != k alone
+// misclassifies boxed enums as arrays). Caller holds a ThreadAttachGuard.
+bool IsIl2CppArrayClass(Il2CppClass* k, Il2CppClass*& outElemClass) {
+    outElemClass = nullptr;
+    if (k == nullptr) return false;
+    const auto& r = GetResolver();
+    if (r.class_get_element_class == nullptr) return false;
+    if (r.class_get_rank != nullptr) {
+        if (SehClassRankProbe(r.class_get_rank, k) <= 0) return false;
+    } else if (r.class_is_enum != nullptr) {
+        if (SehIsEnumProbe(r.class_is_enum, k)) return false;
+    } else if (r.class_get_parent != nullptr && r.class_get_name != nullptr) {
+        if (Il2CppClass* parent = SehParentLookup(r.class_get_parent, k)) {
+            const char* pn  = SehClassNameProbe(r.class_get_name, parent);
+            const char* pns = (r.class_get_namespace != nullptr)
+                ? SehClassNamespaceProbe(r.class_get_namespace, parent) : nullptr;
+            if (pn != nullptr && std::strcmp(pn, "Enum") == 0 &&
+                (r.class_get_namespace == nullptr ||
+                 (pns != nullptr && std::strcmp(pns, "System") == 0))) {
+                return false;
+            }
+        }
+    }
+    Il2CppClass* elem = SehElementClassProbe(r.class_get_element_class, k);
+    if (elem == nullptr || elem == k) return false;
+    outElemClass = elem;
+    return true;
+}
 
 // B-H2: calibrate Il2CppClass::{image, element_class, name} offsets from known
 // TypeDef classes so dynamic generic/array klasses can be validated purely via
@@ -286,17 +323,15 @@ ClassExtentInfo GetIl2CppClassExtentInfo(Il2CppClass* k) {
 
     ClassExtentInfo info;
     const auto& r = GetResolver();
-    if (r.class_get_element_class != nullptr) {
-        Il2CppClass* elem = SehElementClassProbe(r.class_get_element_class, k);
-        if (elem != nullptr && elem != k) {
-            info.isArray = true;
-            info.arrayElemSize = ManagedLayout::kPointerSize;
-            if (r.class_is_valuetype != nullptr &&
-                SehIsValueTypeProbe(r.class_is_valuetype, elem) != 0 &&
-                r.class_value_size != nullptr) {
-                int sz = SehValueSizeProbe(r.class_value_size, elem);
-                if (sz > 0) info.arrayElemSize = static_cast<std::size_t>(sz);
-            }
+    Il2CppClass* elem = nullptr;
+    if (IsIl2CppArrayClass(k, elem)) {
+        info.isArray = true;
+        info.arrayElemSize = ManagedLayout::kPointerSize;
+        if (r.class_is_valuetype != nullptr &&
+            SehIsValueTypeProbe(r.class_is_valuetype, elem) != 0 &&
+            r.class_value_size != nullptr) {
+            int sz = SehValueSizeProbe(r.class_value_size, elem);
+            if (sz > 0) info.arrayElemSize = static_cast<std::size_t>(sz);
         }
     }
     if (!info.isArray) {
@@ -1148,9 +1183,9 @@ void ResolveInstanceLookup(std::uintptr_t addr, std::uintptr_t instance,
     // misclassifies every plain object as an array. Only treat it as an array
     // when the element class is genuinely a DIFFERENT class.
     bool resolvedAsArray = false;
-    if (r.class_get_element_class != nullptr) {
-        Il2CppClass* elemClass = SehElementClassProbe(r.class_get_element_class, k);
-        if (elemClass != nullptr && elemClass != k) {
+    Il2CppClass* elemClass = nullptr;
+    if (IsIl2CppArrayClass(k, elemClass)) {
+        {
             std::ptrdiff_t dataOff = static_cast<std::ptrdiff_t>(ManagedLayout::kArrayDataOffset);
             if (out.fieldOffset >= dataOff) {
                 std::uintptr_t arrayLength = 0;

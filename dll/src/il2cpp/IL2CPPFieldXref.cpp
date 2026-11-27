@@ -655,7 +655,6 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                 // Both paths union into the chain detector's input set.
                 std::size_t v3CandidateSlots   = 0;
                 std::size_t v3MatchingRuntime  = 0;  // v3.0 hits
-                std::size_t v3MatchingStatic   = 0;  // v3.1 hits
                 {
                     const std::uintptr_t targetClassVal =
                         reinterpret_cast<std::uintptr_t>(target.klass);
@@ -680,36 +679,17 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                         }
                         if (slotAlreadyKnown(ls.slotAddress)) continue;
 
-                        bool matched     = false;
-                        bool matchedHow  = false;  // false=runtime, true=static
-                        (void)matchedHow;
-
-                        // v3.0 — runtime value match
+                        // v3.0 — runtime value match (B-L3: removed dead v3.1
+                        // ResolveTypeInfoSlotClass fallback which only re-read
+                        // the same slot after v3.0 had already checked it).
                         std::uintptr_t slotValue = 0;
-                        if (Memory::SafeReadBytes(
+                        if (!Memory::SafeReadBytes(
                                 reinterpret_cast<const void*>(ls.slotAddress),
-                                &slotValue, sizeof(slotValue))) {
-                            if (slotValue == targetClassVal) {
-                                matched = true;
-                                ++v3MatchingRuntime;
-                            }
+                                &slotValue, sizeof(slotValue)) ||
+                            slotValue != targetClassVal) {
+                            continue;
                         }
-
-                        // v3.1 — static token decode (only if v3.0 didn't match)
-                        if (!matched && ls.tokenKind ==
-                                static_cast<std::uint8_t>(MetadataUsageKind::TypeInfo)) {
-                            if (Il2CppClass* staticClass =
-                                    ResolveTypeInfoSlotClass(ls)) {
-                                if (reinterpret_cast<std::uintptr_t>(staticClass)
-                                        == targetClassVal) {
-                                    matched = true;
-                                    matchedHow = true;
-                                    ++v3MatchingStatic;
-                                }
-                            }
-                        }
-
-                        if (!matched) continue;
+                        ++v3MatchingRuntime;
 
                         ClassPointerSlot extra{};
                         extra.address   = ls.slotAddress;
@@ -717,8 +697,7 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                         slots.push_back(extra);
                     }
                 }
-                const std::size_t v3MatchingSlots =
-                    v3MatchingRuntime + v3MatchingStatic;
+                const std::size_t v3MatchingSlots = v3MatchingRuntime;
 
                 Log::Write(MagicStrings::LogCategoryWalk,
                     "FieldXref: v2 starting — staticFieldsOffset=" +
@@ -727,7 +706,6 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                     " v2DirectSlots=" + std::to_string(v2SlotCount) +
                     " v3LazyInitCandidates=" + std::to_string(v3CandidateSlots) +
                     " v3MatchingRuntime=" + std::to_string(v3MatchingRuntime) +
-                    " v3MatchingStatic=" + std::to_string(v3MatchingStatic) +
                     " totalSlots=" + std::to_string(slots.size()));
 
                 if (!slots.empty()) {
