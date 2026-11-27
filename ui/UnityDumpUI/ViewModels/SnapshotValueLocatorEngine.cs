@@ -385,6 +385,7 @@ public static class SnapshotValueLocatorEngine
         if (el.Value is { } es && es.ValueKind == JsonValueKind.String)
         { string sv = es.GetString() ?? "(null)"; return (sv, sv, null); }
         if (!string.IsNullOrEmpty(el.String)) return ($"\"{el.String}\"", el.String, null);
+        if (!string.IsNullOrEmpty(el.Hex))    return ($"hex={el.Hex}", el.Hex, null);
         if (!string.IsNullOrEmpty(el.Ptr))    return ($"ptr={el.Ptr}", el.Ptr, null);
         return ("(no value)", "(no value)", null);
     }

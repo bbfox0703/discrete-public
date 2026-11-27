@@ -23,6 +23,7 @@ add_executable(discrete_dll_test
     ${CMAKE_SOURCE_DIR}/dll/src/shared/Logger.cpp
     ${CMAKE_SOURCE_DIR}/dll/src/shared/MainThreadDispatcher.cpp
     ${CMAKE_SOURCE_DIR}/dll/src/shared/Memory.cpp
+    ${CMAKE_SOURCE_DIR}/dll/src/shared/SnapshotSession.cpp
 )
 
 add_dependencies(discrete_dll_test discrete_pin_probe)

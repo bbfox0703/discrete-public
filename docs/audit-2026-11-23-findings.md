@@ -480,12 +480,12 @@
 - 成因：`SendAsync` 為了避免 response 錯位，刻意在寫入後不再理會取消，這個設計本身合理；但這也代表一個卡住的 handler 會讓 `_gate` 永遠被佔住。使用者按 Disconnect 會等 `_gate`，結果什麼都不會發生；如果 app 關閉時同步等待 `DisposeAsync`，整個 UI 會停在那裡。interactive pipe 上的 `callMethod`（mainThread）、`whatIsAt`、`getMetadataStats` 都走這條路。
 - 修法：`DisconnectAsync` / `DisposeAsync` 不要等 `_gate`，改成直接 `_pipe.Dispose()`（讓進行中的 `ReadLineAsync` 丟 `ObjectDisposedException` / `IOException`，現有的 catch 會轉成 `PipeDisconnectedException`），再取 gate 清掉欄位；`SendAsync` 加上可設定的「每個指令的讀取逾時」，逾時就拆掉連線，而不是放棄讀取（重新連線可以避免 response 錯位）。DLL 端 `callMethod` 要 clamp `main_thread_timeout_ms`，例如限制在 [1, 60000]。更新 `:3-6` 的註解。
 
-**C-M4 · Snapshot 的 `walkArrayElementsInline` 對 struct / enum 陣列用 pointer stride 讀取，把資料標成 `ptr`，還可能把 struct 的位元組交給 Layer-B capturer**
+**C-M4 · Snapshot 的 `walkArrayElementsInline` 對 struct / enum 陣列用 pointer stride 讀取，把資料標成 `ptr`，還可能把 struct 的位元組交給 Layer-B capturer — ✅ FIXED (2026-11-27)**
 - 位置：`dll/src/shared/ExportAPI.cpp:2701-2718`、`:2725`、`:2735-2750`（與 `:2654-2659` 的註解不符：註解說會依 width hint 輸出 hex blob，實作完全沒有 width hint 參數）
 - 成因：`knownElemSize` 只認得 primitive，其他一律 `isPointer = true`、stride 為 `sizeof(uintptr_t)`。`Vector3[]`（12 bytes）、自訂 struct 陣列、`MyEnum[]`（int32）都會依錯誤的 stride 讀取：enum 陣列在 x64 上每次跨 8 bytes，`n` 個元素會讀到陣列尾端之後最多 `4n` bytes（SEH 擋得住，但資料是垃圾）；struct 陣列的每個元素都顯示成無意義的 `ptr`。開啟 `arrayElementFields`（x64 預設是 blanket）時，這些「ptr」還會被送進 `CaptureElementFields` → `ClassOfObject`，雖然有 `knownIlKlasses_` / `klassToDescIdx` 擋著，但這只是靠運氣。`walkArray`（`:2933-3019`）有 element-class 解析，這條 snapshot 路徑卻沒有，又是一個雙胞胎漂移。
 - 修法：呼叫端（`DecodeOneClass` / Mono `decodeOneClass`）已經有 `FieldEntry`，可以用 `class_get_element_class` 取得 element class，再用 `class_is_valuetype` + `class_value_size` 算出正確的 stride 和 `isPointer`（enum 用底層型別解碼），以參數傳入 `walkArrayElementsInline`；無法判斷時輸出 `arrayError: "unknown_element_layout"`，不要猜。
 
-**C-M5 · IL2CPP streaming snapshot：instance 位址在 Begin 擷取、在 Chunk 才解碼，中間沒有重新驗證；decoder 不是 idempotent，而且在全域 mutex 內執行 GC 和 `Sleep(500)`**
+**C-M5 · IL2CPP streaming snapshot：instance 位址在 Begin 擷取、在 Chunk 才解碼，中間沒有重新驗證；decoder 不是 idempotent，而且在全域 mutex 內執行 GC 和 `Sleep(500)` — ✅ FIXED (2026-11-27)**
 - 位置：`dll/src/shared/ExportAPI.cpp:1121-1194`（`DecodeOneClass` 直接讀 `instAddr + offset`）、`:813-875`（`DecodeRange`；`:863-872` 的 `gc_collect(0)` + `::Sleep(500)`）、`:8367-8392`（整段在 `SessionManager::View` 內，也就是持有全域 `mu_`）；`dll/src/shared/SnapshotSession.h:181-189`
 - 成因：
   1. Phase 30b 把 decode 延後到 chunk，大型遊戲從 Begin 到最後一個 chunk 可能相隔數分鐘，物件可能已被 GC 回收，記憶體再配給其他類別的物件。目前不檢查 header 就直接用原本類別的欄位 layout 解碼，結果是靜默的錯誤值，snapshot diff 會把它當成「欄位變化」。Mono 在 Begin 內立即解碼，沒有這個時間差（又一個雙胞胎差異）。

@@ -35,6 +35,14 @@ struct FieldEntry {
     // of re-resolving by name. nullptr otherwise. Never owned. See the Mono
     // walker for the full rationale.
     Il2CppClass*  valueTypeClass     = nullptr;
+    // C-M4 — for 1D array fields (`T[]`), element layout resolved once via
+    // il2cpp_class_get_element_class + il2cpp_class_is_valuetype +
+    // il2cpp_class_value_size (+ enum underlying type) during ReadClassInfo.
+    bool          arrayElemLayoutKnown = false;
+    bool          arrayElemIsValueType = false;
+    bool          arrayElemIsEnum      = false;
+    std::size_t   arrayElemSize        = 0;
+    std::string   arrayElemUnderlyingTypeName;
 };
 
 struct MethodEntry {

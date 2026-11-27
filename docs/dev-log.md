@@ -12,6 +12,25 @@ this file grows too large.
 
 -----
 
+## 2026-11-27 (build 1566) — Fix C-M4 + C-M5 (snapshot array struct/enum element layout resolution, IL2CPP streaming instance header revalidation, idempotent cursor replay & lock-free SessionManager decode + tests)
+
+- **Bug fixes (`C-M4`, `C-M5` — completes 100% of Block C High & Medium findings, 3/3 High + 8/8 Medium):**
+  - **`C-M4` (`dll/src/shared/ExportHelpers.h`, `MonoClassWalker.{h,cpp}`, `IL2CPPClassWalker.{h,cpp}`, `ExportAPI.cpp`, `ProtocolModels.cs`, `SnapshotViewModel.cs`, `SnapshotValueLocatorEngine.cs`):**
+    - Populated per-field 1D array element layout metadata (`arrayElemLayoutKnown`, `arrayElemIsValueType`, `arrayElemIsEnum`, `arrayElemSize`, `arrayElemUnderlyingTypeName`) once during `ReadClassInfo` on both Mono and IL2CPP via `class_get_element_class` (guarded `ec != fc`) + `class_is_valuetype` + `class_value_size` + enum underlying type detection.
+    - Added `ResolveSnapshotArrayElementPlan` in `ExportHelpers.h` and wired it into `walkArrayElementsInline`: primitives and enums decode at their exact underlying width (`decodeType = underlyingTypeName`), named Unity math structs (`Vector3[]`, `Color[]`, etc.) fan out via `decodeField` at exact struct stride, custom value-type structs emit raw `hex` blobs at `class_value_size` stride (never `ptr` and never handed to Layer-B `elementFieldCapturer`), reference classes use pointer stride + optional Layer-B capture, and unresolved layouts return `arrayError: "unknown_element_layout"` instead of guessing pointer stride.
+    - Added lazy `SnapshotArrayElement.Hex` (`ElementExtras`) in `ProtocolModels.cs` and rendered `hex=…` in `SnapshotViewModel.FormatArrayElement` / `SnapshotValueLocatorEngine.RenderElement`.
+  - **`C-M5` (`dll/src/shared/SnapshotSession.h`, `dll/src/shared/ExportHelpers.h`, `dll/src/shared/ExportAPI.cpp`, `ProtocolModels.cs`):**
+    - Revalidated every IL2CPP streaming instance's live object header word (`SafeReadBytesSeq(instAddr) == expectedKlass`) before decoding fields in `Il2cppStreamDecoder::DecodeOneClass`, skipping GC-freed/repurposed slots and tracking `staleInstances` in `decodeStats` (surfaced on `SnapshotDecodeStats.StaleInstances`).
+    - Made `Il2cppStreamDecoder::DecodeRange` idempotent via `highWaterCursor_` (`ShouldChargeStreamingPlanRow`): replayed cursor ranges still decode payloads without double-counting stats or prematurely exhausting instance/element budgets.
+    - Changed `Session::streamDecoder` from `std::unique_ptr` to `std::shared_ptr` so IL2CPP `CmdSnapshotChunk` releases `SessionManager::mu_` immediately after grabbing the `shared_ptr` — running `DecodeRange`, `gc_collect(0)`, and `Sleep(500)` outside the global lock (serialized per-session by `Il2cppStreamDecoder::decodeMu_`, released prior to GC drain and sleep) so concurrent `snapshotBegin` / `snapshotEnd` / disconnect `DropAll()` are never stalled and mid-chunk teardown never causes UAF. Also rejected `domain == nullptr` directly in IL2CPP `CmdSnapshotBegin`.
+  - **Tests:**
+    - Linked `SnapshotSession.cpp` into `discrete_dll_test` and added `Test_CM4_CM5_SnapshotArrayLayoutAndStreamingSafety` (+40 checks on x64 and x86) verifying `ResolveSnapshotArrayElementPlan` across all element kinds, `IsLiveIl2CppInstanceHeader`, `ShouldChargeStreamingPlanRow` replay idempotency, and concurrent `SessionManager::End` while a mock streaming decoder blocks outside `View`.
+    - Added `SnapshotChunk_CustomStructArrayHex_UnknownLayoutError_AndStaleInstances_RoundTrip` to `ui/UnityDumpUI.Tests/ValueScanWireAndDtoContractTests.cs`.
+  - Marked `C-M4` and `C-M5` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `.\build.cmd publish` (build #1566) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1224 passed (0 failed, 0 skipped); Rust core tests 110 passed (x64) / 111 passed (i686); C++ `discrete_dll_test` 778 checks passed (x64) / 778 checks passed (x86).
+
+-----
+
 ## 2026-11-27 (build 1565) — Fix C-M6 + C-M7 + C-M8 (`searchSymbols` single-assembly `truncated`, handler-level `result.error` & `SnapshotClassEntry.truncated` DTOs, lossless 64-bit value/group scans + tests)
 
 - **Bug fixes (`C-M6`, `C-M7`, `C-M8`):**

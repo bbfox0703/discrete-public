@@ -163,7 +163,13 @@ struct Session {
     // pre-built `classes`; `classes`/`plan` stay empty (the decoder owns the
     // heap-walk data) to avoid duplicating the instance-address vectors. null
     // ⇒ decode-in-Begin path (Mono / legacy).
-    std::unique_ptr<ISnapshotStreamDecoder> streamDecoder;
+    //
+    // C-M5(3): held via shared_ptr so CmdSnapshotChunk can grab a local ref
+    // inside SessionManager::View and immediately release the global mutex
+    // before running DecodeRange / gc_collect / Sleep — preventing a slow
+    // chunk from blocking concurrent snapshotEnd / DropAll / snapshotBegin
+    // while keeping the decoder alive against concurrent session teardown.
+    std::shared_ptr<ISnapshotStreamDecoder> streamDecoder;
 
     std::chrono::steady_clock::time_point  lastUse;
 };

@@ -449,4 +449,172 @@ inline bool ParseStrictJsonDouble(const nlohmann::json& v, double& out) noexcept
     return false;
 }
 
+// C-M4: Exact snapshot array-element layout resolution.
+// Eliminates guessing pointer stride for struct/enum arrays and guarantees
+// Layer-B reference capturers are NEVER invoked on value-type slot bytes.
+inline constexpr std::size_t kMaxSnapshotArrayElemSize = 4096;
+
+inline std::size_t KnownPrimitiveElementSize(
+    std::string_view typeName,
+    std::size_t pointerSize = ManagedLayout::kPointerSize) noexcept {
+    if (typeName == "System.Boolean" || typeName == "System.Byte" || typeName == "System.SByte") return 1;
+    if (typeName == "System.Int16"   || typeName == "System.UInt16" || typeName == "System.Char") return 2;
+    if (typeName == "System.Int32"   || typeName == "System.UInt32" || typeName == "System.Single") return 4;
+    if (typeName == "System.Int64"   || typeName == "System.UInt64" || typeName == "System.Double") return 8;
+    if (typeName == "System.IntPtr"  || typeName == "System.UIntPtr") return pointerSize;
+    return 0;
+}
+
+inline std::size_t KnownNamedMathStructSize(std::string_view typeName) noexcept {
+    if (typeName == "UnityEngine.Color32")    return 4;
+    if (typeName == "UnityEngine.Vector2"    || typeName == "UnityEngine.Vector2Int") return 8;
+    if (typeName == "UnityEngine.Vector3"    || typeName == "UnityEngine.Vector3Int") return 12;
+    if (typeName == "UnityEngine.Vector4"    || typeName == "UnityEngine.Quaternion" ||
+        typeName == "UnityEngine.Color"      || typeName == "UnityEngine.Rect") return 16;
+    return 0;
+}
+
+struct SnapshotArrayElemHint {
+    bool        layoutKnown = false;
+    bool        isValueType = false;
+    bool        isEnum      = false;
+    std::size_t valueSize   = 0;        // unboxed byte size for value types; 0 if unknown
+    std::string underlyingTypeName;     // enum underlying CLR type (e.g. "System.Int32")
+};
+
+enum class SnapshotArrayElemDecodeKind {
+    Unknown,         // cannot safely determine stride → emit arrayError: "unknown_element_layout"
+    Primitive,       // scalar primitive / enum (decodeField(decodeType, slotAddr))
+    NamedMathStruct, // known Unity math struct (decodeField → {"fields":[...]})
+    RawValueStruct,  // custom value-type struct with known stride (emit {"hex": ...}, never ptr)
+    StringRef,       // System.String reference element
+    ObjectRef,       // managed reference element (ptr + optional Layer-B capturer)
+};
+
+struct SnapshotArrayElemPlan {
+    SnapshotArrayElemDecodeKind kind      = SnapshotArrayElemDecodeKind::Unknown;
+    std::size_t                 elemSize  = 0;
+    bool                        isPointer = false;
+    std::string                 elementType;  // bare element type (trailing "[]" stripped once)
+    std::string                 decodeType;   // CLR type passed to decodeField (underlying type for enums)
+};
+
+inline SnapshotArrayElemPlan ResolveSnapshotArrayElementPlan(
+    std::string_view elementTypeRaw,
+    const SnapshotArrayElemHint& hint,
+    std::size_t pointerSize = ManagedLayout::kPointerSize) {
+    SnapshotArrayElemPlan plan;
+    std::string elemType(elementTypeRaw);
+    if (elemType.size() >= 2 &&
+        elemType[elemType.size() - 1] == ']' &&
+        elemType[elemType.size() - 2] == '[') {
+        elemType.resize(elemType.size() - 2);
+    }
+    plan.elementType = elemType;
+
+    // 1. Built-in CLR primitives (exact known width).
+    if (const std::size_t primSize = KnownPrimitiveElementSize(elemType, pointerSize); primSize > 0) {
+        plan.kind       = SnapshotArrayElemDecodeKind::Primitive;
+        plan.elemSize   = primSize;
+        plan.isPointer  = false;
+        plan.decodeType = elemType;
+        return plan;
+    }
+
+    // 2. System.String — always a reference element with UTF-16 string decode.
+    if (elemType == "System.String") {
+        plan.kind       = SnapshotArrayElemDecodeKind::StringRef;
+        plan.elemSize   = pointerSize;
+        plan.isPointer  = true;
+        plan.decodeType = elemType;
+        return plan;
+    }
+
+    // 3. System.Object or jagged arrays (T[][] → element type T[]) — always reference elements.
+    if (elemType == "System.Object" ||
+        (elemType.size() >= 2 && elemType.back() == ']')) {
+        plan.kind       = SnapshotArrayElemDecodeKind::ObjectRef;
+        plan.elemSize   = pointerSize;
+        plan.isPointer  = true;
+        plan.decodeType = elemType;
+        return plan;
+    }
+
+    // 4. Known inline Unity math structs (decodeField fans out x/y/z/w/r/g/b/a).
+    if (const std::size_t mathSize = KnownNamedMathStructSize(elemType); mathSize > 0) {
+        std::size_t stride = mathSize;
+        if (hint.layoutKnown && hint.isValueType &&
+            hint.valueSize > 0 && hint.valueSize <= kMaxSnapshotArrayElemSize) {
+            stride = hint.valueSize;
+        }
+        plan.kind       = SnapshotArrayElemDecodeKind::NamedMathStruct;
+        plan.elemSize   = stride;
+        plan.isPointer  = false;
+        plan.decodeType = elemType;
+        return plan;
+    }
+
+    // 5. Runtime element-class hint from class_get_element_class + class_is_valuetype.
+    //    If unavailable, NEVER guess pointer stride — report Unknown so the caller
+    //    emits arrayError: "unknown_element_layout".
+    if (!hint.layoutKnown) {
+        return plan;  // Unknown
+    }
+
+    if (!hint.isValueType) {
+        plan.kind       = SnapshotArrayElemDecodeKind::ObjectRef;
+        plan.elemSize   = pointerSize;
+        plan.isPointer  = true;
+        plan.decodeType = elemType;
+        return plan;
+    }
+
+    // Value type (enum or custom struct).
+    if (hint.isEnum) {
+        const std::size_t uSize = KnownPrimitiveElementSize(hint.underlyingTypeName, pointerSize);
+        if (uSize > 0) {
+            plan.kind       = SnapshotArrayElemDecodeKind::Primitive;
+            plan.elemSize   = uSize;
+            plan.isPointer  = false;
+            plan.decodeType = hint.underlyingTypeName;
+            return plan;
+        }
+        // Enum whose underlying type string couldn't be resolved, but runtime size is valid.
+        if (hint.valueSize > 0 && hint.valueSize <= kMaxSnapshotArrayElemSize) {
+            plan.kind      = SnapshotArrayElemDecodeKind::RawValueStruct;
+            plan.elemSize  = hint.valueSize;
+            plan.isPointer = false;
+            return plan;
+        }
+        return plan;  // Unknown
+    }
+
+    if (hint.valueSize > 0 && hint.valueSize <= kMaxSnapshotArrayElemSize) {
+        plan.kind      = SnapshotArrayElemDecodeKind::RawValueStruct;
+        plan.elemSize  = hint.valueSize;
+        plan.isPointer = false;
+        return plan;
+    }
+
+    return plan;  // Unknown
+}
+
+// C-M5(1): Revalidate an IL2CPP managed object header word against the expected
+// Il2CppClass* before decoding fields on a deferred streaming chunk.
+inline bool IsLiveIl2CppInstanceHeader(std::uintptr_t liveHeaderWord,
+                                       std::uintptr_t expectedKlass) noexcept {
+    return expectedKlass != 0 && liveHeaderWord == expectedKlass;
+}
+
+// C-M5(2): Idempotent cursor helper for streaming snapshot decode. Returns true
+// when plan index `idx` is newly visited (stats/budgets should be charged and
+// `highWaterCursor` advances to `idx + 1`), false when `idx` was already decoded
+// in an earlier call (replay: decode payload without double-counting stats).
+inline bool ShouldChargeStreamingPlanRow(std::size_t idx,
+                                         std::size_t& highWaterCursor) noexcept {
+    if (idx < highWaterCursor) return false;
+    highWaterCursor = idx + 1;
+    return true;
+}
+
 }  // namespace Discrete::ExportHelpers

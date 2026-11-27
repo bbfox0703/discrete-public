@@ -3086,6 +3086,7 @@ public sealed partial class SnapshotEnvelope : ObservableObject
             };
         }
         if (!string.IsNullOrEmpty(el.String)) return $"\"{el.String}\"";
+        if (!string.IsNullOrEmpty(el.Hex))    return $"hex={el.Hex}";
         if (!string.IsNullOrEmpty(el.Ptr))    return $"ptr={el.Ptr}";
         return "(no value)";
     }

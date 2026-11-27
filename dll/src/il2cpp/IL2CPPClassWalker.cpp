@@ -146,6 +146,10 @@ Il2CppClass* SehClassFromIl2CppType(fn_class_from_il2cpp_type fn, const Il2CppTy
 int SehClassIsValueType(fn_class_is_valuetype fn, Il2CppClass* k) {
     __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
 }
+int SehClassValueSize(fn_class_value_size fn, Il2CppClass* k) {
+    __try { std::uint32_t align = 0; return fn(k, &align); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
+}
 std::uint32_t SehParamCount(fn_method_get_param_count fn, const MethodInfo* m) {
     __try { return fn(m); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
 }
@@ -409,42 +413,72 @@ ClassInfoResult ReadClassInfo(Il2CppClass* klass) {
                     if (r.class_is_valuetype != nullptr) {
                         fe.isValueType = SehClassIsValueType(r.class_is_valuetype, fc) != 0;
                     }
-                    if (r.class_get_parent != nullptr && r.class_get_name != nullptr) {
-                        Il2CppClass* parent = SehParent(r.class_get_parent, fc);
-                        if (parent != nullptr) {
-                            const char* pn = SehClassName(r.class_get_name, parent);
-                            const char* pns = (r.class_get_namespace != nullptr)
-                                ? SehCall(r.class_get_namespace, parent) : nullptr;
-                            // B-L6: require System.Enum (not a user-defined Enum in another namespace).
-                            if (pn != nullptr && std::strcmp(pn, "Enum") == 0 &&
-                                (r.class_get_namespace == nullptr ||
-                                 (pns != nullptr && std::strcmp(pns, "System") == 0))) {
-                                fe.isEnum = true;
-                                // Underlying type lives in the enum's `value__`
-                                // instance field — same trick getEnumValues uses.
-                                if (r.class_get_fields != nullptr) {
-                                    void* fit = nullptr;
-                                    for (;;) {
-                                        FieldInfo* uf = SehNextField(r.class_get_fields, fc, &fit);
-                                        if (uf == nullptr) break;
-                                        const char* un = (r.field_get_name != nullptr)
-                                            ? SehCall(r.field_get_name, uf) : nullptr;
-                                        if (un != nullptr && std::strcmp(un, "value__") == 0) {
-                                            const Il2CppType* ut = (r.field_get_type != nullptr)
-                                                ? SehCall(r.field_get_type, uf) : nullptr;
-                                            if (ut != nullptr) fe.underlyingTypeName = TypeName(ut);
-                                            break;
-                                        }
-                                    }
+                    auto detectEnum = [&](Il2CppClass* target, bool& outIsEnum, std::string& outUnderlying) {
+                        if (r.class_get_parent == nullptr || r.class_get_name == nullptr) return;
+                        Il2CppClass* parent = SehParent(r.class_get_parent, target);
+                        if (parent == nullptr) return;
+                        const char* pn = SehClassName(r.class_get_name, parent);
+                        const char* pns = (r.class_get_namespace != nullptr)
+                            ? SehCall(r.class_get_namespace, parent) : nullptr;
+                        // B-L6: require System.Enum (not a user-defined Enum in another namespace).
+                        if (pn == nullptr || std::strcmp(pn, "Enum") != 0) return;
+                        if (r.class_get_namespace != nullptr &&
+                            (pns == nullptr || std::strcmp(pns, "System") != 0)) return;
+                        outIsEnum = true;
+                        // Underlying type lives in the enum's `value__`
+                        // instance field — same trick getEnumValues uses.
+                        if (r.class_get_fields != nullptr) {
+                            void* fit = nullptr;
+                            for (;;) {
+                                FieldInfo* uf = SehNextField(r.class_get_fields, target, &fit);
+                                if (uf == nullptr) break;
+                                const char* un = (r.field_get_name != nullptr)
+                                    ? SehCall(r.field_get_name, uf) : nullptr;
+                                if (un != nullptr && std::strcmp(un, "value__") == 0) {
+                                    const Il2CppType* ut = (r.field_get_type != nullptr)
+                                        ? SehCall(r.field_get_type, uf) : nullptr;
+                                    if (ut != nullptr) outUnderlying = TypeName(ut);
+                                    break;
                                 }
                             }
                         }
-                    }
+                    };
+                    detectEnum(fc, fe.isEnum, fe.underlyingTypeName);
                     // Phase 31-2 (Phase B) — remember the field's runtime class
                     // for inline value-type STRUCT fields (not enums) so the
                     // decode paths recurse into members by exact class pointer.
                     // Set after enum detection so enums don't keep a class.
                     if (fe.isValueType && !fe.isEnum) fe.valueTypeClass = fc;
+
+                    // C-M4 — for 1D array fields (`T[]`), resolve element class
+                    // metadata once here so snapshot array walks know the exact
+                    // stride + value-type / enum classification without guessing.
+                    if (fe.typeName.size() >= 2 &&
+                        fe.typeName[fe.typeName.size() - 1] == ']' &&
+                        fe.typeName[fe.typeName.size() - 2] == '[' &&
+                        r.class_get_element_class != nullptr &&
+                        r.class_is_valuetype != nullptr) {
+                        Il2CppClass* ec = SehCall(r.class_get_element_class, fc);
+                        // GUARD: il2cpp_class_get_element_class returns `fc` itself for non-arrays.
+                        if (ec != nullptr && ec != fc) {
+                            const bool eIsVt = SehClassIsValueType(r.class_is_valuetype, ec) != 0;
+                            fe.arrayElemIsValueType = eIsVt;
+                            if (!eIsVt) {
+                                fe.arrayElemLayoutKnown = true;
+                                fe.arrayElemSize = Discrete::ManagedLayout::kPointerSize;
+                            } else {
+                                detectEnum(ec, fe.arrayElemIsEnum, fe.arrayElemUnderlyingTypeName);
+                                int vs = (r.class_value_size != nullptr)
+                                    ? SehClassValueSize(r.class_value_size, ec) : 0;
+                                if (vs > 0 && vs <= 4096) {
+                                    fe.arrayElemSize = static_cast<std::size_t>(vs);
+                                    fe.arrayElemLayoutKnown = true;
+                                } else if (fe.arrayElemIsEnum && !fe.arrayElemUnderlyingTypeName.empty()) {
+                                    fe.arrayElemLayoutKnown = true;
+                                }
+                            }
+                        }
+                    }
                 }
             }
             result.info.fields.push_back(std::move(fe));

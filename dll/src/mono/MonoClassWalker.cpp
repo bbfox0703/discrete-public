@@ -118,6 +118,13 @@ int SehClassIsValueType(fn_class_is_valuetype fn, MonoClass* k) {
 MonoType* SehEnumBasetype(fn_class_enum_basetype fn, MonoClass* k) {
     __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
+MonoClass* SehGetElementClass(fn_class_get_element_class fn, MonoClass* k) {
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+int SehClassValueSize(fn_class_value_size fn, MonoClass* k) {
+    __try { std::uint32_t align = 0; return fn(k, &align); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
+}
 MonoClass* SehObjectGetClass(fn_object_get_class fn, MonoObject* o) {
     __try { return fn(o); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
@@ -363,6 +370,42 @@ ClassInfoResult ReadClassInfo(MonoClass* klass, bool forceSetup) {
                     // match isValueType but the decode-site gate excludes them
                     // (they decode to a scalar value, never a bare pointer).
                     if (fe.isValueType && !fe.isEnum) fe.valueTypeClass = fc;
+
+                    // C-M4 — for 1D array fields (`T[]`), resolve element class
+                    // metadata once here so snapshot array walks know the exact
+                    // stride + value-type / enum classification without guessing.
+                    if (fe.typeName.size() >= 2 &&
+                        fe.typeName[fe.typeName.size() - 1] == ']' &&
+                        fe.typeName[fe.typeName.size() - 2] == '[' &&
+                        r.class_get_element_class != nullptr &&
+                        r.class_is_valuetype != nullptr) {
+                        MonoClass* ec = SehGetElementClass(r.class_get_element_class, fc);
+                        // GUARD: mono_class_get_element_class returns `fc` itself for non-arrays.
+                        if (ec != nullptr && ec != fc) {
+                            const bool eIsVt = SehClassIsValueType(r.class_is_valuetype, ec) != 0;
+                            fe.arrayElemIsValueType = eIsVt;
+                            if (!eIsVt) {
+                                fe.arrayElemLayoutKnown = true;
+                                fe.arrayElemSize = Discrete::ManagedLayout::kPointerSize;
+                            } else {
+                                if (r.class_is_enum != nullptr) {
+                                    fe.arrayElemIsEnum = SehClassIsEnum(r.class_is_enum, ec) != 0;
+                                }
+                                if (fe.arrayElemIsEnum && r.class_enum_basetype != nullptr) {
+                                    MonoType* ebase = SehEnumBasetype(r.class_enum_basetype, ec);
+                                    if (ebase != nullptr) fe.arrayElemUnderlyingTypeName = TypeName(ebase);
+                                }
+                                int vs = (r.class_value_size != nullptr)
+                                    ? SehClassValueSize(r.class_value_size, ec) : 0;
+                                if (vs > 0 && vs <= 4096) {
+                                    fe.arrayElemSize = static_cast<std::size_t>(vs);
+                                    fe.arrayElemLayoutKnown = true;
+                                } else if (fe.arrayElemIsEnum && !fe.arrayElemUnderlyingTypeName.empty()) {
+                                    fe.arrayElemLayoutKnown = true;
+                                }
+                            }
+                        }
+                    }
                 }
             }
             result.info.fields.push_back(std::move(fe));

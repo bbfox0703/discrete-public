@@ -28,6 +28,7 @@
 #include "SafeChunkRead.h"
 #include "ScanCancel.h"
 #include "SehFilter.h"
+#include "SnapshotSession.h"
 
 #include <windows.h>
 
@@ -2194,6 +2195,195 @@ void Test_CM6_CM8_SearchSymbolsTruncAndStrictJsonNumerics() {
     }
 }
 
+// ============================================================================
+// C-M4 + C-M5 — Snapshot array element layout resolution (no pointer stride
+// guessing for struct/enum arrays), IL2CPP streaming instance header
+// revalidation, idempotent cursor replay, and lock-free SessionManager decode
+// ============================================================================
+void Test_CM4_CM5_SnapshotArrayLayoutAndStreamingSafety() {
+    using namespace Discrete::ExportHelpers;
+    using namespace Discrete::Snapshot;
+
+    // 1. C-M4: ResolveSnapshotArrayElementPlan across primitives, enums, named
+    //    math structs, custom structs, reference types, jagged arrays, and unknown
+    {
+        const SnapshotArrayElemHint noHint{};
+
+        // Primitives on x64 and x86 (including IntPtr pointer-width sensitivity)
+        auto pInt32 = ResolveSnapshotArrayElementPlan("System.Int32[]", noHint, 8);
+        CHECK(pInt32.kind == SnapshotArrayElemDecodeKind::Primitive);
+        CHECK(pInt32.elemSize == 4u && !pInt32.isPointer);
+        CHECK(pInt32.elementType == "System.Int32" && pInt32.decodeType == "System.Int32");
+
+        auto pIntPtrX86 = ResolveSnapshotArrayElementPlan("System.IntPtr[]", noHint, 4);
+        CHECK(pIntPtrX86.kind == SnapshotArrayElemDecodeKind::Primitive);
+        CHECK(pIntPtrX86.elemSize == 4u && !pIntPtrX86.isPointer);
+
+        // System.String / System.Object / jagged arrays always reference elements
+        auto pStr = ResolveSnapshotArrayElementPlan("System.String[]", noHint, 8);
+        CHECK(pStr.kind == SnapshotArrayElemDecodeKind::StringRef);
+        CHECK(pStr.elemSize == 8u && pStr.isPointer);
+
+        auto pJag = ResolveSnapshotArrayElementPlan("System.Int32[][]", noHint, 4);
+        CHECK(pJag.kind == SnapshotArrayElemDecodeKind::ObjectRef);
+        CHECK(pJag.elemSize == 4u && pJag.isPointer && pJag.elementType == "System.Int32[]");
+
+        // Named Unity math structs never use pointer stride
+        auto pVec3 = ResolveSnapshotArrayElementPlan("UnityEngine.Vector3[]", noHint, 8);
+        CHECK(pVec3.kind == SnapshotArrayElemDecodeKind::NamedMathStruct);
+        CHECK(pVec3.elemSize == 12u && !pVec3.isPointer);
+        CHECK(pVec3.decodeType == "UnityEngine.Vector3");
+
+        // Enum array with runtime hint -> Primitive using exact underlying width (NOT 8-byte ptr!)
+        SnapshotArrayElemHint enumHint{};
+        enumHint.layoutKnown = true;
+        enumHint.isValueType = true;
+        enumHint.isEnum = true;
+        enumHint.valueSize = 4;
+        enumHint.underlyingTypeName = "System.Int32";
+        auto pEnum = ResolveSnapshotArrayElementPlan("Game.ElementKind[]", enumHint, 8);
+        CHECK(pEnum.kind == SnapshotArrayElemDecodeKind::Primitive);
+        CHECK(pEnum.elemSize == 4u && !pEnum.isPointer);
+        CHECK(pEnum.elementType == "Game.ElementKind");
+        CHECK(pEnum.decodeType == "System.Int32");
+
+        SnapshotArrayElemHint byteEnumHint{};
+        byteEnumHint.layoutKnown = true;
+        byteEnumHint.isValueType = true;
+        byteEnumHint.isEnum = true;
+        byteEnumHint.underlyingTypeName = "System.Byte";
+        auto pByteEnum = ResolveSnapshotArrayElementPlan("Game.TinyFlag[]", byteEnumHint, 8);
+        CHECK(pByteEnum.kind == SnapshotArrayElemDecodeKind::Primitive);
+        CHECK(pByteEnum.elemSize == 1u && !pByteEnum.isPointer && pByteEnum.decodeType == "System.Byte");
+
+        // Custom value-type struct array -> RawValueStruct with exact stride, isPointer=false
+        SnapshotArrayElemHint structHint{};
+        structHint.layoutKnown = true;
+        structHint.isValueType = true;
+        structHint.isEnum = false;
+        structHint.valueSize = 24;
+        auto pStruct = ResolveSnapshotArrayElementPlan("Game.ItemSlot[]", structHint, 8);
+        CHECK(pStruct.kind == SnapshotArrayElemDecodeKind::RawValueStruct);
+        CHECK(pStruct.elemSize == 24u && !pStruct.isPointer);
+
+        // Confirmed reference class -> ObjectRef with pointer stride & isPointer=true
+        SnapshotArrayElemHint refHint{};
+        refHint.layoutKnown = true;
+        refHint.isValueType = false;
+        refHint.valueSize = 0;
+        auto pRef = ResolveSnapshotArrayElementPlan("Game.Enemy[]", refHint, 8);
+        CHECK(pRef.kind == SnapshotArrayElemDecodeKind::ObjectRef);
+        CHECK(pRef.elemSize == 8u && pRef.isPointer);
+
+        // Unknown user type without runtime hint -> Unknown (NEVER guesses pointer stride!)
+        auto pUnknown = ResolveSnapshotArrayElementPlan("Game.OpaqueStruct[]", noHint, 8);
+        CHECK(pUnknown.kind == SnapshotArrayElemDecodeKind::Unknown);
+        CHECK(pUnknown.elemSize == 0u && !pUnknown.isPointer);
+
+        // Value type with invalid/oversized valueSize -> Unknown
+        SnapshotArrayElemHint badStructHint{};
+        badStructHint.layoutKnown = true;
+        badStructHint.isValueType = true;
+        badStructHint.valueSize = 0;
+        CHECK(ResolveSnapshotArrayElementPlan("Game.ZeroStruct[]", badStructHint, 8).kind
+              == SnapshotArrayElemDecodeKind::Unknown);
+
+        badStructHint.valueSize = kMaxSnapshotArrayElemSize + 1u;
+        CHECK(ResolveSnapshotArrayElementPlan("Game.GiantStruct[]", badStructHint, 8).kind
+              == SnapshotArrayElemDecodeKind::Unknown);
+    }
+
+    // 2. C-M5(1): Live IL2CPP object header validation
+    {
+        const std::uintptr_t klassA = static_cast<std::uintptr_t>(0x12345678u);
+        const std::uintptr_t klassB = static_cast<std::uintptr_t>(0x12349999u);
+        CHECK(IsLiveIl2CppInstanceHeader(klassA, klassA));
+        CHECK(!IsLiveIl2CppInstanceHeader(klassB, klassA));
+        CHECK(!IsLiveIl2CppInstanceHeader(0, klassA));
+        CHECK(!IsLiveIl2CppInstanceHeader(0, 0));
+    }
+
+    // 3. C-M5(2): Idempotent streaming cursor tracking
+    {
+        std::size_t hwm = 0;
+        CHECK(ShouldChargeStreamingPlanRow(0, hwm) && hwm == 1u);
+        CHECK(ShouldChargeStreamingPlanRow(1, hwm) && hwm == 2u);
+        // Replay indices 0 and 1 -> must NOT charge stats or regress hwm
+        CHECK(!ShouldChargeStreamingPlanRow(0, hwm) && hwm == 2u);
+        CHECK(!ShouldChargeStreamingPlanRow(1, hwm) && hwm == 2u);
+        // Fresh index 2 charges and advances hwm to 3
+        CHECK(ShouldChargeStreamingPlanRow(2, hwm) && hwm == 3u);
+    }
+
+    // 4. C-M5(3): SessionManager::View releases global mutex before streaming
+    //    decode / sleep; concurrent SessionManager::End completes immediately
+    //    while the caller's local shared_ptr keeps the decoder alive cleanly.
+    {
+        struct BlockingMockDecoder final : public ISnapshotStreamDecoder {
+            std::atomic<bool> entered{false};
+            std::atomic<bool> release{false};
+            std::atomic<int>* destroyedCounter = nullptr;
+
+            explicit BlockingMockDecoder(std::atomic<int>* dc) : destroyedCounter(dc) {}
+            ~BlockingMockDecoder() override {
+                if (destroyedCounter != nullptr) ++(*destroyedCounter);
+            }
+            std::size_t DecodeRange(std::size_t cursor, std::size_t limit,
+                                    nlohmann::json& out) override {
+                entered.store(true, std::memory_order_release);
+                while (!release.load(std::memory_order_acquire)) {
+                    ::Sleep(5);
+                }
+                out.push_back(nlohmann::json{{"name", "MockClass"}});
+                return cursor + limit;
+            }
+            std::size_t   PlanSize() const override          { return 1; }
+            nlohmann::json DecodeStats() const override      { return nlohmann::json{{"staleInstances", 0}}; }
+            bool          TruncatedByMemory() const override { return false; }
+            bool          TruncatedByCount() const override  { return false; }
+            std::uint64_t PeakPrivateUsage() const override  { return 0; }
+        };
+
+        std::atomic<int> destroyedCount{0};
+        auto mock = std::make_shared<BlockingMockDecoder>(&destroyedCount);
+        auto sess = std::make_unique<Session>();
+        sess->streamDecoder = mock;
+        const std::uint64_t sid = SessionManager::Instance().Begin(std::move(sess));
+
+        // Simulate CmdSnapshotChunk: grab shared_ptr inside View, decode OUTSIDE View.
+        std::shared_ptr<ISnapshotStreamDecoder> grabbed;
+        const bool found = SessionManager::Instance().View(sid, [&](Session& s) {
+            grabbed = s.streamDecoder;
+        });
+        CHECK(found && grabbed != nullptr);
+
+        nlohmann::json chunkOut = nlohmann::json::array();
+        std::thread decodeWorker([&]() {
+            grabbed->DecodeRange(0, 1, chunkOut);
+        });
+
+        // Wait until decodeWorker is actively inside DecodeRange.
+        while (!mock->entered.load(std::memory_order_acquire)) {
+            ::Sleep(1);
+        }
+
+        // Now End() the session on this thread while decodeWorker is blocked:
+        // must return immediately (not deadlocked on SessionManager::mu_) and
+        // must NOT destroy the decoder while decodeWorker still holds `grabbed`!
+        const bool ended = SessionManager::Instance().End(sid);
+        CHECK(ended);
+        CHECK(destroyedCount.load() == 0);
+
+        mock->release.store(true, std::memory_order_release);
+        decodeWorker.join();
+        CHECK(chunkOut.size() == 1u);
+
+        grabbed.reset();
+        mock.reset();
+        CHECK(destroyedCount.load() == 1);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -2217,6 +2407,7 @@ int main() {
     Test_BM6_BM7_BM11_RuntimeHealthSafePeScanAndVtableValidation();
     Test_BM8_BM9_BL7_FieldXrefMemberRefPdataAndStructOffset();
     Test_CM6_CM8_SearchSymbolsTruncAndStrictJsonNumerics();
+    Test_CM4_CM5_SnapshotArrayLayoutAndStreamingSafety();
 
     const char* arch = (sizeof(void*) == 4) ? "x86" : "x64";
     if (g_failures == 0) {

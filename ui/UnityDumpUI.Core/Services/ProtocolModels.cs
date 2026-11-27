@@ -1166,6 +1166,10 @@ public sealed class SnapshotDecodeStats
 {
     [JsonPropertyName("decodedClasses")]           public int DecodedClasses           { get; set; }
     [JsonPropertyName("decodedInstances")]         public int DecodedInstances         { get; set; }
+    /// <summary>C-M5: IL2CPP streaming instances skipped during deferred chunk
+    /// decode because their live object header no longer matched the expected
+    /// class pointer (freed / repurposed between Begin and Chunk).</summary>
+    [JsonPropertyName("staleInstances")]           public int StaleInstances           { get; set; }
     [JsonPropertyName("decodedArrays")]            public int DecodedArrays            { get; set; }
     [JsonPropertyName("skippedOpenGenericArrays")] public int SkippedOpenGenericArrays { get; set; }
     [JsonPropertyName("classInfoCacheHits")]       public int ClassInfoCacheHits       { get; set; }
@@ -1503,6 +1507,17 @@ public sealed class SnapshotArrayElement
         get => _extras?.ElementClassError;
         set { if (value is not null) (_extras ??= new()).ElementClassError = value; else if (_extras is not null) _extras.ElementClassError = null; }
     }
+
+    /// <summary>C-M4: raw hex bytes for inline custom value-type struct array
+    /// elements whose stride was resolved via <c>class_value_size</c> (stored
+    /// in lazy <see cref="ElementExtras"/> so primitive/ref elements pay zero
+    /// memory overhead).</summary>
+    [JsonPropertyName("hex")]
+    public string? Hex
+    {
+        get => _extras?.Hex;
+        set { if (value is not null) (_extras ??= new()).Hex = value; else if (_extras is not null) _extras.Hex = null; }
+    }
 }
 
 /// <summary>Lazily-allocated overflow storage for the rarely-set
@@ -1513,6 +1528,7 @@ internal sealed class ElementExtras
     public string?                   Address;
     public List<SnapshotFieldEntry>? Fields;
     public string?                   ElementClassError;
+    public string?                   Hex;
 }
 
 public sealed class SnapshotArrayElements

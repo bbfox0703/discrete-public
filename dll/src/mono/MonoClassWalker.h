@@ -37,6 +37,16 @@ struct FieldEntry {
     // ambiguous for nested types). nullptr otherwise. Raw pointer to an
     // incomplete type — never owned, valid for the session.
     MonoClass*    valueTypeClass     = nullptr;
+    // C-M4 — for 1D array fields (`T[]`), element layout resolved once via
+    // mono_class_get_element_class + mono_class_is_valuetype +
+    // mono_class_value_size (+ enum basetype) during ReadClassInfo. Prevents
+    // snapshot walkArrayElementsInline from guessing pointer stride on
+    // struct/enum arrays.
+    bool          arrayElemLayoutKnown = false;
+    bool          arrayElemIsValueType = false;
+    bool          arrayElemIsEnum      = false;
+    std::size_t   arrayElemSize        = 0;
+    std::string   arrayElemUnderlyingTypeName;
 };
 
 struct MethodEntry {

@@ -264,4 +264,97 @@ public class ValueScanWireAndDtoContractTests
             await gServer.DisposeAsync().ConfigureAwait(true);
         }
     }
+
+    // --- C-M4 / C-M5: Snapshot struct-array hex, unknown_element_layout, staleInstances ---
+
+    [Fact]
+    public async Task SnapshotChunk_CustomStructArrayHex_UnknownLayoutError_AndStaleInstances_RoundTrip()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        const string response = """
+        {
+          "ok": true,
+          "snapshotId": "snap_cm45",
+          "cursor": 0,
+          "nextCursor": 1,
+          "done": true,
+          "decodeStats": {
+            "decodedClasses": 1,
+            "decodedInstances": 1,
+            "staleInstances": 7,
+            "decodedArrays": 1,
+            "skippedOpenGenericArrays": 0,
+            "classInfoCacheHits": 2,
+            "classInfoCacheMisses": 1,
+            "decodedElementSets": 0,
+            "elementBudgetHit": false
+          },
+          "classes": [
+            {
+              "assembly": "Assembly-CSharp",
+              "namespace": "Game",
+              "name": "Inventory",
+              "schema": [
+                { "name": "slots", "type": "Game.ItemSlot[]", "offset": 16, "from": "Inventory" },
+                { "name": "opaque", "type": "Game.Opaque[]", "offset": 24, "from": "Inventory" }
+              ],
+              "instances": [
+                {
+                  "address": "0x0000012345678900",
+                  "v": [
+                    {
+                      "ptr": "0x0000012345679000",
+                      "arrayElements": {
+                        "length": 1,
+                        "count": 1,
+                        "element_type": "Game.ItemSlot",
+                        "element_size": 12,
+                        "is_pointer": false,
+                        "elements": [
+                          { "index": 0, "hex": "0102030405060708090a0b0c" }
+                        ]
+                      }
+                    },
+                    {
+                      "ptr": "0x0000012345679100",
+                      "arrayError": "unknown_element_layout"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+        """;
+        var (adapter, serverTask, server, client) = await StartPairAsync(response, ct);
+        try
+        {
+            SnapshotChunkResult chunk = await adapter.SnapshotChunkAsync("snap_cm45", 0, 10, ct).ConfigureAwait(true);
+            _ = await serverTask.ConfigureAwait(true);
+
+            Assert.NotNull(chunk.DecodeStats);
+            Assert.Equal(7, chunk.DecodeStats!.StaleInstances);
+
+            SnapshotClassEntry cls = Assert.Single(chunk.Classes);
+            SnapshotInstanceEntry inst = Assert.Single(cls.Instances!);
+            Assert.Equal(2, inst.Fields.Count);
+
+            SnapshotFieldEntry slots = inst.Fields[0];
+            Assert.NotNull(slots.ArrayElements);
+            Assert.False(slots.ArrayElements!.IsPointer);
+            Assert.Equal(12UL, slots.ArrayElements.ElementSize);
+            SnapshotArrayElement el0 = Assert.Single(slots.ArrayElements.Elements);
+            Assert.Null(el0.Ptr);
+            Assert.Equal("0102030405060708090a0b0c", el0.Hex);
+
+            SnapshotFieldEntry opaque = inst.Fields[1];
+            Assert.Equal("unknown_element_layout", opaque.ArrayError);
+            Assert.Null(opaque.ArrayElements);
+        }
+        finally
+        {
+            await client.DisposeAsync().ConfigureAwait(true);
+            await server.DisposeAsync().ConfigureAwait(true);
+        }
+    }
 }
