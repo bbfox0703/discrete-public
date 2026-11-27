@@ -16,8 +16,19 @@
     <EnableAotAnalyzer>true</EnableAotAnalyzer>
     <InvariantGlobalization>true</InvariantGlobalization>
 
-    <!-- xUnit v3 -->
-    <XunitV3Version>3.0.0</XunitV3Version>
+    <!-- xUnit v3 (exact pin; referenced by UnityDumpUI.Tests.csproj) -->
+    <XunitV3Version>3.2.2</XunitV3Version>
+
+    <!-- D-M7: Deterministic NuGet restore via committed lock files.
+         Native AOT publish (-p:PublishAot=true) adds Microsoft.DotNet.ILCompiler
+         to the restore graph of UnityDumpUI and UnityDumpUI.Core, whereas
+         dotnet build / dotnet test / single-file publish run with PublishAot=false.
+         Using packages.aot.lock.json when PublishAot=true lets BOTH AOT publish
+         and test/single-file runs validate under RestoreLockedMode=true on CI
+         without NU1004 lock-file collisions. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <NuGetLockFilePath Condition="'$(PublishAot)' == 'true'">packages.aot.lock.json</NuGetLockFilePath>
+    <RestoreLockedMode Condition="'$(CI)' == 'true'">true</RestoreLockedMode>
   </PropertyGroup>
 
   <!-- =========================================================================

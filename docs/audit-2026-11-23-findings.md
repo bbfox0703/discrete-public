@@ -639,7 +639,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：v38 的 TypeDefinition stride 是 `68 + 3·TIS + GCIS`，MethodDefinition 是 `24/20 + TDIS + TIS (+PIS) + GCIS`，Image 是 `32 + 2·TDIS`，各自依賴不同的寬度組合。`validate_type_table` 只能抓到 TIS / GCIS 錯誤；TDIS / PIS 錯了（例如某張表的 row count 剛好等於 255 / 65535，而 `get_index_size` 的 `<=` 和 runtime 實際規則差一，或 IL2CPP 未來調整規則），method 名稱、參數、image 範圍就會整批錯位，`loaded()` / `tables_loaded` 卻仍然是 true。`metadata-cli` 的符號輸出、`il2cppGetMetadata*` 系列 RPC 會照單全收。v38 header 中每個 section 都有 `count` 欄位，可以直接驗證，但目前只有 parameters 讀了它。
 - 修法：v38+ 載入時，對每張表檢查 `section.size == section.count * stride`，再加上 `size % stride == 0`；不一致就把該表的 count 設成 0、寫 log，並在 `getMetadataStats` 回報 `tablesDegraded`。`type_index_size` 推不出來（`inferred ∉ {1,2,4}`）時也要寫 log，不能靜默沿用 4。
 
-**D-M4 · Golden-hash 閘門沒有接進 build 或 CI；`cargo test` 也不是在出貨的編譯設定下執行（audit-2026-11-23-plan.md 訊號 3）**
+**D-M4 · Golden-hash 閘門沒有接進 build 或 CI；`cargo test` 也不是在出貨的編譯設定下執行（audit-2026-11-23-plan.md 訊號 3） — ✅ FIXED (2026-11-27)**
 - 位置：`build.ps1:685-709`（`Run-RustTests` 只跑 `cargo test`）、`:840-845`（`All` 的順序是 DLL → UI → Test → MetadataCli，跑測試時 `r2-dump` / `xref-dump` 還沒建置）；`.github/workflows/release.yml:83-88`；`dll/rust/src/metadata/tests.rs:1288-1294`（沒有 fixture 時直接 `return`，沒有任何輸出）；`dll/rust/src/ffi.rs:162-168`；`dll/rust/RustCore.cmake:38-50`
 - 成因：
   1. `metadata_golden.py` / `r2_golden.py` 只能手動執行，`build.ps1` 和 `release.yml` 都沒有呼叫。CI 也沒有 fixture，所以 R1 / R2「行為不變」的保證在發行流程中從來沒有被檢查過。
@@ -647,17 +647,17 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
   3. `ffi.rs:163-165` 的註解說這個測試「證明這個 target + CRT 組合的 unwinding 可行」，但 `Run-RustTests` 跑的是 dev profile、動態 CRT、使用者自己的 `RUSTFLAGS`。出貨的 Publish 是 release + LTO + `codegen-units=1` + `+crt-static`（由 `RustCore.cmake` 用 `CARGO_ENCODED_RUSTFLAGS` 強制指定），兩者不是同一個組合。
 - 修法：`Run-RustTests` 再跑一輪 `cargo test --release`，並設定 `CARGO_ENCODED_RUSTFLAGS=-Ctarget-feature=+crt-static`（Publish 模式必跑）。`real_metadata_fixtures` 沒有 fixture 時用 `eprintln!` 印出 `SKIPPED`，`build.ps1` 也在 summary 中標示出來。`All` 改成先跑 `Build-MetadataCli` 再跑 `Run-Tests`；有 fixture 時（`DISCRETE_METADATA_FIXTURES` 或 `fixtures.local.txt`）自動執行兩支 golden 腳本，exit 1 當成失敗、exit 2（沒有 fixture）當成警告。
 
-**D-M5 · `release.yml` 遇到已存在的 release 時，會用 raw commit list 覆蓋維護者改寫過的 notes，並替換已發布 release 的 assets（§7 訊號確認）**
+**D-M5 · `release.yml` 遇到已存在的 release 時，會用 raw commit list 覆蓋維護者改寫過的 notes，並替換已發布 release 的 assets（§7 訊號確認） — ✅ FIXED (2026-11-27)**
 - 位置：`.github/workflows/release.yml:159-173`（`gh release edit --notes-file`、`gh release upload --clobber`）、`:114-157`
 - 成因：「Re-run jobs」（例如重跑上傳失敗的 job）或從網頁先建立 release 再推 tag，都會走 `gh release view` 成功的分支，接著：(a) 維護者依 CONTRIBUTING 規則改寫的 notes 被 raw commit list 覆蓋；(b) 這個分支沒有 `--draft`，如果 release 已經發布，`--clobber` 會直接替換公開的 zip 和 `.sha256`，已下載的使用者手上的雜湊就對不上了。這與 CLAUDE.md「Releases stay drafts with rewritten notes」的規則正面衝突。
 - 修法：release 已存在時，先檢查 `gh release view --json isDraft,body`。已發布就直接 fail（「tag already published; delete + re-tag」）；是 draft 但 body 已被改寫（不是 workflow 產生的樣板，例如本來就沒有 `## Changes since` 標記），只上傳 assets、不動 notes。`gh release create` 本身維持現狀。
 
-**D-M6 · `metadata-cli` 的 method → `methodPointers[]` 用「global method index − image.methodStart」定位，而 runtime 用的是 token RID（待驗證）**
+**D-M6 · `metadata-cli` 的 method → `methodPointers[]` 用「global method index − image.methodStart」定位，而 runtime 用的是 token RID（待驗證） — ✅ FIXED (2026-11-27)**
 - 位置：`tools/metadata-cli/SymbolPipeline.cpp:241-253`；`dll/rust/src/metadata/parser.rs:1429-1464`（`methodStart` = 該 image 所有 type `methodStart` 的最小值）；`tools/metadata-cli/SymbolPipeline.h:11-15`
 - 成因：IL2CPP（v24.2+）是用 `codeGenModule->methodPointers[GetTokenRowId(method.token) - 1]` 解析方法指標，Il2CppDumper 也是這樣做。這裡的公式要成立，必須「image 的方法在 metadata 中連續排列，而且排列順序和 MethodDef token 的順序相同」。只要任一條件不成立（例如 type 在 metadata 中的順序和 TypeDef token 順序不同、方法數為 0 的 type 夾在中間、某些 image 的 method 區段不連續），整個 image 之後的方法都會對到錯誤的位址，而輸出的 `.dd64` / symbol 檔看起來完全正常。
 - 修法：改成 `localIdx = (m.token & 0x00FFFFFF) - 1`；過渡期間兩個公式都算，不一致時計數並寫進 `PipelineResult`（例如 `methodsIndexMismatch`），用 fixture 確認之後再移除舊公式。
 
-**D-M7 · 出貨 UI 的 NuGet 相依仍有浮動版本，而且沒有 lock file；SDK 也是浮動的（§7 訊號確認）**
+**D-M7 · 出貨 UI 的 NuGet 相依仍有浮動版本，而且沒有 lock file；SDK 也是浮動的（§7 訊號確認） — ✅ FIXED (2026-11-27)**
 - 位置：`ui/UnityDumpUI/UnityDumpUI.csproj:119`（`CommunityToolkit.Mvvm 8.*`）；`ui/UnityDumpUI.Tests/UnityDumpUI.Tests.csproj:84-85`（`xunit.v3 3.*`、`xunit.runner.visualstudio 3.*`）；`ui/Directory.Build.props:20`（`XunitV3Version=3.0.0` 定義了但沒有任何地方引用，是 dead property）、`:56-60`（同一個檔案明文禁止浮動版本）；`ui/global.json:3-4`（`rollForward: latestFeature`）；`.github/workflows/release.yml:62-65`（`dotnet-version: '10.0.x'`）；整個 `ui/` 沒有 `RestorePackagesWithLockFile`
 - 成因：`CommunityToolkit.Mvvm` 是 source generator，它產生的程式碼會被 AOT 編譯進出貨的 `DiscreteUI.exe`。8.x 的任何 minor 版本都可能改變產生的程式碼（以及 trimming / AOT 警告）。同一個 tag 在不同日期重新建置，可能得到不同的 binary，`TreatWarningsAsErrors` 也可能突然讓 release 失敗。測試端的 `3.*` 同理。`vendor_pins.json`、`Cargo.lock --locked`、`rust-toolchain.toml` 都已精確釘版，只有 .NET 這一層例外。
 - 修法：把這三個 `PackageReference` 改成精確版本（`xunit.v3` 改用 `$(XunitV3Version)`，或刪掉這個 dead property）；在 `ui/Directory.Build.props` 啟用 `RestorePackagesWithLockFile=true`，CI 加上 `RestoreLockedMode=true`；`global.json` 改成 `rollForward: latestPatch`，`setup-dotnet` 改用 `global-json-file: ui/global.json`。

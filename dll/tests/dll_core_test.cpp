@@ -19,6 +19,7 @@
 #include "ManagedLayout.h"
 #include "Memory.h"
 #include "MethodInvokeValidation.h"
+#include "MethodTokenIndex.h"
 #include "ModuleLifecycle.h"
 #include "MonoVtableFilter.h"
 #include "ParallelScanDriver.h"
@@ -2384,6 +2385,53 @@ void Test_CM4_CM5_SnapshotArrayLayoutAndStreamingSafety() {
     }
 }
 
+// ============================================================================
+// D-M6 — IL2CPP CodeGenModule methodPointers[] token-RID indexing + mismatch count
+// ============================================================================
+void Test_DM6_MethodTokenPointerIndex() {
+    using Discrete::Shared::ResolveMethodPointerIndex;
+
+    // 1. Contiguous image where token RID - 1 matches (globalIdx - image.methodStart)
+    {
+        bool mismatch = true;
+        auto idx = ResolveMethodPointerIndex(0x06000001u, 500, 500, 100u, mismatch);
+        CHECK(idx.has_value() && *idx == 0u);
+        CHECK(!mismatch);
+
+        auto idx2 = ResolveMethodPointerIndex(0x0600002Au, 541, 500, 100u, mismatch);
+        CHECK(idx2.has_value() && *idx2 == 41u);
+        CHECK(!mismatch);
+    }
+
+    // 2. Non-contiguous / reordered metadata: token RID differs from globalIdx - methodStart
+    //    Must return RID - 1 AND set outIndexMismatch = true.
+    {
+        bool mismatch = false;
+        auto idx = ResolveMethodPointerIndex(0x0600000Au, 502, 500, 100u, mismatch);
+        CHECK(idx.has_value() && *idx == 9u);
+        CHECK(mismatch);
+    }
+
+    // 3. Zero RID (sentinel / invalid token): must return nullopt without underflow
+    {
+        bool mismatch = true;
+        auto idx = ResolveMethodPointerIndex(0x06000000u, 500, 500, 100u, mismatch);
+        CHECK(!idx.has_value());
+        CHECK(!mismatch);
+
+        auto idxZero = ResolveMethodPointerIndex(0u, 0, 0, 100u, mismatch);
+        CHECK(!idxZero.has_value());
+    }
+
+    // 4. RID beyond module.methodCount: returns nullopt (and still flags mismatch if present)
+    {
+        bool mismatch = false;
+        auto idx = ResolveMethodPointerIndex(0x06000065u, 500, 500, 100u, mismatch);
+        CHECK(!idx.has_value());
+        CHECK(mismatch);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -2408,6 +2456,7 @@ int main() {
     Test_BM8_BM9_BL7_FieldXrefMemberRefPdataAndStructOffset();
     Test_CM6_CM8_SearchSymbolsTruncAndStrictJsonNumerics();
     Test_CM4_CM5_SnapshotArrayLayoutAndStreamingSafety();
+    Test_DM6_MethodTokenPointerIndex();
 
     const char* arch = (sizeof(void*) == 4) ? "x86" : "x64";
     if (g_failures == 0) {

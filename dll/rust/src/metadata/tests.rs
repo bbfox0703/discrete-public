@@ -1342,13 +1342,23 @@ fn log_lines_match_cpp_text() {
 // ---------------------------------------------------------------------------
 
 /// Loads every file in `DISCRETE_METADATA_FIXTURES` (semicolon-separated).
-/// A no-op when the variable is unset.
+/// Prints `SKIPPED` to stderr when the variable is unset or empty (D-M4).
 #[test]
 fn real_metadata_fixtures() {
     let Ok(list) = std::env::var("DISCRETE_METADATA_FIXTURES") else {
+        eprintln!("SKIPPED real_metadata_fixtures: DISCRETE_METADATA_FIXTURES is unset");
         return;
     };
-    for path in list.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+    let paths: Vec<&str> = list
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if paths.is_empty() {
+        eprintln!("SKIPPED real_metadata_fixtures: DISCRETE_METADATA_FIXTURES is empty");
+        return;
+    }
+    for path in paths {
         let w = wide(std::path::Path::new(path));
         let p = Parser::load_from_path(&w);
         assert!(p.loaded(), "{path}: not loaded");

@@ -116,7 +116,7 @@
 
     <!-- AOT-friendly MVVM via source generators ([ObservableProperty], [RelayCommand]).
          Avalonia.ReactiveUI is NOT used: it has no v12 release and depends on reflection. -->
-    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.*" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <PackageReference Include="HarfBuzzSharp" Version="$(HarfBuzzSharpVersion)" />
     <PackageReference Include="HarfBuzzSharp.NativeAssets.Linux" Version="$(HarfBuzzSharpVersion)" />
     <PackageReference Include="HarfBuzzSharp.NativeAssets.macOS" Version="$(HarfBuzzSharpVersion)" />

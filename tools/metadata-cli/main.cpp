@@ -1124,6 +1124,16 @@ int CmdSymbols(int argc, wchar_t** argv) {
            && writeFile(L".idc", ida);
     if (!ok) return 1;
 
+    // D-M6 diagnostic: surface any divergence between token-RID indexing and
+    // the legacy (globalIdx - image.methodStart) formula to stderr only when
+    // non-zero so fixtures with zero mismatches keep identical console output.
+    if (r->methodsIndexMismatch > 0) {
+        std::fprintf(stderr,
+                     "metadata-cli: note — %zu method(s) had token RID index != "
+                     "(globalIdx - image.methodStart); used token RID\n",
+                     r->methodsIndexMismatch);
+    }
+
     // Stats line for the CLI consumer.
     std::printf("{\"ok\":true,"
                 "\"image_base\":\"0x%016llX\","

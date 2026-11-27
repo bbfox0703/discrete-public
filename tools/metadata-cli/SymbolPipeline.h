@@ -8,10 +8,11 @@
 //   global-metadata.dat → MetadataParser (Phase B + D-5.1)
 //                       → Image table + Method table + Type table
 //
-//   For each MethodDefinition:
-//     1. Find owning Image via MetadataParser::FindImageContainingMethod
-//     2. Match Image.name + ".dll" → CodeGenModule.name
-//     3. localIdx = methodGlobalIdx - image.methodStart
+//   For each Image matched to a CodeGenModule (Image.name == module.name):
+//     1. Walk each TypeDefinition in [image.typeStart, image.typeStart + image.typeCount)
+//     2. Walk each MethodDefinition of the type
+//     3. localIdx = (method.token & 0x00FFFFFF) - 1  (ECMA-335 MethodDef RID - 1,
+//        matching IL2CPP runtime GetTokenRowId(token) - 1; D-M6)
 //     4. addressVa = module.methodPointers[localIdx] (read from file bytes)
 //     5. addressRva = addressVa - imageBase (skip if == 0 i.e. abstract /
 //        generic-only / inlined method)
@@ -33,6 +34,7 @@
 #pragma once
 
 #include "../../dll/src/il2cpp/MetadataParser.h"
+#include "../../dll/src/shared/MethodTokenIndex.h"
 #include "CodeGenModulesFinder.h"
 #include "PEParser.h"
 
@@ -65,16 +67,21 @@ struct ResolvedMethod {
 
 struct PipelineResult {
     // Stats — for the CLI to surface to the user.
-    std::size_t imagesTotal      = 0;
-    std::size_t imagesMatched    = 0;
-    std::size_t methodsTotal     = 0;
-    std::size_t methodsResolved  = 0;   // had a non-null methodPointers[] entry
-    std::size_t methodsNullPtr   = 0;   // null entry (abstract / generic / inlined)
-    std::size_t classesTotal     = 0;
+    std::size_t imagesTotal          = 0;
+    std::size_t imagesMatched        = 0;
+    std::size_t methodsTotal         = 0;
+    std::size_t methodsResolved      = 0;   // had a non-null methodPointers[] entry
+    std::size_t methodsNullPtr       = 0;   // null entry (abstract / generic / inlined)
+    std::size_t methodsIndexMismatch = 0;   // D-M6: token RID - 1 != (m.index - image.methodStart)
+    std::size_t classesTotal         = 0;
 
     std::vector<ResolvedClass>  classes;
     std::vector<ResolvedMethod> methods;
 };
+
+// D-M6: Re-exported from dll/src/shared/MethodTokenIndex.h for callers in
+// Discrete::Phase_D::Symbols (and shared with discrete_dll_test).
+using Discrete::Shared::ResolveMethodPointerIndex;
 
 // End-to-end resolve. `metadataPath` and `gaPath` are wide because
 // the CLI gets them as utf-8 argv → wide for CreateFileW. `errOut`

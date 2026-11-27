@@ -12,6 +12,28 @@ this file grows too large.
 
 -----
 
+## 2026-11-27 (build 1570) — Fix D-M4 + D-M5 + D-M6 + D-M7 (Rust release `+crt-static` & golden-hash build gates, `release.yml` draft/published guard, `metadata-cli` token-RID method indexing, pinned NuGet/SDK + locked-mode restores)
+
+- **Bug fixes (`D-M4`, `D-M5`, `D-M6`, `D-M7` — completes 100% of High & Medium audit findings across all 5 blocks A–E):**
+  - **`D-M4` (`build.ps1`, `dll/rust/src/metadata/tests.rs`, `tools/verify/r2_golden.json`):**
+    - Updated `Run-RustTests` in `build.ps1` to also run `cargo test --release --locked` with `CARGO_ENCODED_RUSTFLAGS=-Ctarget-feature=+crt-static` for both `x86_64-pc-windows-msvc` and `i686-pc-windows-msvc` in `Publish` mode (verifying unwinding and ABI under the exact shipping profile + static CRT).
+    - Reordered `-Target All` to run `Build-MetadataCli` before `Run-Tests` and added `Run-GoldenTests`: runs `metadata_golden.py` + `r2_golden.py` when fixtures are configured (`exit 1` = build failure, `exit 2` = warning), and runs `r2_golden.py --no-images` synthetic checks even when no game fixtures are present (e.g. CI).
+    - Updated `real_metadata_fixtures` (`dll/rust/src/metadata/tests.rs`) to emit `SKIPPED` to stderr when `DISCRETE_METADATA_FIXTURES` is unset/empty, and surfaced `Fixtures:` and `Golden:` status lines in `build.ps1`'s Build Summary.
+    - Rebaselined `rip-synthetic` in `tools/verify/r2_golden.json` for the `D-M1` unreadable-page recovery fix (all 4 other synthetic suites unchanged; 7/7 synthetic runs pass).
+  - **`D-M5` (`.github/workflows/release.yml`):**
+    - Hardened the `Create / update GitHub Release` step to inspect `gh release view $tag --json isDraft,body` first: refuses to overwrite an already-published release (`isDraft == false`), preserves maintainer-rewritten notes on existing drafts (uploading assets only), and checks `$LASTEXITCODE` on every `gh` invocation.
+  - **`D-M6` (`dll/src/shared/MethodTokenIndex.h`, `tools/metadata-cli/SymbolPipeline.{h,cpp}`, `tools/metadata-cli/main.cpp`, `dll/tests/dll_core_test.cpp`):**
+    - Switched `SymbolPipeline` `methodPointers[]` lookup from `m.index - image.methodStart` to ECMA-335 token RID `(m.token & 0x00FFFFFF) - 1` (rejecting RID 0 and overflow-safe slot bounds), matching IL2CPP's runtime `GetTokenRowId(method.token) - 1`.
+    - Added `PipelineResult::methodsIndexMismatch` comparing token-RID vs legacy offset formulas (printed to stderr in `CmdSymbols` when non-zero) and added `Test_DM6_MethodTokenPointerIndex` to `discrete_dll_test`.
+  - **`D-M7` (`ui/Directory.Build.props`, `ui/global.json`, `ui/UnityDumpUI/UnityDumpUI.csproj`, `ui/UnityDumpUI.Core/UnityDumpUI.Core.csproj`, `ui/UnityDumpUI.Tests/UnityDumpUI.Tests.csproj`, `build.ps1`, `.github/workflows/release.yml`, `ui/*/packages*.lock.json`):**
+    - Pinned `CommunityToolkit.Mvvm` (`8.4.2`), `xunit.v3` (`$(XunitV3Version)` = `3.2.2`), and `xunit.runner.visualstudio` (`3.1.5`).
+    - Enabled `RestorePackagesWithLockFile=true` with `RestoreLockedMode=true` on CI (`CI=true`), using `packages.aot.lock.json` when `PublishAot=true` and declaring `RuntimeIdentifiers=win-x64` on `UnityDumpUI.Core` so AOT publish, single-file publish, and `dotnet test` all pass locked restore cleanly without `NU1004`.
+    - Tightened `ui/global.json` to `10.0.404` with `rollForward: latestPatch`, updated `release.yml` `setup-dotnet` to `global-json-file: ui/global.json`, and made `build.ps1` run `dotnet --version` and `dotnet publish` from `ui/` so `ui/global.json` governs all .NET invocations.
+  - Marked `D-M4`, `D-M5`, `D-M6`, and `D-M7` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1570) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1229 passed (0 failed, 0 skipped, locked mode); Rust core dev tests 112 passed (x64) / 113 passed (i686) + release `+crt-static` tests 112 passed (x64) / 113 passed (i686); C++ `discrete_dll_test` 789 checks passed (x64) / 789 checks passed (x86); `r2_golden.py --no-images` 7/7 passed (5 matched golden, 0 failed).
+
+-----
+
 ## 2026-11-27 (build 1568) — Fix D-M1 + D-M2 + D-M3 (page-by-page readable-span fallback for Rust chain/xref scans, compile-time x64/x86 ABI layout checks for all 14 FFI structs, v38/v39 per-table stride/count validation + `tablesDegraded` + tests)
 
 - **Bug fixes (`D-M1`, `D-M2`, `D-M3`):**

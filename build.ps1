@@ -378,9 +378,28 @@ Write-Info "Clean:  $Clean"
 # %USERNAME% / %COMPUTERNAME% at run time, stores nothing, and redacts them in
 # its own output. Ported from UE5CEDumper's build.ps1.
 # ---------------------------------------------------------------------------
+function Resolve-PythonExe {
+    return (@('py','python','python3') | Where-Object { Get-Command $_ -ErrorAction SilentlyContinue } | Select-Object -First 1)
+}
+
+function Resolve-MetadataFixtures {
+    $localFixtures = Join-Path $RepoRoot 'tools\verify\fixtures.local.txt'
+    if (-not $env:DISCRETE_METADATA_FIXTURES -and (Test-Path $localFixtures)) {
+        $list = @(Get-Content $localFixtures | ForEach-Object { ($_ -split '#', 2)[0].Trim() } | Where-Object { $_ })
+        if ($list.Count -gt 0) {
+            $env:DISCRETE_METADATA_FIXTURES = ($list -join ';')
+        }
+    }
+    if (-not $env:DISCRETE_METADATA_FIXTURES) { return @() }
+    return @($env:DISCRETE_METADATA_FIXTURES -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
+$script:FixturesSummary = $null
+$script:GoldenSummary   = $null
+
 if (-not $NoIdentityCheck) {
     Write-Step 'Identity guard (account / machine name in tracked files)'
-    $py = @('py','python','python3') | Where-Object { Get-Command $_ -ErrorAction SilentlyContinue } | Select-Object -First 1
+    $py = Resolve-PythonExe
     if (-not $py) {
         Write-Fail 'no Python interpreter on PATH -- cannot run the identity guard (re-run with -NoIdentityCheck to skip deliberately)'
         exit 1
@@ -406,7 +425,10 @@ if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
     Write-Fail 'dotnet SDK not found in PATH'
     exit 1
 }
-Write-Info "dotnet: $(dotnet --version)"
+# Check dotnet --version from $UI_DIR so ui/global.json pins the reported SDK (D-M7).
+Push-Location $UI_DIR
+try     { Write-Info "dotnet: $(dotnet --version)" }
+finally { Pop-Location }
 
 if ($Target -in @('DLL','Test','ProxyDLL','MetadataCli','All')) {
     if (-not (Assert-RustToolchain)) { exit 1 }
@@ -594,31 +616,42 @@ function Build-Ui {
         # environment instead of its own vcvars discovery, and run a bare
         # `link`, which a coreutils link.exe ahead on PATH (Git's or MSYS2's
         # usr\bin) would answer; CppLinker names MSVC's by full path.
+        # Run from $UI_DIR so ui/global.json governs the .NET SDK version (D-M7).
         Write-Step 'Publishing UnityDumpUI (Native AOT, Release)'
-        & dotnet publish $UI_PROJ `
-            -c Release `
-            -r win-x64 `
-            -p:PublishAot=true `
-            -p:IlcUseEnvironmentalTools=true `
-            "-p:CppLinker=$msvcLink" `
-            -o $publishDir `
-            --nologo | Out-Host
+        Push-Location $UI_DIR
+        try {
+            & dotnet publish $UI_PROJ `
+                -c Release `
+                -r win-x64 `
+                -p:PublishAot=true `
+                -p:IlcUseEnvironmentalTools=true `
+                "-p:CppLinker=$msvcLink" `
+                -o $publishDir `
+                --nologo | Out-Host
+        } finally {
+            Pop-Location
+        }
     }
     else {
         # Self-contained single-file for Debug/Release iteration. The .NET
         # runtime is bundled (~96 MB) but no AOT compile step, so iteration
         # stays fast.
         Write-Step "Publishing UnityDumpUI ($csCfg, self-contained single-file)"
-        & dotnet publish $UI_PROJ `
-            -c $csCfg `
-            -r win-x64 `
-            --self-contained `
-            -p:PublishSingleFile=true `
-            -p:PublishAot=false `
-            -p:IncludeNativeLibrariesForSelfExtract=true `
-            -p:IncludeAllContentForSelfExtract=true `
-            -o $publishDir `
-            --nologo | Out-Host
+        Push-Location $UI_DIR
+        try {
+            & dotnet publish $UI_PROJ `
+                -c $csCfg `
+                -r win-x64 `
+                --self-contained `
+                -p:PublishSingleFile=true `
+                -p:PublishAot=false `
+                -p:IncludeNativeLibrariesForSelfExtract=true `
+                -p:IncludeAllContentForSelfExtract=true `
+                -o $publishDir `
+                --nologo | Out-Host
+        } finally {
+            Pop-Location
+        }
     }
     if ($LASTEXITCODE -ne 0) { Write-Fail 'UI publish failed'; return $false }
 
@@ -678,9 +711,10 @@ function Run-Tests {
     }
     $csOk = ($LASTEXITCODE -eq 0)
     if ($csOk) { Write-Ok 'All tests passed' } else { Write-Fail 'Tests failed' }
-    $rustOk = Run-RustTests
-    $cppOk  = Run-CppTests
-    return ($csOk -and $rustOk -and $cppOk)
+    $rustOk   = Run-RustTests
+    $cppOk    = Run-CppTests
+    $goldenOk = Run-GoldenTests
+    return ($csOk -and $rustOk -and $cppOk -and $goldenOk)
 }
 
 # Offline C++ DLL self-tests (dll/tests/dll_core_test.cpp), built and run on
@@ -749,13 +783,13 @@ function Run-CppTests {
 function Run-RustTests {
     Write-Banner 'Rust core tests  |  cargo test (x64 + x86)'
     $manifest = Join-Path $RepoRoot 'dll\rust\Cargo.toml'
-    $localFixtures = Join-Path $RepoRoot 'tools\verify\fixtures.local.txt'
-    if (-not $env:DISCRETE_METADATA_FIXTURES -and (Test-Path $localFixtures)) {
-        $list = Get-Content $localFixtures | ForEach-Object { ($_ -split '#', 2)[0].Trim() } | Where-Object { $_ }
-        if ($list) {
-            $env:DISCRETE_METADATA_FIXTURES = ($list -join ';')
-            Write-Info "Fixtures from tools\verify\fixtures.local.txt ($(@($list).Count))"
-        }
+    $fixtures = @(Resolve-MetadataFixtures)
+    if ($fixtures.Count -gt 0) {
+        Write-Info "Metadata fixtures configured: $($fixtures.Count)"
+        $script:FixturesSummary = "$($fixtures.Count) configured"
+    } else {
+        Write-Info 'real_metadata_fixtures: SKIPPED (no DISCRETE_METADATA_FIXTURES or tools\verify\fixtures.local.txt)'
+        $script:FixturesSummary = 'SKIPPED (no DISCRETE_METADATA_FIXTURES or fixtures.local.txt)'
     }
     foreach ($triple in @('x86_64-pc-windows-msvc', 'i686-pc-windows-msvc')) {
         Write-Step "cargo test --target $triple"
@@ -763,7 +797,110 @@ function Run-RustTests {
         if ($LASTEXITCODE -ne 0) { Write-Fail "Rust tests failed ($triple)"; return $false }
     }
     Write-Ok 'Rust tests passed (x64 + x86)'
+
+    # D-M4: In Publish mode, also verify the exact shipping profile + CRT
+    # combination (release + LTO + codegen-units=1 + static CRT /MT), which
+    # proves panic unwinding and ABI layout under the real release codegen.
+    if ($Mode -eq 'Publish') {
+        $hadEncoded  = Test-Path Env:CARGO_ENCODED_RUSTFLAGS
+        $prevEncoded = if ($hadEncoded) { $env:CARGO_ENCODED_RUSTFLAGS } else { $null }
+        $hadFlags    = Test-Path Env:RUSTFLAGS
+        $prevFlags   = if ($hadFlags) { $env:RUSTFLAGS } else { $null }
+        try {
+            if ($hadFlags) { Remove-Item Env:RUSTFLAGS }
+            $env:CARGO_ENCODED_RUSTFLAGS = '-Ctarget-feature=+crt-static'
+            foreach ($triple in @('x86_64-pc-windows-msvc', 'i686-pc-windows-msvc')) {
+                Write-Step "cargo test --release (+crt-static) --target $triple"
+                & cargo test --release --locked --manifest-path $manifest --target $triple --quiet | Out-Host
+                if ($LASTEXITCODE -ne 0) { Write-Fail "Rust release (+crt-static) tests failed ($triple)"; return $false }
+            }
+        } finally {
+            if ($hadEncoded) { $env:CARGO_ENCODED_RUSTFLAGS = $prevEncoded }
+            elseif (Test-Path Env:CARGO_ENCODED_RUSTFLAGS) { Remove-Item Env:CARGO_ENCODED_RUSTFLAGS }
+            if ($hadFlags) { $env:RUSTFLAGS = $prevFlags }
+        }
+        Write-Ok 'Rust release (+crt-static) tests passed (x64 + x86)'
+    }
     return $true
+}
+
+# D-M4: Golden-hash regression gate (metadata_golden.py + r2_golden.py).
+# Exit 0 = PASS, exit 1 = FAIL (fails build), exit 2 = WARN (no matching fixtures).
+# When no game fixtures are configured (e.g. CI), metadata_golden is skipped with a
+# warning and r2_golden still runs its deterministic --no-images synthetic suite.
+function Run-GoldenTests {
+    Write-Banner 'Golden-hash regression gate  |  metadata_golden + r2_golden'
+    $py = Resolve-PythonExe
+    if (-not $py) {
+        Write-Warning 'Golden scripts skipped: no Python interpreter on PATH'
+        $script:GoldenSummary = 'WARN (no Python on PATH)'
+        return $true
+    }
+
+    $cfg = if ($Mode -eq 'Debug') { 'Debug' } else { 'Release' }
+    $cliBinDir  = Join-Path $BUILD_DIR "cli-$($cfg.ToLower())\bin"
+    $hasMetaCli = Test-Path (Join-Path $cliBinDir 'metadata-cli.exe')
+    $hasR2Tools = (Test-Path (Join-Path $cliBinDir 'r2-dump.exe')) -and (Test-Path (Join-Path $cliBinDir 'xref-dump.exe'))
+    if (-not $hasMetaCli -and -not $hasR2Tools) {
+        Write-Info "Golden scripts skipped: harness binaries not built in $cliBinDir (run -Target MetadataCli or -Target All)"
+        $script:GoldenSummary = 'SKIPPED (harness binaries not built)'
+        return $true
+    }
+
+    $fixtures = @(Resolve-MetadataFixtures)
+    $notes = [System.Collections.Generic.List[string]]::new()
+    $allOk = $true
+
+    $runOne = {
+        param([string]$Label, [string]$ScriptRel, [string[]]$ExtraArgs)
+        $scriptPath = Join-Path $RepoRoot $ScriptRel
+        Write-Step "$Label ($ScriptRel)"
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            & $py -I $scriptPath @ExtraArgs | Out-Host
+            $code = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $prevEap
+        }
+        if ($code -eq 0) {
+            Write-Ok "$Label passed"
+            $notes.Add("${Label}: PASS")
+            return $true
+        }
+        if ($code -eq 2) {
+            Write-Warning "$Label returned exit 2 (no matching fixtures / setup warning)"
+            $notes.Add("${Label}: WARN (exit 2)")
+            return $true
+        }
+        Write-Fail "$Label failed (exit $code)"
+        $notes.Add("${Label}: FAIL (exit $code)")
+        return $false
+    }
+
+    if ($fixtures.Count -gt 0) {
+        if ($hasMetaCli) {
+            if (-not (& $runOne 'metadata_golden' 'tools\verify\metadata_golden.py' @('--cli-dir', $cliBinDir))) { $allOk = $false }
+        } else {
+            $notes.Add('metadata_golden: SKIPPED (metadata-cli.exe missing)')
+        }
+        if ($hasR2Tools) {
+            if (-not (& $runOne 'r2_golden' 'tools\verify\r2_golden.py' @('--cli-dir', $cliBinDir))) { $allOk = $false }
+        } else {
+            $notes.Add('r2_golden: SKIPPED (r2-dump/xref-dump missing)')
+        }
+    } else {
+        Write-Warning 'metadata_golden: SKIPPED (no DISCRETE_METADATA_FIXTURES or tools\verify\fixtures.local.txt)'
+        $notes.Add('metadata_golden: SKIPPED (no fixtures)')
+        if ($hasR2Tools) {
+            if (-not (& $runOne 'r2_golden (synthetic)' 'tools\verify\r2_golden.py' @('--no-images', '--cli-dir', $cliBinDir))) { $allOk = $false }
+        } else {
+            $notes.Add('r2_golden: SKIPPED (r2-dump/xref-dump missing)')
+        }
+    }
+
+    $script:GoldenSummary = $notes -join '; '
+    return $allOk
 }
 
 
@@ -899,8 +1036,8 @@ switch ($Target) {
     'All' {
         if (-not (Build-Dll))         { $exitCode = 1 }
         if (-not (Build-Ui))          { $exitCode = 1 }
-        if (-not (Run-Tests))         { $exitCode = 1 }
         if (-not (Build-MetadataCli)) { $exitCode = 1 }
+        if (-not (Run-Tests))         { $exitCode = 1 }
     }
 }
 
@@ -918,6 +1055,14 @@ Write-Host "  Backend: $Backend"  -ForegroundColor White
 Write-Host "  Arch:    $Arch"     -ForegroundColor White
 Write-Host "  Build#:  $buildNum" -ForegroundColor White
 Write-Host "  Time:    $($sw.Elapsed.ToString('mm\:ss\.ff'))" -ForegroundColor White
+if ($script:FixturesSummary) {
+    $fixColor = if ($script:FixturesSummary -like 'SKIPPED*') { 'Yellow' } else { 'Gray' }
+    Write-Host "  Fixtures: $($script:FixturesSummary)" -ForegroundColor $fixColor
+}
+if ($script:GoldenSummary) {
+    $gColor = if ($script:GoldenSummary -like '*FAIL*') { 'Red' } elseif ($script:GoldenSummary -like '*WARN*' -or $script:GoldenSummary -like '*SKIPPED*') { 'Yellow' } else { 'Green' }
+    Write-Host "  Golden:  $($script:GoldenSummary)" -ForegroundColor $gColor
+}
 
 $statusColor = if ($exitCode -eq 0) { 'Green' } else { 'Red' }
 $statusText  = if ($exitCode -eq 0) { 'SUCCESS' } else { 'FAILED' }

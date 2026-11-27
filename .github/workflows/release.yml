@@ -62,7 +62,7 @@ jobs:
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: '10.0.x'
+          global-json-file: ui/global.json
 
       - name: Pin build number to the tag
         if: startsWith(github.ref, 'refs/tags/')
@@ -163,18 +163,34 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = $env:GITHUB_REF_NAME
-          # Upsert: a tag pushed with `git push` has no release yet -> create a
-          # DRAFT; a tag created from the web release page already has one ->
-          # overwrite its notes and assets.
-          gh release view $tag *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release edit $tag --notes-file release-notes.md
+          # D-M5: Inspect any existing release before editing or uploading.
+          # Never clobber an already-published release (assets or notes), and
+          # never overwrite maintainer-rewritten notes on an existing draft.
+          $existingJson = gh release view $tag --json isDraft,body 2>$null
+          if ($LASTEXITCODE -eq 0 -and $existingJson) {
+            $existing = $existingJson | ConvertFrom-Json
+            if (-not $existing.isDraft) {
+              throw "Release $tag is already published; refusing to overwrite published notes or assets. Delete + re-tag (or cut a new tag) instead."
+            }
+            $body = [string]$existing.body
+            $isGeneratedTemplate = [string]::IsNullOrWhiteSpace($body) -or
+              ($body -match '(?m)^## Changes( since .+)?\r?$' -and
+               $body -match 'Self-contained Windows build \(Native AOT\)\.')
+            if ($isGeneratedTemplate) {
+              gh release edit $tag --notes-file release-notes.md
+              if ($LASTEXITCODE -ne 0) { throw "gh release edit failed for draft $tag" }
+              Write-Host "Draft release $tag had empty/workflow-generated notes; updated notes."
+            } else {
+              Write-Host "Draft release $tag has custom maintainer notes; preserving notes and uploading assets only."
+            }
             gh release upload $tag "$env:ZIP" "$env:ZIP.sha256" --clobber
-            Write-Host "Release $tag already existed, overwrote notes + uploaded assets."
+            if ($LASTEXITCODE -ne 0) { throw "gh release upload failed for draft $tag" }
+            Write-Host "Uploaded assets to draft release $tag."
           } else {
             gh release create $tag "$env:ZIP" "$env:ZIP.sha256" `
               --draft `
               --title "Discrete $tag" `
               --notes-file release-notes.md
+            if ($LASTEXITCODE -ne 0) { throw "gh release create failed for $tag" }
             Write-Host "Created DRAFT release $tag. Review the assets, then Publish (or delete + re-tag)."
           }
