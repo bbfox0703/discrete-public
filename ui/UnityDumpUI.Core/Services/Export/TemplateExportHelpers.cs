@@ -7,6 +7,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityDumpUI.Core.Services;
@@ -257,5 +258,59 @@ internal static class TemplateExportHelpers
             return null;
         }
         return (result is not null && string.IsNullOrEmpty(result.Error)) ? result : null;
+    }
+
+    /// <summary>
+    /// E-L6: XML 1.0-safe escaping shared by <see cref="CeXmlExporter"/> and
+    /// <see cref="CsxExporter"/>. Escapes XML syntax characters and replaces
+    /// characters forbidden by XML 1.0 (control characters &lt; 0x20 except
+    /// TAB/LF/CR, unpaired UTF-16 surrogates, and non-characters 0xFFFE/0xFFFF)
+    /// with printable <c>\uXXXX</c> sequences so CE's XML parser never rejects
+    /// a table containing obfuscated type names or live game strings.
+    /// </summary>
+    public static string XmlEscape(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return string.Empty;
+        var sb = new StringBuilder(s.Length);
+        for (int i = 0; i < s.Length; ++i)
+        {
+            char c = s[i];
+            switch (c)
+            {
+            case '<':  sb.Append("&lt;");   break;
+            case '>':  sb.Append("&gt;");   break;
+            case '&':  sb.Append("&amp;");  break;
+            case '"':  sb.Append("&quot;"); break;
+            case '\'': sb.Append("&apos;"); break;
+            case '\t':
+            case '\n':
+            case '\r':
+                sb.Append(c);
+                break;
+            default:
+                if (char.IsHighSurrogate(c))
+                {
+                    if (i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
+                    {
+                        sb.Append(c);
+                        sb.Append(s[++i]);
+                    }
+                    else
+                    {
+                        sb.Append("\\u").Append(((int)c).ToString("X4"));
+                    }
+                }
+                else if (char.IsLowSurrogate(c) || c < 0x20 || c == 0xFFFE || c == 0xFFFF)
+                {
+                    sb.Append("\\u").Append(((int)c).ToString("X4"));
+                }
+                else
+                {
+                    sb.Append(c);
+                }
+                break;
+            }
+        }
+        return sb.ToString();
     }
 }

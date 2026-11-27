@@ -342,8 +342,7 @@ public static class AobAaScriptGenerator
         {
             sb.AppendLine("if not _G.discrete_bridgeLoaded then");
             sb.AppendLine("  _G.DISCRETE_HAD_ERROR = true");
-            sb.AppendLine("  print('[Discrete] Enable \"Load Discrete Bridge\" first (Mono JIT methods resolve via the bridge)')");
-            sb.AppendLine("  return");
+            sb.AppendLine("  error('[Discrete] Enable \"Load Discrete Bridge\" first (Mono JIT methods resolve via the bridge)')");
             sb.AppendLine("end");
             // Self-load registerMethodSymbol from the CT (the Create-AA action
             // embedded unity_symbols.lua alongside this entry).
@@ -382,6 +381,10 @@ public static class AobAaScriptGenerator
         {
             sb.AppendLine("{$lua}");
             sb.AppendLine("if syntaxcheck then return end");
+            // E-L1: reset the shared did-anything-fail flag on [DISABLE] too so
+            // a prior failed [ENABLE] does not keep CE's Lua Engine stuck open
+            // on subsequent clean disables (docs/lua-logging.md).
+            AaLuaLoader.AppendHadErrorReset(sb);
             for (int i = 0; i < overloads.Count; ++i)
             {
                 // Mono JIT: symbol registered via registerMethodSymbol; offset

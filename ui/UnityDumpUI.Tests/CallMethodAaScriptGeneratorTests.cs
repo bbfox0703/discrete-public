@@ -33,14 +33,11 @@ public class CallMethodAaScriptGeneratorTests
         Assert.True(s.IndexOf("[ENABLE]", StringComparison.Ordinal)
                   < s.IndexOf("[DISABLE]", StringComparison.Ordinal));
 
-        // Bridge-loaded guard — every generated script aborts with a
-        // clear message when the user hasn't enabled Load Discrete
-        // Bridge first.
+        // Bridge-loaded guard — E-L2: aborts via error() so CE rejects enabling
+        // the checkbox instead of ticking it enabled on precondition failure.
         Assert.Contains("if not _G.discrete_bridgeLoaded then", s);
-        // Lua uses literal double-quotes inside the single-quoted print
-        // — no backslash escape needed in the rendered output.
-        Assert.Contains("Enable \"Load Discrete Bridge\" first", s);
-        Assert.Contains("return", s);
+        Assert.Contains("error('[Discrete] Enable \"Load Discrete Bridge\" first')", s);
+        Assert.Contains("error('[Discrete] unity_invoke.lua missing from CT", s);
 
         // Action-driven: the AA self-loads its lua dependency from the CT
         // (the Send-to-CE-Table action embedded unity_invoke.lua), guarded on
@@ -244,5 +241,52 @@ public class CallMethodAaScriptGeneratorTests
         Assert.DoesNotMatch(bugPattern, s2);
         // Sanity: the EscapeSq path did produce a `\'` form.
         Assert.Contains(@"can\'t won\'t", s2);
+    }
+
+    [Fact]
+    public void Build_StringArgWithNulFollowedByDigits_EmitsThreeDigitEscape()
+    {
+        // E-L3: Lua \ddd reads up to 3 decimal digits, so "\0" + "12" must be
+        // escaped as \00012 (NUL + "12"), never \012 (form feed).
+        string s = CallMethodAaScriptGenerator.Build(
+            "asm", "", "C", "M", null, null,
+            new[] { new CallMethodArg { TypeName = "System.String", ValueText = "a\012" } });
+        Assert.Contains(@"argString('a\00012')", s);
+    }
+
+    [Theory]
+    [InlineData("System.Single", "NaN",       "argFloat(0/0)")]
+    [InlineData("System.Single", "Infinity",  "argFloat(1/0)")]
+    [InlineData("System.Single", "-Infinity", "argFloat(-1/0)")]
+    [InlineData("System.Double", "NaN",       "argDouble(0/0)")]
+    [InlineData("System.Double", "Infinity",  "argDouble(1/0)")]
+    [InlineData("System.Double", "-Infinity", "argDouble(-1/0)")]
+    public void Build_NonFiniteFloatOrDouble_EmitsValidLuaDivisionExpression(
+        string clrType, string raw, string expected)
+    {
+        // E-L3: bare NaN/Infinity evaluate to nil in Lua; emit 0/0, 1/0, -1/0.
+        string s = CallMethodAaScriptGenerator.Build(
+            "asm", "", "C", "M", null, null,
+            new[] { new CallMethodArg { TypeName = clrType, ValueText = raw } });
+        Assert.Contains(expected, s);
+    }
+
+    [Theory]
+    [InlineData("System.Boolean", "notabool")]
+    [InlineData("System.Int32",   "abc")]
+    [InlineData("System.UInt32",  "-5")]
+    [InlineData("System.Int64",   "nope")]
+    [InlineData("System.UInt64",  "nope")]
+    [InlineData("System.Single",  "xyz")]
+    [InlineData("System.Double",  "xyz")]
+    [InlineData("System.Char",    "too_long")]
+    public void Build_InvalidNumericOrBoolOrCharArg_ThrowsInsteadOfSilentlyEmittingZero(
+        string clrType, string badRaw)
+    {
+        // E-L3: unparseable scalar input must throw so MethodCallViewModel shows
+        // an error rather than emitting a script that calls the method with 0.
+        Assert.Throws<ArgumentException>(() => CallMethodAaScriptGenerator.Build(
+            "asm", "", "C", "M", null, null,
+            new[] { new CallMethodArg { TypeName = clrType, ValueText = badRaw } }));
     }
 }

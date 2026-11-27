@@ -812,17 +812,17 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 
 ### Low
 
-**E-L1 · `AobAaScriptGenerator` 的 `[DISABLE] {$lua}` 沒有重設 `_G.DISCRETE_HAD_ERROR`**
+**E-L1 · `AobAaScriptGenerator` 的 `[DISABLE] {$lua}` 沒有重設 `_G.DISCRETE_HAD_ERROR` — ✅ FIXED (2026-11-27)**
 - 位置：`ui/UnityDumpUI.Core/Services/Export/AobAaScriptGenerator.cs:381-397`；對照 `MonoRegisterSymbolAaScriptGenerator.cs:180-189`（已寫明原因並補上）
 - 成因：違反 `docs/lua-logging.md` 與 `AaLuaLoader.AppendHadErrorReset` 的「每個 [ENABLE] / [DISABLE] 都要重設」約定。只要之前有一次 [ENABLE] 失敗，之後每次 disable 都會讀到殘留的 `true`，Lua Engine 就一直不會關閉。
 - 修法：在 `if syntaxcheck then return end` 之後呼叫 `AaLuaLoader.AppendHadErrorReset(sb)`。
 
-**E-L2 · 產生的 AA 在前置條件失敗時用 `print + return`，CE 仍會把該項目勾成「已啟用」**
+**E-L2 · 產生的 AA 在前置條件失敗時用 `print + return`，CE 仍會把該項目勾成「已啟用」 — ✅ FIXED (2026-11-27)**
 - 位置：`AaLuaLoader.cs:33-37`、`:43-47`；`MonoRegisterSymbolAaScriptGenerator.cs:105-110`、`:115-119`；`AobAaScriptGenerator.cs:343-347`；`AddressLookupAaScriptGenerator.cs:112-116`；`CallMethodAaScriptGenerator.cs:166-171`
 - 成因：`{$lua}` 區塊 `return nil` 不會讓 AA 失敗，checkbox 照樣打勾，但 symbol 根本沒有註冊；相依於這個 symbol 的其他腳本之後才會失敗，看不出根因。`AddressLookup` 的 bridge 檢查更是多餘：它的 `{$asm}`（`alloc` / `dq`）完全不需要 bridge，卻要求先載入 bridge，並在沒有載入時把旗標設成錯誤。
 - 修法：前置條件失敗時改用 `error('[Discrete] ...')`，讓 CE 拒絕啟用（錯誤訊息仍會顯示）；`AddressLookup` 移除 bridge 檢查。
 
-**E-L3 · `CallMethodAaScriptGenerator` 的參數字面值邊界**
+**E-L3 · `CallMethodAaScriptGenerator` 的參數字面值邊界 — ✅ FIXED (2026-11-27)**
 - 位置：`CallMethodAaScriptGenerator.cs:265`（`'\0'` → `"\\0"`）、`:200-203`、`:191-198`
 - 成因：(a) Lua 的 `\ddd` 會讀取最多 3 位十進位數字，NUL 後面若緊接數字字元（例如 `"a\0" + "12"`），就會變成 `\012`（換行字元）；(b) `double.TryParse` 接受 `NaN` / `Infinity`，`ToString("R")` 輸出的 `NaN` / `Infinity` 在 Lua 中是未定義的全域變數，會變成 `argFloat(nil)`；(c) 數值解析失敗時靜默代入 0，例如使用者在 Int32 欄位輸入 `abc`，產生的腳本會以 0 呼叫 method。
 - 修法：NUL 改成 `\000`；非有限值輸出 `0/0`、`1/0`、`-1/0`；解析失敗時 `Build` 直接丟出例外（或回傳錯誤）給 VM 顯示，不要產生腳本。
@@ -837,7 +837,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：CE 的 variable type 只有 `Byte` / `2 Bytes` / `4 Bytes` / `8 Bytes` / `Float` / `Double` / `String` / `Array of byte` 等固定名稱。`Vector3` 等 value type 在 template 模式會被輸出成一個未知型別的 leaf，CE 可能以預設型別讀取，或拒絕載入整筆 entry。
 - 修法：value struct 改成展開為 x / y / z 的 `Float` 子項（live 模式已經這樣做），或輸出 `Array of byte` 加上 `<ByteLength>`。
 
-**E-L6 · XML 跳脫沒有過濾 XML 1.0 不允許的控制字元**
+**E-L6 · XML 跳脫沒有過濾 XML 1.0 不允許的控制字元 — ✅ FIXED (2026-11-27)**
 - 位置：`CeXmlExporter.cs:648-664`、`CsxExporter.cs:392-408`
 - 成因：混淆過的 IL2CPP 名稱，或 live 模式描述中附帶的 `f.String` 值（`Live.cs:101-102`、`:1042-1043`，也就是遊戲中的字串內容），可能含有 `\u0001`、孤立的 surrogate 等字元。這類字元會讓 CE 的 XML parser 拒絕整份表格。
 - 修法：`< 0x20`（tab / LF / CR 除外）與孤立的 surrogate 一律替換成 `?` 或 `\uXXXX` 文字。
@@ -847,7 +847,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：兩支腳本各自維護一份 parser，修補的程度也不同（`unity_invoke.lua` 已經處理了大部分轉義，`unity_symbols.lua` 沒有）。
 - 修法：抽出一份共用的 JSON 小模組（例如放進 `utils.lua` 或成為獨立的 embedded 檔案），兩支腳本共用；至少讓 `unity_symbols.lua` 的 `rpc` 在 `resp == nil` 時給出明確的錯誤。
 
-**E-L8 · 錯誤只在 DEBUG 時才輸出，違反 lua-logging「錯誤一律輸出」的規則**
+**E-L8 · 錯誤只在 DEBUG 時才輸出，違反 lua-logging「錯誤一律輸出」的規則 — ✅ FIXED (2026-11-27)**
 - 位置：`scripts/unity_dump.lua:92-102`（`discreteShutdown` 失敗只呼叫 `U.warn`，受 DEBUG 控制）、`BootstrapAaScriptGenerator.cs:245-251`（`pcall(discreteShutdown)` 的回傳值被丟掉）；`scripts/unity_symbols.lua:412-419`（`sigFilter` 命中多個 overload 時只有 `warn`，然後註冊第一個）
 - 成因：`Discrete_Shutdown` 逾時或失敗時，[DISABLE] 會清掉 `discrete_bridgeLoaded` 並靜默關閉 Lua Engine，使用者以為 pipe 已經停止；選錯 overload 也不會有任何提示。
 - 修法：這兩處都改用 `U.err` / `err`；bootstrap 的 [DISABLE] 檢查 `discreteShutdown()` 的回傳值，失敗時設定 `DISCRETE_HAD_ERROR`。

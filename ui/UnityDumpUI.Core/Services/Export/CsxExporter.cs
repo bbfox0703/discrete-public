@@ -618,21 +618,5 @@ public static class CsxExporter
         };
     }
 
-    private static string XmlEscape(string s)
-    {
-        var sb = new StringBuilder(s.Length);
-        foreach (char c in s)
-        {
-            sb.Append(c switch
-            {
-                '<'  => "&lt;",
-                '>'  => "&gt;",
-                '&'  => "&amp;",
-                '"'  => "&quot;",
-                '\'' => "&apos;",
-                _    => c.ToString(),
-            });
-        }
-        return sb.ToString();
-    }
+    private static string XmlEscape(string s) => TemplateExportHelpers.XmlEscape(s);
 }

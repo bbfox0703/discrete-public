@@ -531,17 +531,18 @@ function registerMethodSymbol(symbolName, assembly, ns, className, methodName, s
         return false
     end
 
-    -- Pick the first compiled overload. Multiple matches with a non-
-    -- empty sigFilter usually means the filter wasn't unique — log
-    -- both addresses so the user can tighten it. With nil filter,
-    -- the first match is by design.
+    -- E-L8: Multiple matches with a non-empty sigFilter means the filter was
+    -- ambiguous — always surface via err() (unconditional, sets
+    -- DISCRETE_HAD_ERROR) and refuse to silently pick the first overload.
+    -- With nil/empty filter, the first compiled match is by design.
     if #r.matches > 1 and sigFilter and sigFilter ~= "" then
-        warn("%s: sigFilter '%s' matched %d overloads; using first.",
+        err("%s: sigFilter '%s' is ambiguous — matched %d overloads (refusing to pick first):",
             symbolName, sigFilter, #r.matches)
         for i, m in ipairs(r.matches) do
-            warn("  [%d] %s%s  @ %s", i, methodName,
+            err("  [%d] %s%s  @ %s", i, methodName,
                 m.signature or "", tostring(m.address))
         end
+        return false
     end
 
     for _, m in ipairs(r.matches) do

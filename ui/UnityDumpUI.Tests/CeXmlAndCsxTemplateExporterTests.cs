@@ -562,4 +562,49 @@ public class CeXmlAndCsxTemplateExporterTests
             Assert.Null(e.Element("Structure"));
         });
     }
+
+    // ---- 6. E-L6: XML 1.0 control characters & unpaired surrogates
+
+    [Fact]
+    public async Task CeXml_And_Csx_SanitizeInvalidXml10ControlCharsAndUnpairedSurrogates()
+    {
+        // E-L6: obfuscated IL2CPP identifiers or live string previews may contain
+        // XML-1.0-illegal chars (< 0x20 except TAB/LF/CR, lone surrogates, 0xFFFE/0xFFFF).
+        // Both exporters must sanitize them so CE's XML parser (and XDocument.Parse)
+        // accepts the output while preserving valid CJK, tabs, and emoji surrogate pairs.
+        string badName = "Obf\u0001\u0000\u001F_\uD800_\uDC00_\uFFFE_\uFFFF_合法\t😀";
+        var root = new GetClassInfoResult
+        {
+            Namespace = "Game\u0002Ns",
+            Name      = badName,
+            Fields    = new List<FieldEntry>
+            {
+                F("fld\u0007_\uD83D", "System.Int32", 0x10),
+            },
+        };
+
+        var opts = ExportOptions.Defaults with { LiveData = false, PointerSize = 8 };
+
+        string xml = await CeXmlExporter.RenderAsync(
+            "INSTANCE_ADDRESS", root, ancestors: null, "Assembly-CSharp", opts, lookup: null,
+            TestContext.Current.CancellationToken);
+        var xmlDoc = XDocument.Parse(xml); // throws XmlException if any illegal char leaked
+        Assert.Contains("\\u0001", xml);
+        Assert.Contains("\\u0000", xml);
+        Assert.Contains("\\uD800", xml);
+        Assert.Contains("\\uDC00", xml);
+        Assert.Contains("\\uFFFE", xml);
+        Assert.Contains("\\uFFFF", xml);
+        Assert.Contains("合法\t😀", xml);
+        Assert.NotNull(xmlDoc.Root);
+
+        string csx = await CsxExporter.RenderAsync(
+            root, ancestors: null, "Assembly-CSharp", opts, lookup: null,
+            TestContext.Current.CancellationToken);
+        var csxDoc = XDocument.Parse(csx);
+        Assert.Contains("\\u0001", csx);
+        Assert.Contains("\\uD800", csx);
+        Assert.Contains("合法\t😀", csx);
+        Assert.NotNull(csxDoc.Root);
+    }
 }

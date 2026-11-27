@@ -106,9 +106,8 @@ public static class MonoRegisterSymbolAaScriptGenerator
         sb.Append("  local f = findTableFile('").Append(HelpersFileName).AppendLine("')");
         sb.AppendLine("  if not f then");
         sb.AppendLine("    _G.DISCRETE_HAD_ERROR = true");
-        sb.Append("    print('[discrete] ").Append(HelpersFileName).AppendLine(" missing from CT.')");
-        sb.AppendLine("    print('[discrete] Run DiscreteUI -> Tools -> Inject Discrete Bridge into CE Table first.')");
-        sb.AppendLine("    return");
+        sb.Append("    error('[Discrete] ").Append(HelpersFileName)
+          .AppendLine(" missing from CT. Run DiscreteUI -> Tools -> Inject Discrete Bridge into CE Table first.')");
         sb.AppendLine("  end");
         sb.AppendLine("  local ss = createStringStream()");
         sb.AppendLine("  ss.copyFrom(f.Stream, f.Stream.Size)");
@@ -116,8 +115,8 @@ public static class MonoRegisterSymbolAaScriptGenerator
         sb.AppendLine("  ss.destroy()");
         sb.AppendLine("  if not chunk then");
         sb.AppendLine("    _G.DISCRETE_HAD_ERROR = true");
-        sb.Append("    print('[discrete] parse error in ").Append(HelpersFileName).AppendLine(": ' .. tostring(err))");
-        sb.AppendLine("    return");
+        sb.Append("    error('[Discrete] parse error in ").Append(HelpersFileName)
+          .AppendLine(": ' .. tostring(err))");
         sb.AppendLine("  end");
         sb.AppendLine("  chunk()");
         sb.AppendLine("end");

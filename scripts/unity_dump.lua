@@ -97,7 +97,7 @@ function discreteShutdown()
         U.log("DLL shut down — pipe stopped, hooks removed (still mapped).")
         return true
     end
-    U.warn("discreteShutdown failed: %s", tostring(err))
+    U.err("discreteShutdown failed: %s", tostring(err))
     return false
 end
 

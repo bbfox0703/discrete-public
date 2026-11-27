@@ -276,4 +276,18 @@ public class BootstrapAaScriptGeneratorTests
         Assert.Contains("pcall(U.pipeRpcRaw,", script);
         Assert.Contains(", 5000)", script);
     }
+
+    [Fact]
+    public void Build_Disable_ChecksDiscreteShutdownReturnAndFlagsHadError()
+    {
+        // E-L8: [DISABLE] must check pcall(discreteShutdown)'s ok and return value
+        // and set _G.DISCRETE_HAD_ERROR = true on failure so Lua Engine stays open.
+        string script = BootstrapAaScriptGenerator.Build();
+        int disableIdx = script.IndexOf("[DISABLE]", StringComparison.Ordinal);
+        string disableBlock = script.Substring(disableIdx);
+
+        Assert.Contains("local ok, res = pcall(discreteShutdown)", disableBlock);
+        Assert.Contains("if not ok or res == false then", disableBlock);
+        Assert.Contains("discreteShutdown() failed", disableBlock);
+    }
 }

@@ -12,6 +12,29 @@ this file grows too large.
 
 -----
 
+## 2026-11-27 (build 1571) — Fix E-L1 + E-L2 + E-L3 + E-L6 + E-L8 (AA error()/HAD_ERROR/literal hardening, XML 1.0 control-char escaping, unconditional Lua error reporting + tests)
+
+- **Branch milestone:** Merged all High & Medium audit fixes from `dev` into `main` via PR #3 (`143154b`).
+- **Bug fixes (`E-L1`, `E-L2`, `E-L3`, `E-L6`, `E-L8`):**
+  - **`E-L1` (`ui/UnityDumpUI.Core/Services/Export/AobAaScriptGenerator.cs`):**
+    - Added `AaLuaLoader.AppendHadErrorReset(sb)` to `[DISABLE] {$lua}` so a prior failed `[ENABLE]` does not keep CE's Lua Engine open on subsequent clean disables.
+  - **`E-L2` (`AaLuaLoader.cs`, `AobAaScriptGenerator.cs`, `MonoRegisterSymbolAaScriptGenerator.cs`, `CallMethodAaScriptGenerator.cs`, `AddressLookupAaScriptGenerator.cs`):**
+    - Replaced `print + return` with `error('[Discrete] ...')` (keeping `_G.DISCRETE_HAD_ERROR = true`) on AA precondition failures (missing CT Lua file, parse error, bridge not loaded) so Cheat Engine rejects enabling the entry instead of ticking its checkbox.
+    - Removed the unnecessary Lua bridge check from `AddressLookupAaScriptGenerator` (pure `{$asm}` `alloc`/`registersymbol`/`dq` needs no bridge and never pops Lua Engine).
+  - **`E-L3` (`ui/UnityDumpUI.Core/Services/Export/CallMethodAaScriptGenerator.cs`):**
+    - Escaped embedded NUL in Lua single-quoted strings as `\000` (3 decimal digits) so adjacent digits cannot form `\012` etc.
+    - Emitted `0/0`, `1/0`, `-1/0` for `NaN`/`Infinity`/`-Infinity` float/double arguments instead of bare undefined Lua globals.
+    - Threw `ArgumentException` on unparseable boolean/integer/float/char argument strings (caught and surfaced by `MethodCallViewModel`) instead of silently substituting `0`.
+  - **`E-L6` (`TemplateExportHelpers.cs`, `CeXmlExporter.cs`, `CsxExporter.cs`):**
+    - Unified XML escaping in `TemplateExportHelpers.XmlEscape`, sanitizing XML 1.0 illegal control characters (`< 0x20` except `\t`/`\n`/`\r`), unpaired UTF-16 surrogates, and `0xFFFE`/`0xFFFF` as `\uXXXX` while preserving valid CJK and surrogate-pair emoji.
+  - **`E-L8` (`scripts/unity_dump.lua`, `scripts/unity_symbols.lua`, `BootstrapAaScriptGenerator.cs`):**
+    - Upgraded `discreteShutdown` failure logging from `U.warn` to unconditional `U.err`, checked `pcall(discreteShutdown)`'s return value in `BootstrapAaScriptGenerator` `[DISABLE]` (flagging `_G.DISCRETE_HAD_ERROR = true` on failure), and changed `registerMethodSymbol`'s ambiguous `sigFilter` branch to report via `err()` and return `false` instead of silently picking the first overload.
+  - **Tests:** Added 19 new xUnit tests across `AobAaScriptGeneratorTests`, `AddressLookupAaScriptGeneratorTests`, `CallMethodAaScriptGeneratorTests`, `BootstrapAaScriptGeneratorTests`, `MonoRegisterSymbolAaScriptGeneratorTests`, `CeXmlAndCsxTemplateExporterTests`, and `BridgeLuaResourcesTests`; verified Lua syntax with `lua.EXE`.
+  - Marked `E-L1`, `E-L2`, `E-L3`, `E-L6`, and `E-L8` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1571) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1248 passed (0 failed, 0 skipped, locked mode); Rust core dev 112/113 + release `+crt-static` 112/113 passed; C++ `discrete_dll_test` 789 passed (x64) / 789 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
 ## 2026-11-27 (build 1570) — Fix D-M4 + D-M5 + D-M6 + D-M7 (Rust release `+crt-static` & golden-hash build gates, `release.yml` draft/published guard, `metadata-cli` token-RID method indexing, pinned NuGet/SDK + locked-mode restores)
 
 - **Bug fixes (`D-M4`, `D-M5`, `D-M6`, `D-M7` — completes 100% of High & Medium audit findings across all 5 blocks A–E):**

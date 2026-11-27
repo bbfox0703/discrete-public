@@ -351,4 +351,23 @@ public class AobAaScriptGeneratorTests
         Assert.DoesNotContain("WARNING:", s);
         Assert.DoesNotContain("verified unique", s);
     }
+
+    [Fact]
+    public void Build_DisableLuaBlock_ResetsHadErrorFlag_AndBridgeGuardUsesError()
+    {
+        // E-L1: [DISABLE] {$lua} must reset _G.DISCRETE_HAD_ERROR = false so a
+        // prior failed [ENABLE] does not keep CE's Lua Engine open on disable.
+        // E-L2: Mono JIT precondition failure must call error() so CE rejects
+        // ticking the checkbox enabled.
+        string s = AobAaScriptGenerator.Build(new[] { MonoJitOverload() });
+
+        int disableIdx = s.IndexOf("[DISABLE]", StringComparison.Ordinal);
+        Assert.True(disableIdx > 0);
+        string enableBlock  = s.Substring(0, disableIdx);
+        string disableBlock = s.Substring(disableIdx);
+
+        Assert.Contains("error('[Discrete] Enable \"Load Discrete Bridge\" first", enableBlock);
+        Assert.Contains("error('[Discrete] unity_symbols.lua missing from CT", enableBlock);
+        Assert.Contains("_G.DISCRETE_HAD_ERROR = false", disableBlock);
+    }
 }

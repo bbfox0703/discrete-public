@@ -255,7 +255,12 @@ _G.DISCRETE_HAD_ERROR = false
 -- discreteShutdown() is defined by unity_dump.lua (core), so it's present
 -- whenever the bridge loaded.
 if type(discreteShutdown) == 'function' then
-  pcall(discreteShutdown)
+  local ok, res = pcall(discreteShutdown)
+  if not ok or res == false then
+    _G.DISCRETE_HAD_ERROR = true
+    print('[Discrete] __ENTRY_DESCRIPTION__: discreteShutdown() failed — '
+          .. tostring(ok and 'DLL teardown returned false' or res))
+  end
 else
   -- Missing discreteShutdown is a failure worth surfacing: flag it + print.
   _G.DISCRETE_HAD_ERROR = true
