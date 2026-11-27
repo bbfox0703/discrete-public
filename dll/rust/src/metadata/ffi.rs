@@ -346,6 +346,20 @@ pub unsafe extern "C" fn dc_md_tables_degraded(md: *const DcMetadata) -> i32 {
     })
 }
 
+/// D-L2: returns 1 when the loaded metadata version has a supported
+/// TypeDefinition table layout (v24/27/29/31-39), 0 for strings-only versions
+/// (v16-23/25/26/28/30) or an unloaded/NULL handle.
+///
+/// # Safety
+/// `md` must be NULL or a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dc_md_type_tables_supported(md: *const DcMetadata) -> i32 {
+    guard("dc_md_type_tables_supported", 0, || {
+        // SAFETY: caller contract.
+        unsafe { parser(md) }.map_or(0, |p| i32::from(p.type_tables_supported()))
+    })
+}
+
 /// # Safety
 /// `md` must be NULL or a live handle.
 #[unsafe(no_mangle)]

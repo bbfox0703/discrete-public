@@ -6653,8 +6653,9 @@ void RegisterCoreHandlers() {
             ++scanned;
         }
         json out = buildStatsJson(s);
-        out["scope"]              = "all_assemblies";
-        out["assemblies_scanned"] = scanned;
+        out["scope"]               = "all_assemblies";
+        out["assemblies_scanned"]  = scanned;
+        out["typeTablesSupported"] = true;
         return out;
     });
 
@@ -8741,6 +8742,7 @@ void RegisterCoreHandlers() {
         json out = buildStatsJson(s);
         out["scope"] = "metadata_all";
         out["tablesDegraded"] = mp.tablesDegraded();
+        out["typeTablesSupported"] = mp.typeTablesSupported();
         return out;
     });
 

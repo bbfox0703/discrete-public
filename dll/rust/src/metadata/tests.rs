@@ -1473,3 +1473,202 @@ fn long_paths_are_not_rewritten_to_verbatim_form() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn version_type_tables_supported_and_split_warnings() {
+    // SAFETY: capture_sink is a valid 'static function.
+    unsafe { crate::ffi::dc_core_set_log_sink(Some(capture_sink)) };
+
+    // Strings-only versions (e.g. v23, v30): loaded, type_tables_supported == false,
+    // and the log explicitly reports strings-only instead of claiming v31 layout.
+    for v in [23, 30] {
+        let mut f = v29_file();
+        put_i32(&mut f, 4, v);
+        let p = Parser::load_from_bytes(f.clone());
+        assert!(p.loaded(), "v{v} should load strings-only");
+        assert!(!p.type_tables_supported(), "v{v} has no type tables");
+        assert_eq!(p.type_definition_count(), 0);
+        assert_eq!(p.get_string_literal(0), Some(&b"abc"[..]));
+
+        let path = temp_file(&format!("v{v}_strings_only.dat"), &f);
+        let w = wide(&path);
+        // SAFETY: valid UTF-16 path; handle freed before removing file.
+        unsafe {
+            let md = dc_md_load_path_w(w.as_ptr(), w.len());
+            assert_eq!(dc_md_loaded(md), 1);
+            assert_eq!(dc_md_type_tables_supported(md), 0);
+            assert_eq!(dc_md_type_tables_supported(std::ptr::null()), 0);
+            dc_md_free(md);
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    // Unverified v32 uses v31 layout with an explicit unverified soft warning
+    // and reports type_tables_supported() == true.
+    let mut f32 = v29_file();
+    put_i32(&mut f32, 4, 32);
+    let p32 = Parser::load_from_bytes(f32);
+    assert!(p32.loaded());
+    assert!(p32.type_tables_supported());
+    assert_eq!(p32.type_definition_count(), 2);
+
+    // Verified v29 reports type_tables_supported() == true.
+    let p29 = Parser::load_from_bytes(v29_file());
+    assert!(p29.type_tables_supported());
+
+    let lines = LOG_LINES.lock().unwrap().clone();
+    assert!(
+        lines.iter().any(|l| l.contains("version 23 is strings-only")),
+        "expected strings-only warning for v23"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("version 30 is strings-only")),
+        "expected strings-only warning for v30"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("version 32 is unverified — parsing with v31 layout")),
+        "expected unverified v31-layout warning for v32"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn load_from_path_uses_readonly_file_mapping_and_releases_on_drop() {
+    let path = temp_file("mapped_v29.dat", &v29_file());
+    let w = wide(&path);
+    {
+        let p = Parser::load_from_path(&w);
+        assert!(p.loaded());
+        assert!(p.is_mapped());
+        assert_eq!(p.get_string_literal(0), Some(&b"abc"[..]));
+        assert_eq!(p.find_type_by_name(b"Foo", b"Bar").unwrap().index, 1);
+    }
+    // Dropping Parser must unmap the view and release the file so deletion succeeds.
+    std::fs::remove_file(&path).expect("mapped metadata file should be removable after drop");
+}
+
+#[test]
+fn lazy_indices_preserve_first_match_semantics() {
+    // D-L12: duplicate (ns, name), duplicate field_index defaults, and multiple
+    // images (including an empty-method image and overlapping method ranges)
+    // must match the exact linear-scan first-match contract.
+    let mut heap = Heap::new();
+    let mod_name = heap.add(b"<Module>");
+    let ns_a = heap.add(b"Game");
+    let ns_b = heap.add(b"Other");
+    let dup_name = heap.add(b"Hero");
+    let img_empty = heap.add(b"EmptyAsm");
+    let img_first = heap.add(b"FirstAsm");
+    let img_second = heap.add(b"SecondAsm");
+
+    let mut types = Vec::new();
+    types.extend(typedef_row(
+        &layout::TYPE_DEFINITION_V29,
+        &Td {
+            name: mod_name,
+            token: MODULE,
+            ..Td::default()
+        },
+    ));
+    // idx 1: Game.Hero (methods 0..2)
+    types.extend(typedef_row(
+        &layout::TYPE_DEFINITION_V29,
+        &Td {
+            name: dup_name,
+            ns: ns_a,
+            method_start: 0,
+            method_count: 2,
+            token: 0x0200_0002,
+            ..Td::default()
+        },
+    ));
+    // idx 2: duplicate Game.Hero (methods 2..4)
+    types.extend(typedef_row(
+        &layout::TYPE_DEFINITION_V29,
+        &Td {
+            name: dup_name,
+            ns: ns_a,
+            method_start: 2,
+            method_count: 2,
+            token: 0x0200_0003,
+            ..Td::default()
+        },
+    ));
+    // idx 3: Other.Hero (same name, different namespace; methods 1..5 overlapping)
+    types.extend(typedef_row(
+        &layout::TYPE_DEFINITION_V29,
+        &Td {
+            name: dup_name,
+            ns: ns_b,
+            method_start: 1,
+            method_count: 4,
+            token: 0x0200_0004,
+            ..Td::default()
+        },
+    ));
+
+    let mut defaults = Vec::new();
+    defaults.extend(i32s(&[7, 10, 0])); // first entry for field 7
+    defaults.extend(i32s(&[7, 20, 4])); // duplicate entry for field 7
+    defaults.extend(i32s(&[9, 30, 4]));
+
+    let default_data = b"AAAABBBB".to_vec();
+
+    let mut imgs = Vec::new();
+    imgs.extend(image_row_v29(img_empty as u32, 0, 1, 1)); // <Module>: 0 methods
+    imgs.extend(image_row_v29(img_first as u32, 1, 2, 2)); // types 1..3 -> methods [0, 4)
+    imgs.extend(image_row_v29(img_second as u32, 3, 1, 3)); // type 3 -> methods [1, 5)
+
+    let p = Parser::load_from_bytes(flat_file(
+        29,
+        &[
+            (header_v29::STRING_OFFSET, heap.0),
+            (header_v29::TYPE_DEFINITIONS_OFFSET, types),
+            (header_v29::FIELD_DEFAULT_VALUES_OFFSET, defaults),
+            (
+                header_v29::FIELD_AND_PARAMETER_DEFAULT_VALUE_DATA_OFFSET,
+                default_data,
+            ),
+            (header_v29::IMAGES_OFFSET, imgs),
+        ],
+    ));
+    assert!(p.loaded());
+
+    // Duplicate (ns, name) returns the FIRST matching type (index 1, not 2).
+    assert_eq!(p.find_type_by_name(b"Game", b"Hero").unwrap().index, 1);
+    // Repeated lookup uses cached index and returns the same result.
+    assert_eq!(p.find_type_by_name(b"Game", b"Hero").unwrap().index, 1);
+    assert_eq!(p.find_type_by_name(b"Other", b"Hero").unwrap().index, 3);
+    assert!(p.find_type_by_name(b"Game", b"Missing").is_none());
+
+    // Duplicate field_index returns the FIRST default row (type_index 10, data_index 0).
+    let d7 = p.find_field_default(7).unwrap();
+    assert_eq!((d7.field_index, d7.type_index, d7.data_index), (7, 10, 0));
+    assert_eq!(d7.data, b"AAAABBBB");
+    let d9 = p.find_field_default(9).unwrap();
+    assert_eq!((d9.field_index, d9.type_index, d9.data_index), (9, 30, 4));
+    assert_eq!(d9.data, b"BBBB");
+    assert!(p.find_field_default(8).is_none());
+
+    // Multiple images: method 2 is covered by both FirstAsm [0, 4) and SecondAsm [1, 5);
+    // first match must win. Method 4 belongs only to SecondAsm; 5 and -1 miss.
+    assert_eq!(
+        p.find_image_containing_method(0).unwrap().name,
+        b"FirstAsm"
+    );
+    assert_eq!(
+        p.find_image_containing_method(2).unwrap().name,
+        b"FirstAsm"
+    );
+    assert_eq!(
+        p.find_image_containing_method(4).unwrap().name,
+        b"SecondAsm"
+    );
+    assert!(p.find_image_containing_method(5).is_none());
+    assert!(p.find_image_containing_method(-1).is_none());
+    // EmptyAsm has (0, 0) range and must not claim method 0.
+    let e = p.get_image(0).unwrap();
+    assert_eq!((e.method_start, e.method_end), (0, 0));
+}

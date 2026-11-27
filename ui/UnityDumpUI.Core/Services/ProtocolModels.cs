@@ -531,8 +531,12 @@ public sealed class MetadataStatsResult
     [JsonPropertyName("verdict")]            public string?  Verdict           { get; set; }
     /// <summary>D-M3: true when any IL2CPP metadata table was zeroed/demoted
     /// due to v38+ stride/count validation failure or TypeDef[0] mismatch.</summary>
-    [JsonPropertyName("tablesDegraded")]     public bool     TablesDegraded    { get; set; }
-    [JsonPropertyName("error")]              public string?  Error             { get; set; }
+    [JsonPropertyName("tablesDegraded")]      public bool     TablesDegraded      { get; set; }
+    /// <summary>D-L2: true when the loaded metadata version has a supported
+    /// TypeDefinition layout (v24/27/29/31-39); false for strings-only
+    /// versions (v16-23/25/26/28/30); null when omitted by older DLLs.</summary>
+    [JsonPropertyName("typeTablesSupported")] public bool?    TypeTablesSupported { get; set; }
+    [JsonPropertyName("error")]               public string?  Error               { get; set; }
 }
 
 // ---------------------------------------------------------------------------

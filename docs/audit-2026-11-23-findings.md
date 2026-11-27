@@ -669,7 +669,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：MSRV 宣告過時。實際建置有 `rust-toolchain.toml`（1.100.0）保護，但 `rust-version` 會誤導 `cargo` 的 MSRV 檢查和讀者。
 - 修法：改成實際的最低版本（≥ 1.88），或直接和 toolchain pin 保持一致。
 
-**D-L2 · 「v16–v39 accepted」的實際語意是「只有 24/27/29/31–39 能解析型別表」；log 訊息誤導，還有 dead 分支（audit-2026-11-23-plan.md 訊號 2）**
+**D-L2 · 「v16–v39 accepted」的實際語意是「只有 24/27/29/31–39 能解析型別表」；log 訊息誤導，還有 dead 分支（audit-2026-11-23-plan.md 訊號 2） — ✅ FIXED (2026-11-27)**
 - 位置：`dll/rust/src/metadata/parser.rs:521-531`（`type_def_sizeof` 只涵蓋 24/27/29/31–39）、`:564`、`:1212`（method 的 `30` 分支，因為 type 表永遠不會載入而成為 dead code）、`:630-641`、`:673-684`（v16–23/25/26/28/30/32–34 都印「shares v31's layout … accepting」）
 - 成因：v16–v23、v25、v26、v28、v30 會 `loaded()==true`，但 `tables_loaded==false`（只有字串），log 卻說「與 v31 共用 layout，已接受」，使用者看到的是「metadata 載入成功、0 個 type」。v32–v34 走 v29 / v31 的 layout，從未用實際檔案驗證過。CLAUDE.md 的「v16–v39 accepted」也沒有說清楚這一點。
 - 修法：soft warning 分成兩種：「strings-only（不支援型別表）」與「未驗證、比照 v31 解析」。`getMetadataStats` 加上 `typeTablesSupported`。刪掉 `30` 分支，或者有意支援 v30 時同時把它加進 `type_def_sizeof`。CLAUDE.md 的描述改成「v16–v39 accepted (strings); type tables for v24/27/29/31–39」。
@@ -679,7 +679,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：Rust 配置失敗會走 `handle_alloc_error` → abort，`catch_unwind` 接不住。只有 1 MiB 掃描 buffer、metadata 檔案 buffer 和 `group_match` 有用 `try_reserve`；結果向量、`HashSet`、`format!` 都沒有。x64 IL2CPP 遊戲碰到的機率很低（所以列為 Low），但這和 `group_match.rs:21-26`「never aborts the host on OOM」的設計精神不一致。
 - 修法：結果向量改用 `try_reserve` 逐步成長，失敗時截斷並在結果中標記 `truncated`；`ffi::log` 中的 `format!` 在 panic 路徑上改用固定大小的 stack buffer。
 
-**D-L4 · `Parser::Get()` 在 process 生命週期內只載入一次：失敗不重試，成功則常駐整個檔案**
+**D-L4 · `Parser::Get()` 在 process 生命週期內只載入一次：失敗不重試，成功則常駐整個檔案 — ✅ FIXED (2026-11-27)**
 - 位置：`dll/src/il2cpp/MetadataParserHostPath.cpp:27-34`；`dll/rust/src/metadata/parser.rs:33-34`、`:363-364`；`dll/rust/src/metadata/ffi.rs:27-33`、`:513-528`
 - 成因：magic static 第一次呼叫時如果 `BackendDetector` 還解析不到 data dir，或檔案暫時被鎖住，之後所有 metadata RPC 都會永遠回「not loaded」，直到遊戲重啟。成功時則把整個 `global-metadata.dat`（上限 256 MiB）複製一份放在遊戲 process 裡，另外 `decoded_strings` 會快取所有 sanitize 過的字串，直到 process 結束。C++ wrapper 拿到字串後會立即複製（`MetadataParserRs.cpp:259-263`），所以這個快取只是為了讓指標在「回傳到複製之間」保持有效。
 - 修法：`Get()` 改成「失敗後允許在下次呼叫時重試」（用 mutex 保護的 `std::optional<Parser>`，不要用 magic static）；檔案改用 `CreateFileMapping` 唯讀映射，不要整份複製。如果維持複製，`try_decode_string_default` 可以改成由呼叫端提供 buffer 的 API，省掉這個永久快取。
@@ -720,7 +720,7 @@ UI（`BackendAdapter.cs`）實際呼叫的 38 個指令，在對應的 backend �
 - 成因：(a) `Il2CppCodeGenModule::methodPointerCount` 是 `uint32_t`，後面接 4 bytes padding，這裡用 `u64` 讀取，等於假設 padding 一定是 0（MSVC 的常數初始化資料通常如此，但沒有保證）。(b) `off = cursor; continue;` 之後，迴圈本身還會再 `off += 8`，跳過一個 slot；目前只會跳過剛驗證失敗的那一格，無害，但很脆弱。(c) `moduleCount` 不含中間的 null slot，不等於實際的陣列長度。
 - 修法：只讀 4 bytes 的 count；在迴圈內改成 `off = cursor - 8`，或把迴圈改成 while；另外回報 `arraySlots`（含 null）。
 
-**D-L12 · `FindFieldDefault` / `FindTypeByName` / `FindImageContainingMethod` 每次呼叫都是 O(N) 線性掃描**
+**D-L12 · `FindFieldDefault` / `FindTypeByName` / `FindImageContainingMethod` 每次呼叫都是 O(N) 線性掃描 — ✅ FIXED (2026-11-27)**
 - 位置：`dll/rust/src/metadata/parser.rs:1100-1109`、`:1476-1487`、`:1642-1694`；呼叫端 `ExportAPI.cpp:8695-8704`、`:10104-10108`
 - 成因：每個欄位都要掃一次整張 FieldDefaults 表（大型遊戲有數萬列）；`FindImageContainingMethod` 每次都要重新走訪每個 image 的所有 type。`metadata-cli/main.cpp:989-992` 自己就記錄了這會跑上數小時。
 - 修法：仿照 `declaring_type_map`，用 `OnceLock` 延遲建立 `fieldIndex → row`、`(ns,name) → typeIdx`、`methodIdx → imageIdx` 三個索引；回傳值不變，golden 也不受影響。

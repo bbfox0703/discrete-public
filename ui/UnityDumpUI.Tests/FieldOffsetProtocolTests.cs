@@ -197,4 +197,49 @@ public class FieldOffsetProtocolTests
         await serverTask.ConfigureAwait(true);
         await client.DisposeAsync().ConfigureAwait(true);
     }
+
+    [Fact]
+    public void MetadataStatsResult_DeserializesTypeTablesSupportedAndDegradedFlags()
+    {
+        const string supportedJson = """
+        {
+          "id": 7,
+          "result": {
+            "scope": "metadata_all",
+            "total_classes": 42,
+            "tablesDegraded": false,
+            "typeTablesSupported": true
+          }
+        }
+        """;
+        const string stringsOnlyJson = """
+        {
+          "id": 8,
+          "result": {
+            "scope": "metadata_all",
+            "total_classes": 0,
+            "tablesDegraded": false,
+            "typeTablesSupported": false
+          }
+        }
+        """;
+        const string legacyJson = """
+        {
+          "id": 9,
+          "result": {
+            "scope": "metadata_all",
+            "total_classes": 10
+          }
+        }
+        """;
+
+        var supported = JsonSerializer.Deserialize(supportedJson, ProtocolJsonContext.Default.RpcEnvelopeMetadataStatsResult);
+        var stringsOnly = JsonSerializer.Deserialize(stringsOnlyJson, ProtocolJsonContext.Default.RpcEnvelopeMetadataStatsResult);
+        var legacy = JsonSerializer.Deserialize(legacyJson, ProtocolJsonContext.Default.RpcEnvelopeMetadataStatsResult);
+
+        Assert.True(supported!.Result!.TypeTablesSupported);
+        Assert.False(supported.Result.TablesDegraded);
+        Assert.False(stringsOnly!.Result!.TypeTablesSupported);
+        Assert.Null(legacy!.Result!.TypeTablesSupported);
+    }
 }

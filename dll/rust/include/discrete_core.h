@@ -135,6 +135,7 @@ void        dc_md_free(DcMetadata* md);  // NULL is a no-op
 
 int32_t  dc_md_loaded(const DcMetadata* md);   // 0 / 1
 int32_t  dc_md_tables_degraded(const DcMetadata* md);  // 0 / 1 (D-M3)
+int32_t  dc_md_type_tables_supported(const DcMetadata* md);  // 0 / 1 (D-L2)
 int32_t  dc_md_version(const DcMetadata* md);
 // "v24.0" / "v24.1" / "v24" for v24 metadata, empty otherwise. Static memory.
 DcBytes  dc_md_v24_sub_version_label(const DcMetadata* md);

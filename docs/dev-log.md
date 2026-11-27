@@ -12,6 +12,24 @@ this file grows too large.
 
 -----
 
+## 2026-11-27 (build 1575) — Fix D-L2 + D-L4 + D-L12 (metadata version warnings & `typeTablesSupported`, `Parser::Get()` retry + Windows read-only file mapping, lazy `OnceLock` metadata lookup indices)
+
+- **Bug fixes (`D-L2`, `D-L4`, `D-L12`):**
+  - **`D-L2` (`dll/rust/src/metadata/{parser,ffi}.rs`, `dll/rust/include/discrete_core.h`, `dll/src/il2cpp/{MetadataParser.h,MetadataParserRs.cpp}`, `dll/src/shared/ExportAPI.cpp`, `ui/UnityDumpUI.Core/Services/ProtocolModels.cs`, `CLAUDE.md`):**
+    - Split the non-verified metadata soft warning in `Parser::load_header()` into an explicit strings-only warning for versions with no `TypeDefinition` layout (v16–23/25/26/28/30) vs an unverified v31-layout warning for v32–34.
+    - Removed dead v30 match arms in `method_def_sizeof` and `get_method_definition`.
+    - Added `Parser::type_tables_supported()` / `dc_md_type_tables_supported()` / `Parser::typeTablesSupported()`, surfaced `typeTablesSupported` in `getMetadataStats` (both IL2CPP and Mono) and `MetadataStatsResult.TypeTablesSupported`, and clarified `CLAUDE.md` to distinguish strings acceptance (v16–v39) from type-table support (v24/27/29/31–39).
+  - **`D-L4` (`dll/src/il2cpp/MetadataParserHostPath.cpp`, `dll/rust/src/metadata/parser.rs`):**
+    - Replaced the one-shot magic static in `Parser::Get()` with a mutex-guarded retry loader publishing an immutable `Parser*` atomically once loaded (lock-free steady state, zero data race, retries cleanly if an earlier load failed before `BackendDetector` resolved `gameDataDir` or while the file was locked).
+    - Replaced whole-file heap copying in `Parser::load_from_path` on Windows with a read-only `CreateFileMappingW` + `MapViewOfFile` (`PAGE_READONLY` / `FILE_MAP_READ`) backing (`MetadataBacking::Mapped`) with automatic fallback to `ReadFile` and clean `UnmapViewOfFile` on drop.
+  - **`D-L12` (`dll/rust/src/metadata/parser.rs`):**
+    - Added lazy `OnceLock` indices for `find_type_by_name` (FNV-1a `(ns, 0xFF, name)` -> ascending TypeDef indices), `get_image` / `find_image_containing_method` (cached per-image `(method_start, method_end)` ranges), and `find_field_default` (`global_field_index` -> first matching row index), preserving exact linear-scan first-match semantics while eliminating O(N) / O(types) rescans per lookup.
+  - Added Rust unit tests (`version_type_tables_supported_and_split_warnings`, `load_from_path_uses_readonly_file_mapping_and_releases_on_drop`, `lazy_indices_preserve_first_match_semantics`) and C# DTO deserialization test (`MetadataStatsResult_DeserializesTypeTablesSupportedAndDegradedFlags`).
+  - Marked `D-L2`, `D-L4`, and `D-L12` as fixed in [audit-2026-11-23-findings.md](audit-2026-11-23-findings.md).
+- **Tests & build:** `$env:CI='true'; .\build.cmd publish` (build #1575) passed with 0 errors and 0 warnings across x64 + x86 DLLs, Proxy DLLs, Native AOT UI (`DiscreteUI.exe`, locked mode), and `metadata-cli.exe`; identity guard passed; C# xUnit v3 tests 1255 passed (0 failed, 0 skipped, locked mode); Rust core dev 115 (x64) / 116 (x86) + release `+crt-static` 115 (x64) / 116 (x86) passed; C++ `discrete_dll_test` 789 passed (x64) / 789 passed (x86); `r2_golden.py --no-images` 7/7 passed.
+
+-----
+
 ## 2026-11-27 (build 1574) — Fix D-L1 + D-L7 + D-L8 + D-L10 + D-L11 (Rust MSRV 1.88, build-only `build_number.txt` bump, stale comments/vars cleanup, golden `--rebaseline` guard, `CodeGenModulesFinder` u32 count + loop/slots fix)
 
 - **Bug fixes (`D-L1`, `D-L7`, `D-L8`, `D-L10`, `D-L11`):**
