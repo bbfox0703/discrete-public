@@ -2,8 +2,12 @@
 
 #include "MonoClassWalker.h"
 
+#include "../shared/AddressBounds.h"
 #include "../shared/Logger.h"
 #include "../shared/MagicStrings.h"
+#include "../shared/ManagedLayout.h"
+#include "../shared/RuntimeHealth.h"
+#include "../shared/SehFilter.h"
 #include "MonoDomain.h"
 #include "MonoResolver.h"
 #include "MonoThreadAttach.h"
@@ -20,10 +24,10 @@ const char* SafeStr(const char* s) { return s ? s : ""; }
 #pragma warning(push)
 #pragma warning(disable: 4509)
 MonoClass* SehNesting(fn_class_get_nesting_type fn, MonoClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 MonoClass* SehNextNested(fn_class_get_nested_types fn, MonoClass* k, void** iter) {
-    __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k, iter); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 #pragma warning(pop)
 
@@ -76,80 +80,102 @@ MonoClass* FindNestedByName(MonoClass* outer, const std::string& nestedName) {
 // Each *_Seh helper wraps a single Mono call; SEH cannot cohabit a frame with
 // destructors, so the helpers stay leaf-only.
 const MonoTableInfo* SehGetTable(fn_image_get_table_info fn, MonoImage* img, int idx) {
-    __try { return fn(img, idx); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(img, idx); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 int SehGetRows(fn_table_info_get_rows fn, const MonoTableInfo* t) {
-    __try { return fn(t); } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+    __try { return fn(t); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return -1; }
 }
 MonoClass* SehClassGet(fn_class_get fn, MonoImage* img, std::uint32_t tok) {
-    __try { return fn(img, tok); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(img, tok); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 MonoClass* SehClassFromName(fn_class_from_name fn, MonoImage* img, const char* ns, const char* nm) {
-    __try { return fn(img, ns, nm); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(img, ns, nm); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 MonoClass* SehParent(fn_class_get_parent fn, MonoClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 MonoClassField* SehNextField(fn_class_get_fields fn, MonoClass* k, void** iter) {
-    __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    unsigned long code = 0;
+    __try { return fn(k, iter); }
+    __except ((code = GetExceptionCode()),
+              Seh::MemoryAccessExceptionFilter(code, GetExceptionInformation())) {
+        RuntimeHealth::MarkRuntimeFault("mono_class_get_fields", code);
+        return nullptr;
+    }
 }
 MonoMethod* SehNextMethod(fn_class_get_methods fn, MonoClass* k, void** iter) {
-    __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k, iter); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 MonoClass* SehClassFromMonoType(fn_class_from_mono_type fn, MonoType* t) {
-    __try { return fn(t); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(t); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 int SehClassIsEnum(fn_class_is_enum fn, MonoClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
 }
 int SehClassIsValueType(fn_class_is_valuetype fn, MonoClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
 }
 MonoType* SehEnumBasetype(fn_class_enum_basetype fn, MonoClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+MonoClass* SehGetElementClass(fn_class_get_element_class fn, MonoClass* k) {
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+int SehClassValueSize(fn_class_value_size fn, MonoClass* k) {
+    __try { std::uint32_t align = 0; return fn(k, &align); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
 }
 MonoClass* SehObjectGetClass(fn_object_get_class fn, MonoObject* o) {
-    __try { return fn(o); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(o); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 const char* SehClassNameProbe(fn_class_get_name fn, MonoClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 MonoVTable* SehVTable(fn_class_vtable fn, MonoDomain* d, MonoClass* k) {
-    __try { return fn(d, k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    unsigned long code = 0;
+    __try { return fn(d, k); }
+    __except ((code = GetExceptionCode()),
+              Seh::MemoryAccessExceptionFilter(code, GetExceptionInformation())) {
+        RuntimeHealth::MarkRuntimeFault("mono_class_vtable", code);
+        return nullptr;
+    }
 }
 void* SehStaticData(fn_vtable_get_static_data fn, MonoVTable* v) {
-    __try { return fn(v); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(v); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 void* SehCompile(fn_compile_method fn, MonoMethod* m) {
-    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(m); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 MonoImage* SehClassImageProbe(fn_class_get_image fn, MonoClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 const char* SehImageNameProbe(fn_image_get_name fn, MonoImage* img) {
-    __try { return fn(img); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(img); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
-// A real managed type / image name is a short printable-ASCII string. The
-// runtime accessors only SEH-guard the FIELD read that fetches the name pointer
-// — they hand back whatever pointer sits in that slot. For a garbage class (a
-// managed-object pointer misread as a MonoClass*) that slot holds an arbitrary
-// value, and building a std::string from it runs an UNBOUNDED strlen that AVs
-// off the end of mapped memory (the Copy-CE-field CTD). Validate the returned
-// pointer here, reading each byte under SEH so the validation can't fault.
-bool SehNameLooksSane(const char* s) {
-    if (s == nullptr) return false;
+// Copy a NUL-terminated runtime name into a bounded local buffer under SEH so
+// arbitrary garbage pointers never AV off mapped memory, then validate as
+// printable ASCII or strict UTF-8 (B-M5: allows CJK / Unicode obfuscated names
+// while still rejecting control chars, invalid UTF-8, empty or unterminated
+// garbage).
+bool SehCopyNameBounded(const char* s, char* out, std::size_t cap) noexcept {
     __try {
-        std::size_t i = 0;
-        for (; i < 512; ++i) {
-            unsigned char c = static_cast<unsigned char>(s[i]);
-            if (c == 0) return i > 0;                 // non-empty, NUL within bound
-            if (c < 0x20 || c > 0x7E) return false;   // non-printable → garbage
+        for (std::size_t i = 0; i < cap; ++i) {
+            char ch = s[i];
+            out[i] = ch;
+            if (ch == '\0') return i > 0;
         }
-        return false;                                 // no NUL in 512 bytes → garbage
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;  // no NUL within cap bytes → garbage
+    } __except (Discrete::Seh::MemoryAccessExceptionFilter(
+                    GetExceptionCode(), GetExceptionInformation())) {
         return false;
     }
+}
+
+bool SehNameLooksSane(const char* s) {
+    if (s == nullptr) return false;
+    char buf[512];
+    if (!SehCopyNameBounded(s, buf, sizeof(buf))) return false;
+    return Discrete::AddressBounds::LooksLikePlausibleClassName(buf, sizeof(buf));
 }
 #pragma warning(pop)
 
@@ -314,7 +340,7 @@ ClassInfoResult ReadClassInfo(MonoClass* klass, bool forceSetup) {
             if (f == nullptr) break;
             FieldEntry fe;
             if (r.field_get_name != nullptr)   fe.name = SafeStr(r.field_get_name(f));
-            if (r.field_get_offset != nullptr) fe.offset = r.field_get_offset(f);
+            if (r.field_get_offset != nullptr) fe.offset = Discrete::ManagedLayout::NormalizeFieldOffset32(r.field_get_offset(f));
             if (r.field_get_flags != nullptr)  fe.flags = r.field_get_flags(f);
             MonoType* ft = (r.field_get_type != nullptr) ? r.field_get_type(f) : nullptr;
             if (ft != nullptr) fe.typeName = TypeName(ft);
@@ -344,6 +370,42 @@ ClassInfoResult ReadClassInfo(MonoClass* klass, bool forceSetup) {
                     // match isValueType but the decode-site gate excludes them
                     // (they decode to a scalar value, never a bare pointer).
                     if (fe.isValueType && !fe.isEnum) fe.valueTypeClass = fc;
+
+                    // C-M4 — for 1D array fields (`T[]`), resolve element class
+                    // metadata once here so snapshot array walks know the exact
+                    // stride + value-type / enum classification without guessing.
+                    if (fe.typeName.size() >= 2 &&
+                        fe.typeName[fe.typeName.size() - 1] == ']' &&
+                        fe.typeName[fe.typeName.size() - 2] == '[' &&
+                        r.class_get_element_class != nullptr &&
+                        r.class_is_valuetype != nullptr) {
+                        MonoClass* ec = SehGetElementClass(r.class_get_element_class, fc);
+                        // GUARD: mono_class_get_element_class returns `fc` itself for non-arrays.
+                        if (ec != nullptr && ec != fc) {
+                            const bool eIsVt = SehClassIsValueType(r.class_is_valuetype, ec) != 0;
+                            fe.arrayElemIsValueType = eIsVt;
+                            if (!eIsVt) {
+                                fe.arrayElemLayoutKnown = true;
+                                fe.arrayElemSize = Discrete::ManagedLayout::kPointerSize;
+                            } else {
+                                if (r.class_is_enum != nullptr) {
+                                    fe.arrayElemIsEnum = SehClassIsEnum(r.class_is_enum, ec) != 0;
+                                }
+                                if (fe.arrayElemIsEnum && r.class_enum_basetype != nullptr) {
+                                    MonoType* ebase = SehEnumBasetype(r.class_enum_basetype, ec);
+                                    if (ebase != nullptr) fe.arrayElemUnderlyingTypeName = TypeName(ebase);
+                                }
+                                int vs = (r.class_value_size != nullptr)
+                                    ? SehClassValueSize(r.class_value_size, ec) : 0;
+                                if (vs > 0 && vs <= 4096) {
+                                    fe.arrayElemSize = static_cast<std::size_t>(vs);
+                                    fe.arrayElemLayoutKnown = true;
+                                } else if (fe.arrayElemIsEnum && !fe.arrayElemUnderlyingTypeName.empty()) {
+                                    fe.arrayElemLayoutKnown = true;
+                                }
+                            }
+                        }
+                    }
                 }
             }
             result.info.fields.push_back(std::move(fe));
@@ -435,32 +497,42 @@ StaticFieldAddress ResolveStaticFieldAddress(MonoClass* klass, const std::string
     if (match == nullptr) return out;
 
     std::uint32_t flags = (r.field_get_flags != nullptr) ? r.field_get_flags(match) : 0u;
-    if ((flags & 0x10u) == 0) {
+    std::int32_t offset = (r.field_get_offset != nullptr)
+        ? Discrete::ManagedLayout::NormalizeFieldOffset32(r.field_get_offset(match))
+        : -1;
+    std::string typeName = (r.field_get_type != nullptr) ? TypeName(r.field_get_type(match)) : std::string{};
+    out.offset   = offset;
+    out.flags    = flags;
+    out.typeName = typeName;
+
+    // B-M4: reject non-static, const/literal (0x40), and [ThreadStatic] (-1)
+    // fields before touching vtable/static_data so we never return base-1 or
+    // alias offset 0 of static storage.
+    const auto kind = Discrete::ManagedLayout::ClassifyStaticFieldStorage(flags, offset);
+    if (kind != Discrete::ManagedLayout::StaticFieldStorageKind::Regular) {
+        out.reason = Discrete::ManagedLayout::StaticFieldStorageReason(kind);
         Discrete::Log::Write(MagicStrings::LogCategoryWalk,
-            "ResolveStaticFieldAddress: field is not static");
+            std::string("ResolveStaticFieldAddress: rejected (") + out.reason + ")");
         return out;
     }
-    int offset = (r.field_get_offset != nullptr) ? r.field_get_offset(match) : 0;
-    std::string typeName = (r.field_get_type != nullptr) ? TypeName(r.field_get_type(match)) : std::string{};
 
     MonoVTable* vt = SehVTable(r.class_vtable, domain, klass);
     if (vt == nullptr) {
+        out.reason = "vtable_null";
         Discrete::Log::Write(MagicStrings::LogCategoryWalk,
             "ResolveStaticFieldAddress: mono_class_vtable returned null");
         return out;
     }
     void* base = SehStaticData(r.vtable_get_static_data, vt);
     if (base == nullptr) {
+        out.reason = "static_data_null";
         Discrete::Log::Write(MagicStrings::LogCategoryWalk,
             "ResolveStaticFieldAddress: vtable_get_static_field_data returned null");
         return out;
     }
 
     out.ok       = true;
-    out.address  = static_cast<std::uint8_t*>(base) + offset;
-    out.offset   = offset;
-    out.flags    = flags;
-    out.typeName = std::move(typeName);
+    out.address  = static_cast<std::uint8_t*>(base) + static_cast<std::size_t>(offset);
     return out;
 }
 
@@ -527,7 +599,7 @@ namespace {
 #pragma warning(push)
 #pragma warning(disable: 4509)
 const char* SehFieldData(fn_field_get_data fn, MonoClassField* f) {
-    __try { return fn(f); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(f); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 #pragma warning(pop)
 }  // namespace

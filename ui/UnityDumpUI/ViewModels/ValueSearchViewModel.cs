@@ -17,6 +17,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Globalization;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Avalonia.Threading;
@@ -278,6 +279,11 @@ public sealed partial class ValueSearchViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(HasSession))]
     private string? _sessionId;
 
+    // C-M8: remember the concrete dataType of the active single session so
+    // NextScanAsync encodes integer refine values losslessly even if the user
+    // hasn't changed SelectedDataType (or changed it mid-session).
+    private string _activeSessionDataType = "int32";
+
     /// <summary>
     /// Aggregate ("numeric ...") mode keeps ONE live refine session per concrete
     /// width (the DLL's SessionManager already holds many sessions concurrently),
@@ -372,43 +378,46 @@ public sealed partial class ValueSearchViewModel : ObservableObject
             }
             else
             {
-                if (!double.TryParse(ValueText, NumberStyles.Float, CultureInfo.InvariantCulture, out double val))
+                double? tol = null;
+                if (double.TryParse(ToleranceText, NumberStyles.Float, CultureInfo.InvariantCulture, out double t)
+                    && double.IsFinite(t))
+                    tol = t;
+
+                // Aggregate "any numeric width" mode: encode per concrete width
+                // so 64-bit integers stay lossless and fractional inputs skip
+                // integer widths cleanly (C-M8).
+                if (IsAggregateMode)
                 {
-                    ErrorMessage  = $"Value '{ValueText}' is not a valid number.";
+                    await RunAggregateFirstScanAsync(
+                        ValueText, NeedsValueTo ? ValueToText : null, tol, sw, ct).ConfigureAwait(true);
+                    return;
+                }
+
+                if (!ValueScanWireEncoder.TryEncodeNumericArg(
+                        SelectedDataType, ValueText, out JsonElement valEl, out string valErr))
+                {
+                    ErrorMessage  = valErr;
                     StatusMessage = "First Scan failed.";
                     return;
                 }
-                double? valTo = null;
+                JsonElement? valToEl = null;
                 if (NeedsValueTo)
                 {
-                    if (!double.TryParse(ValueToText, NumberStyles.Float, CultureInfo.InvariantCulture, out double vt))
+                    if (!ValueScanWireEncoder.TryEncodeNumericArg(
+                            SelectedDataType, ValueToText, out JsonElement vtEl, out string vtErr))
                     {
-                        ErrorMessage  = $"Range upper bound '{ValueToText}' is not a valid number.";
+                        ErrorMessage  = $"Range upper bound: {vtErr}";
                         StatusMessage = "First Scan failed.";
                         return;
                     }
-                    valTo = vt;
-                }
-                double? tol = null;
-                if (double.TryParse(ToleranceText, NumberStyles.Float, CultureInfo.InvariantCulture, out double t))
-                    tol = t;
-
-                // Aggregate "any numeric width" mode: the DLL only scans one
-                // width per session, so we fan out — one beginValueScan per
-                // concrete type — and merge the unique addresses. Each scan
-                // opens its own session; we close them all and present the
-                // union as a one-shot result (SessionId stays null, so
-                // Next Scan is disabled until the user picks a single type).
-                if (IsAggregateMode)
-                {
-                    await RunAggregateFirstScanAsync(val, valTo, tol, sw, ct).ConfigureAwait(true);
-                    return;
+                    valToEl = vtEl;
                 }
 
                 result = await _backend.BeginValueScanAsync(
-                    SelectedDataType, SelectedScanType, val,
-                    valTo, Limit, tol, retainCap: MaxCandidates,
+                    SelectedDataType, SelectedScanType, valEl,
+                    valToEl, Limit, tol, retainCap: MaxCandidates,
                     parallel: ParallelArg, ct: ct).ConfigureAwait(true);
+                _activeSessionDataType = SelectedDataType;
             }
 
             if (string.Equals(result.Error, "cancelled", StringComparison.Ordinal))
@@ -469,7 +478,7 @@ public sealed partial class ValueSearchViewModel : ObservableObject
     /// value/range/tolerance args.
     /// </summary>
     private async Task RunAggregateFirstScanAsync(
-        double val, double? valTo, double? tol, Stopwatch sw, CancellationToken ct)
+        string rawVal, string? rawValTo, double? tol, Stopwatch sw, CancellationToken ct)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var newSessions = new List<(string id, string type)>();
@@ -492,11 +501,25 @@ public sealed partial class ValueSearchViewModel : ObservableObject
         {
             if (ct.IsCancellationRequested) return;
 
+            // C-M8: encode per concrete width — skips widths where the input
+            // doesn't fit (e.g. fractional "3.7" skips integer widths; huge
+            // 64-bit timestamps skip 16/32-bit widths while preserving full
+            // 64-bit precision for int64/uint64).
+            if (!ValueScanWireEncoder.TryEncodeNumericArg(type, rawVal, out JsonElement valEl, out _))
+                continue;
+            JsonElement? valToEl = null;
+            if (rawValTo is not null)
+            {
+                if (!ValueScanWireEncoder.TryEncodeNumericArg(type, rawValTo, out JsonElement vtEl, out _))
+                    continue;
+                valToEl = vtEl;
+            }
+
             BeginValueScanResult r;
             try
             {
                 r = await _backend.BeginValueScanAsync(
-                    type, SelectedScanType, val, valTo, Limit, tol,
+                    type, SelectedScanType, valEl, valToEl, Limit, tol,
                     reuseIndexMs: kReuseIndexMs, parallel: ParallelArg, ct: ct)
                     .ConfigureAwait(true);
             }
@@ -584,38 +607,44 @@ public sealed partial class ValueSearchViewModel : ObservableObject
         var sw = Stopwatch.StartNew();
         try
         {
-            double? val = null, valTo = null;
             bool needsArg = SelectedRefineType is "exact" or "range" or "newValue";
-            if (needsArg)
-            {
-                if (!double.TryParse(ValueText, NumberStyles.Float, CultureInfo.InvariantCulture, out double v))
-                {
-                    ErrorMessage  = $"Refine mode '{SelectedRefineType}' needs a numeric value; got '{ValueText}'.";
-                    StatusMessage = "Next Scan failed.";
-                    return;
-                }
-                val = v;
-                if (SelectedRefineType == "range")
-                {
-                    if (!double.TryParse(ValueToText, NumberStyles.Float, CultureInfo.InvariantCulture, out double vt))
-                    {
-                        ErrorMessage  = "Range refine needs a valid upper bound.";
-                        StatusMessage = "Next Scan failed.";
-                        return;
-                    }
-                    valTo = vt;
-                }
-            }
 
-            // Aggregate mode: refine every per-width session and re-merge.
+            // Aggregate mode: refine every per-width session and re-merge,
+            // encoding per width for C-M8 precision.
             if (_multiSessions.Count > 0)
             {
-                await NextScanMultiAsync(val, valTo, sw, ct).ConfigureAwait(true);
+                string? rawV  = needsArg ? ValueText : null;
+                string? rawVt = (needsArg && SelectedRefineType == "range") ? ValueToText : null;
+                await NextScanMultiAsync(rawV, rawVt, sw, ct).ConfigureAwait(true);
                 return;
             }
 
+            JsonElement? valEl = null, valToEl = null;
+            if (needsArg)
+            {
+                if (!ValueScanWireEncoder.TryEncodeNumericArg(
+                        _activeSessionDataType, ValueText, out JsonElement ve, out string verr))
+                {
+                    ErrorMessage  = $"Refine mode '{SelectedRefineType}': {verr}";
+                    StatusMessage = "Next Scan failed.";
+                    return;
+                }
+                valEl = ve;
+                if (SelectedRefineType == "range")
+                {
+                    if (!ValueScanWireEncoder.TryEncodeNumericArg(
+                            _activeSessionDataType, ValueToText, out JsonElement vte, out string vterr))
+                    {
+                        ErrorMessage  = $"Range refine upper bound: {vterr}";
+                        StatusMessage = "Next Scan failed.";
+                        return;
+                    }
+                    valToEl = vte;
+                }
+            }
+
             RefineValueScanResult result = await _backend.RefineValueScanAsync(
-                SessionId!, SelectedRefineType, val, valTo, 500, ct).ConfigureAwait(true);
+                SessionId!, SelectedRefineType, valEl, valToEl, 500, ct).ConfigureAwait(true);
 
             if (!string.IsNullOrEmpty(result.Error))
             {
@@ -655,7 +684,7 @@ public sealed partial class ValueSearchViewModel : ObservableObject
     /// expired (server-side 5-min reap) is dropped from the set; other errors
     /// keep the session and are surfaced. Caller owns the elapsed timer + IsBusy.
     /// </summary>
-    private async Task NextScanMultiAsync(double? val, double? valTo, Stopwatch sw, CancellationToken ct)
+    private async Task NextScanMultiAsync(string? rawVal, string? rawValTo, Stopwatch sw, CancellationToken ct)
     {
         var seen      = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var survivors = new List<(string id, string type)>();
@@ -668,10 +697,31 @@ public sealed partial class ValueSearchViewModel : ObservableObject
         {
             if (ct.IsCancellationRequested) return;
 
+            JsonElement? valEl = null, valToEl = null;
+            if (rawVal is not null)
+            {
+                if (!ValueScanWireEncoder.TryEncodeNumericArg(type, rawVal, out JsonElement ve, out _))
+                {
+                    // Value incompatible with this width (e.g. decimal on int32); keep session untouched.
+                    survivors.Add((id, type));
+                    continue;
+                }
+                valEl = ve;
+            }
+            if (rawValTo is not null)
+            {
+                if (!ValueScanWireEncoder.TryEncodeNumericArg(type, rawValTo, out JsonElement vte, out _))
+                {
+                    survivors.Add((id, type));
+                    continue;
+                }
+                valToEl = vte;
+            }
+
             RefineValueScanResult r;
             try
             {
-                r = await _backend.RefineValueScanAsync(id, SelectedRefineType, val, valTo, 500, ct)
+                r = await _backend.RefineValueScanAsync(id, SelectedRefineType, valEl, valToEl, 500, ct)
                     .ConfigureAwait(true);
             }
             catch (OperationCanceledException) { return; }

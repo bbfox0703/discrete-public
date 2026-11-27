@@ -21,7 +21,7 @@ struct ClassEntry {
 struct FieldEntry {
     std::string   name;
     std::string   typeName;
-    std::size_t   offset = 0;
+    std::int32_t  offset = 0;          // normalized offset (-1 sentinel for thread-static/invalid)
     std::uint32_t flags  = 0;
     // Phase 11.5 follow-up: enum / value-type detection — see Mono walker
     // for the full rationale. Defaults to false; populated only when the
@@ -35,6 +35,14 @@ struct FieldEntry {
     // of re-resolving by name. nullptr otherwise. Never owned. See the Mono
     // walker for the full rationale.
     Il2CppClass*  valueTypeClass     = nullptr;
+    // C-M4 — for 1D array fields (`T[]`), element layout resolved once via
+    // il2cpp_class_get_element_class + il2cpp_class_is_valuetype +
+    // il2cpp_class_value_size (+ enum underlying type) during ReadClassInfo.
+    bool          arrayElemLayoutKnown = false;
+    bool          arrayElemIsValueType = false;
+    bool          arrayElemIsEnum      = false;
+    std::size_t   arrayElemSize        = 0;
+    std::string   arrayElemUnderlyingTypeName;
 };
 
 struct MethodEntry {
@@ -78,9 +86,10 @@ bool ProbeKlassValid(Il2CppClass* klass);
 struct StaticFieldAddress {
     bool          ok      = false;
     void*         address = nullptr;
-    std::size_t   offset  = 0;
+    std::int32_t  offset  = -1;        // normalized offset (-1 for thread-static / unresolved)
     std::string   typeName;
     std::uint32_t flags   = 0;
+    std::string   reason;              // populated when !ok ("not_static" / "literal" / "thread_static" / ...)
 };
 StaticFieldAddress ResolveStaticFieldAddress(Il2CppClass* klass, const std::string& fieldName);
 

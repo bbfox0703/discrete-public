@@ -57,14 +57,15 @@ PatternResult LiteralFallback(const std::uint8_t* bytes, std::size_t len) {
 }  // namespace
 
 PatternResult BuildPattern(const std::uint8_t* bytes, std::size_t len,
-                           bool stopAtTerminal) {
+                           bool stopAtTerminal,
+                           std::uint32_t bitness) {
     // Contract sizes: pattern >= 3*len bytes, mask >= len bytes.
     std::string               pattern(len * 3, '\0');
     std::vector<std::uint8_t> mask(len, 0);
     DcAobResult               out{};
 
-    const std::int32_t ok = dc_aob_build_pattern(
-        bytes, len, stopAtTerminal ? 1 : 0,
+    const std::int32_t ok = dc_aob_build_pattern_mode(
+        bytes, len, stopAtTerminal ? 1 : 0, bitness,
         pattern.data(), pattern.size(),
         mask.data(), mask.size(),
         &out);

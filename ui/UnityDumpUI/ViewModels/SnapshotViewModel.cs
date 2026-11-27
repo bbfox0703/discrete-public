@@ -579,6 +579,12 @@ public sealed partial class SnapshotViewModel : ObservableObject
         try
         {
             var res = await _backend.GetAssembliesAsync(ct).ConfigureAwait(true);
+            if (!string.IsNullOrEmpty(res.Error))
+            {
+                _logger.Write(SnapshotStore.LogCategory,
+                    $"LoadScopeAssembliesAsync error: {res.Error}");
+                return;
+            }
             var names = res.Assemblies
                 .Select(a => a.Name)
                 .Where(n => !string.IsNullOrEmpty(n))
@@ -972,7 +978,16 @@ public sealed partial class SnapshotViewModel : ObservableObject
     /// cancellation to the CaptureWindow's Cancel button. Enabled only while
     /// <see cref="IsBusy"/>.</summary>
     [RelayCommand(CanExecute = nameof(CanCancelCapture))]
-    private void CancelCapture() => _cts?.Cancel();
+    private async Task CancelCaptureAsync()
+    {
+        StatusMessage = "Cancelling…";
+        _cts?.Cancel();
+        // C-M1: also notify the DLL's cooperative ScanCancel flag so an
+        // in-flight snapshotBegin heap walk / decode stops immediately instead
+        // of running to completion while the pipe waits for its reply.
+        try { await _backend.CancelScanAsync().ConfigureAwait(true); }
+        catch { /* best effort */ }
+    }
     private bool CanCancelCapture() => IsBusy;
 
     [ObservableProperty] private string _statusMessage = "Press Take Snapshot to capture the game's current managed-state. Two snapshots needed for a diff.";
@@ -1089,6 +1104,11 @@ public sealed partial class SnapshotViewModel : ObservableObject
                 if (begin.GamePrivateUsage is { } gpu) GamePrivateUsage = gpu;
             }
 
+            if (begin.Cancelled || string.Equals(begin.Error, "cancelled", StringComparison.Ordinal))
+            {
+                StatusMessage = "Snapshot cancelled.";
+                return;
+            }
             if (!string.IsNullOrEmpty(begin.Error))
             {
                 ErrorMessage  = begin.Error;
@@ -3066,6 +3086,7 @@ public sealed partial class SnapshotEnvelope : ObservableObject
             };
         }
         if (!string.IsNullOrEmpty(el.String)) return $"\"{el.String}\"";
+        if (!string.IsNullOrEmpty(el.Hex))    return $"hex={el.Hex}";
         if (!string.IsNullOrEmpty(el.Ptr))    return $"ptr={el.Ptr}";
         return "(no value)";
     }

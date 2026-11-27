@@ -134,6 +134,7 @@ DcMetadata* dc_md_load_path_w(const uint16_t* path, size_t len);
 void        dc_md_free(DcMetadata* md);  // NULL is a no-op
 
 int32_t  dc_md_loaded(const DcMetadata* md);   // 0 / 1
+int32_t  dc_md_tables_degraded(const DcMetadata* md);  // 0 / 1 (D-M3)
 int32_t  dc_md_version(const DcMetadata* md);
 // "v24.0" / "v24.1" / "v24" for v24 metadata, empty otherwise. Static memory.
 DcBytes  dc_md_v24_sub_version_label(const DcMetadata* md);
@@ -206,6 +207,16 @@ int32_t dc_aob_build_pattern(const uint8_t* bytes, size_t len, int32_t stop_at_t
                              char* pattern_out, size_t pattern_cap,
                              uint8_t* mask_out, size_t mask_cap,
                              DcAobResult* out);
+
+// Same as dc_aob_build_pattern with an explicit ISA mode (`bitness`: 32 for x86
+// protected mode, 64 for x86-64 long mode; any other value zeroes *out and
+// returns 0). Used by the x86 Mono DLL so 0x40..0x4F decode as INC/DEC r32 and
+// 0xA0..0xA3 / SIB base=5 decode with 32-bit absolute addresses (D-H1).
+int32_t dc_aob_build_pattern_mode(const uint8_t* bytes, size_t len,
+                                  int32_t stop_at_terminal, uint32_t bitness,
+                                  char* pattern_out, size_t pattern_cap,
+                                  uint8_t* mask_out, size_t mask_cap,
+                                  DcAobResult* out);
 
 // --- Phase R2: GroupMatch SDR (port of shared/GroupMatch.h) ------------------
 //

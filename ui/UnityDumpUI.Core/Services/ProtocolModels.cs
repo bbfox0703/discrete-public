@@ -18,7 +18,7 @@ namespace UnityDumpUI.Core.Services;
 /// </summary>
 public sealed class RpcEnvelope<TResult> where TResult : class
 {
-    [JsonPropertyName("id")]      public int       Id     { get; set; }
+    [JsonPropertyName("id")]      public int?      Id     { get; set; }
     [JsonPropertyName("result")]  public TResult?  Result { get; set; }
     [JsonPropertyName("error")]   public RpcError? Error  { get; set; }
 }
@@ -68,6 +68,11 @@ public sealed class HandshakeResult
     /// address-space pressure that triggers OOM. Used by the DLL's
     /// snapshotBegin pre-check (>3 GB on x86 refuses the snapshot).</summary>
     [JsonPropertyName("game_private_usage")] public ulong? GamePrivateUsage { get; set; }
+
+    /// <summary>B-M6 / C-M7 — non-null when a runtime lock fault poisoned the DLL.</summary>
+    [JsonPropertyName("runtime_poisoned")]     public bool    RuntimePoisoned     { get; set; }
+    [JsonPropertyName("runtime_fault_reason")] public string? RuntimeFaultReason  { get; set; }
+    [JsonPropertyName("error")]                public string? Error               { get; set; }
 }
 
 /// <summary>
@@ -75,14 +80,16 @@ public sealed class HandshakeResult
 /// </summary>
 public sealed class PingResult
 {
-    [JsonPropertyName("pong")] public bool Pong { get; set; }
+    [JsonPropertyName("pong")]  public bool    Pong  { get; set; }
+    [JsonPropertyName("error")] public string? Error { get; set; }
 }
 
 /// <summary>`cancelScan` ack — arms the DLL's cooperative scan-cancel flag.</summary>
 public sealed class CancelScanResult
 {
-    [JsonPropertyName("ok")]        public bool Ok        { get; set; }
-    [JsonPropertyName("cancelled")] public bool Cancelled { get; set; }
+    [JsonPropertyName("ok")]        public bool    Ok        { get; set; }
+    [JsonPropertyName("cancelled")] public bool    Cancelled { get; set; }
+    [JsonPropertyName("error")]     public string? Error     { get; set; }
 }
 
 /// <summary>
@@ -110,6 +117,8 @@ public sealed class GetAssembliesResult
 {
     [JsonPropertyName("count")]      public int                       Count      { get; set; }
     [JsonPropertyName("assemblies")] public List<AssemblyEntry>       Assemblies { get; set; } = new();
+    /// <summary>C-M7: handler-level error string (e.g. runtime not resolved).</summary>
+    [JsonPropertyName("error")]      public string?                   Error      { get; set; }
 }
 
 public sealed class AssemblyEntry
@@ -160,7 +169,8 @@ public sealed class FieldEntry
 {
     [JsonPropertyName("name")]   public string  Name   { get; set; } = string.Empty;
     [JsonPropertyName("type")]   public string? Type   { get; set; }
-    [JsonPropertyName("offset")] public int     Offset { get; set; }
+    [JsonPropertyName("offset"), JsonConverter(typeof(FieldOffsetJsonConverter))]
+    public int Offset { get; set; }
     [JsonPropertyName("flags")]  public uint    Flags  { get; set; }
     [JsonPropertyName("static")] public bool    Static { get; set; }
 }
@@ -190,8 +200,9 @@ public sealed class FindInstancesResult
     [JsonPropertyName("vtable")]    public string?       VTable   { get; set; }
     [JsonPropertyName("count")]     public int           Count    { get; set; }
     [JsonPropertyName("limit")]     public int           Limit    { get; set; }
-    [JsonPropertyName("matches")]   public List<string>  Matches  { get; set; } = new();
-    [JsonPropertyName("error")]     public string?       Error    { get; set; }
+    [JsonPropertyName("matches")]   public List<string>  Matches   { get; set; } = new();
+    [JsonPropertyName("cancelled")] public bool          Cancelled { get; set; }
+    [JsonPropertyName("error")]     public string?       Error     { get; set; }
 }
 
 /// <summary>
@@ -224,7 +235,8 @@ public sealed class WalkedField
 {
     [JsonPropertyName("name")]          public string       Name         { get; set; } = string.Empty;
     [JsonPropertyName("type")]          public string?      Type         { get; set; }
-    [JsonPropertyName("offset")]        public int          Offset       { get; set; }
+    [JsonPropertyName("offset"), JsonConverter(typeof(FieldOffsetJsonConverter))]
+    public int Offset { get; set; }
     [JsonPropertyName("from")]          public string?      From         { get; set; }
     [JsonPropertyName("address")]       public string?      Address      { get; set; }
 
@@ -276,7 +288,8 @@ public sealed class GetStaticFieldDataResult
 {
     [JsonPropertyName("field")]   public string? Field   { get; set; }
     [JsonPropertyName("type")]    public string? Type    { get; set; }
-    [JsonPropertyName("offset")]  public int     Offset  { get; set; }
+    [JsonPropertyName("offset"), JsonConverter(typeof(FieldOffsetJsonConverter))]
+    public int Offset { get; set; }
     [JsonPropertyName("flags")]   public uint    Flags   { get; set; }
     [JsonPropertyName("address")] public string? Address { get; set; }
     [JsonPropertyName("error")]   public string? Error   { get; set; }
@@ -395,6 +408,7 @@ public sealed class ListFieldValuesResult
     [JsonPropertyName("fieldOffset")] public long                       FieldOffset { get; set; }
     [JsonPropertyName("fieldType")]   public string?                    FieldType   { get; set; }
     [JsonPropertyName("rows")]        public List<ListFieldValueRow>?   Rows        { get; set; }
+    [JsonPropertyName("cancelled")]   public bool                       Cancelled   { get; set; }
     [JsonPropertyName("error")]       public string?                    Error       { get; set; }
 }
 
@@ -455,7 +469,8 @@ public sealed class WhatIsAtField
 {
     [JsonPropertyName("name")]            public string  Name             { get; set; } = string.Empty;
     [JsonPropertyName("type")]            public string? Type             { get; set; }
-    [JsonPropertyName("offset")]          public int     Offset           { get; set; }
+    [JsonPropertyName("offset"), JsonConverter(typeof(FieldOffsetJsonConverter))]
+    public int Offset { get; set; }
     [JsonPropertyName("size")]            public int     Size             { get; set; }
     [JsonPropertyName("isStatic")]        public bool    IsStatic         { get; set; }
     [JsonPropertyName("isValueType")]     public bool    IsValueType      { get; set; }
@@ -487,6 +502,8 @@ public sealed class ClassRangeStatsResult
     [JsonPropertyName("max_klass")]    public string? MaxKlass    { get; set; }
     [JsonPropertyName("min_vtable")]   public string? MinVtable   { get; set; }
     [JsonPropertyName("max_vtable")]   public string? MaxVtable   { get; set; }
+    /// <summary>C-M7: handler-level error string.</summary>
+    [JsonPropertyName("error")]        public string? Error       { get; set; }
 }
 
 /// <summary>
@@ -509,6 +526,9 @@ public sealed class MetadataStatsResult
     [JsonPropertyName("max_name_length")]    public int      MaxNameLength     { get; set; }
     [JsonPropertyName("strip_ratio")]        public double?  StripRatio        { get; set; }
     [JsonPropertyName("verdict")]            public string?  Verdict           { get; set; }
+    /// <summary>D-M3: true when any IL2CPP metadata table was zeroed/demoted
+    /// due to v38+ stride/count validation failure or TypeDef[0] mismatch.</summary>
+    [JsonPropertyName("tablesDegraded")]     public bool     TablesDegraded    { get; set; }
     [JsonPropertyName("error")]              public string?  Error             { get; set; }
 }
 
@@ -584,7 +604,8 @@ public sealed class SearchSymbolMatch
     /// full method signatures).</summary>
     [JsonPropertyName("type")]      public string? Type      { get; set; }
     /// <summary>Field offset in bytes from instance base (for "field" rows).</summary>
-    [JsonPropertyName("offset")]    public int?    Offset    { get; set; }
+    [JsonPropertyName("offset"), JsonConverter(typeof(NullableFieldOffsetJsonConverter))]
+    public int? Offset { get; set; }
     /// <summary>AOT method address (IL2CPP "method" rows only). Mono methods
     /// land here as null because Mono JIT is deferred to the user-driven
     /// findMethodInstances / Call method flow.</summary>
@@ -699,6 +720,7 @@ public sealed class FindFieldReferencesResult
     [JsonPropertyName("references")]      public List<FieldReferenceRow>    References     { get; set; } = new();
     [JsonPropertyName("scanned_methods")] public int                        ScannedMethods { get; set; }
     [JsonPropertyName("truncated")]       public bool                       Truncated      { get; set; }
+    [JsonPropertyName("cancelled")]       public bool                       Cancelled      { get; set; }
     [JsonPropertyName("error")]           public string?                    Error          { get; set; }
     /// <summary>Build #555 — IL2CPP advisory. Set when the backend scan ran
     /// successfully but returned 0 matches AND the static-storage address
@@ -715,7 +737,8 @@ public sealed class FieldReferenceFieldInfo
 {
     [JsonPropertyName("name")]          public string  Name          { get; set; } = string.Empty;
     [JsonPropertyName("type")]          public string? Type          { get; set; }
-    [JsonPropertyName("offset")]        public long?   Offset        { get; set; }
+    [JsonPropertyName("offset"), JsonConverter(typeof(NullableLongFieldOffsetJsonConverter))]
+    public long? Offset { get; set; }
     [JsonPropertyName("isStatic")]      public bool    IsStatic      { get; set; }
     /// <summary>Mono only — the field's FieldDef metadata token (0x04xxxxxx)
     /// used to identify the field while walking IL operand immediates.</summary>
@@ -876,11 +899,12 @@ public sealed class EndValueScanResult
 /// ignores dataType (the session remembers each slot's width).</summary>
 public sealed class GroupSlotRequest
 {
-    [JsonPropertyName("dataType")]  public string  DataType  { get; set; } = "int32";
-    [JsonPropertyName("scanType")]  public string  ScanType  { get; set; } = "exact";
-    [JsonPropertyName("value")]     public double? Value     { get; set; }
-    [JsonPropertyName("valueTo")]   public double? ValueTo   { get; set; }
-    [JsonPropertyName("tolerance")] public double? Tolerance { get; set; }
+    [JsonPropertyName("dataType")]  public string       DataType  { get; set; } = "int32";
+    [JsonPropertyName("scanType")]  public string       ScanType  { get; set; } = "exact";
+    /// <summary>C-M8: exact typed JSON value (Int64/UInt64 for integer slots, Double for float/double).</summary>
+    [JsonPropertyName("value")]     public JsonElement? Value     { get; set; }
+    [JsonPropertyName("valueTo")]   public JsonElement? ValueTo   { get; set; }
+    [JsonPropertyName("tolerance")] public double?      Tolerance { get; set; }
 }
 
 /// <summary>One slot's match within a group candidate. <see cref="MatchedOffsets"/>
@@ -1145,6 +1169,10 @@ public sealed class SnapshotDecodeStats
 {
     [JsonPropertyName("decodedClasses")]           public int DecodedClasses           { get; set; }
     [JsonPropertyName("decodedInstances")]         public int DecodedInstances         { get; set; }
+    /// <summary>C-M5: IL2CPP streaming instances skipped during deferred chunk
+    /// decode because their live object header no longer matched the expected
+    /// class pointer (freed / repurposed between Begin and Chunk).</summary>
+    [JsonPropertyName("staleInstances")]           public int StaleInstances           { get; set; }
     [JsonPropertyName("decodedArrays")]            public int DecodedArrays            { get; set; }
     [JsonPropertyName("skippedOpenGenericArrays")] public int SkippedOpenGenericArrays { get; set; }
     [JsonPropertyName("classInfoCacheHits")]       public int ClassInfoCacheHits       { get; set; }
@@ -1187,6 +1215,7 @@ public sealed class SnapshotBeginResult
     [JsonPropertyName("decodeStats")]     public SnapshotDecodeStats?    DecodeStats { get; set; }
     [JsonPropertyName("excludedSystemAssemblies")] public int            ExcludedSystemAssemblies { get; set; }
     [JsonPropertyName("includeSystemAssemblies")]  public bool           IncludeSystemAssemblies  { get; set; }
+    [JsonPropertyName("cancelled")]       public bool                    Cancelled   { get; set; }
     [JsonPropertyName("error")]           public string?                 Error       { get; set; }
 
     /// <summary>Phase P1-fix — true when the decode stopped early because the
@@ -1481,6 +1510,17 @@ public sealed class SnapshotArrayElement
         get => _extras?.ElementClassError;
         set { if (value is not null) (_extras ??= new()).ElementClassError = value; else if (_extras is not null) _extras.ElementClassError = null; }
     }
+
+    /// <summary>C-M4: raw hex bytes for inline custom value-type struct array
+    /// elements whose stride was resolved via <c>class_value_size</c> (stored
+    /// in lazy <see cref="ElementExtras"/> so primitive/ref elements pay zero
+    /// memory overhead).</summary>
+    [JsonPropertyName("hex")]
+    public string? Hex
+    {
+        get => _extras?.Hex;
+        set { if (value is not null) (_extras ??= new()).Hex = value; else if (_extras is not null) _extras.Hex = null; }
+    }
 }
 
 /// <summary>Lazily-allocated overflow storage for the rarely-set
@@ -1491,6 +1531,7 @@ internal sealed class ElementExtras
     public string?                   Address;
     public List<SnapshotFieldEntry>? Fields;
     public string?                   ElementClassError;
+    public string?                   Hex;
 }
 
 public sealed class SnapshotArrayElements
@@ -1536,6 +1577,9 @@ public sealed class SnapshotClassEntry
     [JsonPropertyName("statics")]   public List<SnapshotFieldEntry>?    Statics   { get; set; }
     [JsonPropertyName("instances")] public List<SnapshotInstanceEntry>? Instances { get; set; }
     [JsonPropertyName("error")]     public string?                      Error     { get; set; }
+    /// <summary>C-M7: non-null when the DLL skipped/truncated this class under
+    /// budget pressure ("memory_budget" or "instance_budget").</summary>
+    [JsonPropertyName("truncated")] public string?                      Truncated { get; set; }
 
     /// <summary>Phase 30a deduped wire — field metadata emitted once per class.
     /// When non-null, each instance's <see cref="SnapshotInstanceEntry.V"/> is

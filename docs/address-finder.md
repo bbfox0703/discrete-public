@@ -310,3 +310,51 @@ Estimated total: ~3.5 days for v1.
 17b field-offset resolution + kind classifier (build #194);
 17c UI Address Lookup tab + Inspector right-click handoff (build #197);
 17d CE Lua bridge `unity_addrfind.lua` (build #198).
+
+## Object-extent bounds & generic instance / array coverage (B-H2)
+
+The base `classSet` built by `BuildClassRangeCache` enumerates TypeDef rows
+from each loaded assembly image (`0x02xxxxxx` tokens on Mono, `il2cpp_image_get_class`
+on IL2CPP). Runtime-synthesized classes — inflated generic instantiations
+(`List<T>`, `Dictionary<K,V>`, `Action<T>`, …) and array types (`T[]`) — are
+not TypeDef rows and therefore do not appear in the initial `classSet`.
+
+Both backends (`MonoAddressFinder` and `IL2CPPAddressFinder`) enforce two
+invariants to keep lookups accurate around these objects:
+
+1. **Object-extent bounds checking (`AddressBounds.h`)**:
+   - Before accepting a candidate base `p` in `WhatIsAt`, `WhatIsAtAcceptingArrays`,
+     or `ReverseLookupIndex::Lookup`, the finder computes the object's byte
+     extent:
+     - Regular objects: `mono_class_instance_size` / `il2cpp_class_instance_size`
+       (cached per class), falling back to `mono_object_get_size` /
+       `il2cpp_object_get_size` when available.
+     - Single-dimension arrays (`T[]`): `4 * ptr + max_length * elemSize`
+       (capped at 64M elements, overflow-checked).
+     - `System.String`: `2 * ptr + 4 + (charLen + 1) * 2`.
+   - If `addr - p >= extent`, `p` is rejected and the lookup continues
+     backtracking (preventing out-of-bounds addresses from being falsely
+     attributed to an adjacent neighbor object, while still allowing
+     backtracking past embedded klass/vtable pointer fields inside a larger
+     enclosing object).
+2. **Pure-memory dynamic klass validation**:
+   - `BuildClassRangeCache` records the sorted set of loaded assembly images
+     (`imageSet`) and self-calibrates the `image`, `element_class`, and `name`
+     field offsets of `MonoClass` / `Il2CppClass` across up to 16 TypeDef
+     samples (zero hardcoded runtime struct offsets).
+   - When a candidate klass pointer is absent from `classSet`, the finder
+     validates it strictly via `Memory::SafeReadBytes` (never calling runtime
+     APIs on unvalidated pointers): `klass->image ∈ imageSet`,
+     `klass->element_class` equals `klass` (generic instantiation) or a valid
+     element class (array), and `klass->name` points to a plausible
+     NUL-terminated string. Mono additionally requires `vtable->domain == rootDomain`.
+   - Validated dynamic klasses are memoized into an extended dynamic class set
+     shared across `WhatIsAt`, `ReverseLookupIndex`, and `FindAllInstances`.
+   - **Coverage note**: Mono discovers dynamic generic/array klasses on the fly
+     during `WhatIsAt`, `FindAllInstances`, and `ReverseLookupIndex::Build`
+     (cheap because `MonoVTable::domain` filters non-vtables first). On IL2CPP,
+     `WhatIsAt` and `WhatIsAtAcceptingArrays` discover dynamic klasses on first
+     sight and feed them into the shared `dynamicClassSet` so subsequent
+     `FindAllInstances` / `ReverseLookupIndex::Build` sweeps include them at
+     full memory-bandwidth speed without per-qword `VirtualQuery` overhead.
+

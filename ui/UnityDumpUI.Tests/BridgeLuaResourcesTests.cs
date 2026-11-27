@@ -171,4 +171,97 @@ public class BridgeLuaResourcesTests
         Assert.Throws<ArgumentException>(
             () => BridgeLuaResources.Read("UNITY_DUMP.LUA"));
     }
+
+    [Fact]
+    public void CeTableBootstrap_ChecksInjectDllAsBoolean_AndMatchesUtilsBackendDetection()
+    {
+        // E-M3 + E-L9 regression test for scripts/ce_table_bootstrap.lua (Mode-B CT template):
+        // - Must NOT check `injectDLL(...) == nil` (CE returns boolean `false` on failure).
+        // - Must use basename extraction + full IL2CPP/Mono module list matching utils.lua.
+        // - Must reset DISCRETE_HAD_ERROR on bootstrap() and teardown() entry.
+        // - Must stay LF-only (pre-commit hook / CE TableFile safety).
+        string? scriptsDir = FindScriptsDir();
+        if (scriptsDir is null)
+            Assert.Fail(@"scripts\ directory not found above " + AppContext.BaseDirectory);
+
+        string content = File.ReadAllText(Path.Combine(scriptsDir!, "ce_table_bootstrap.lua"));
+
+        Assert.DoesNotContain("\r", content);
+        Assert.DoesNotContain("injectDLL(dllPath) == nil", content);
+        Assert.Contains("if not injectDLL(dllPath) then", content);
+
+        // Backend detection parity with utils.lua M.detectBackend()
+        Assert.Contains("userassembly.dll", content);
+        Assert.Contains("mono-2.0-sgen.dll", content);
+        Assert.Contains("mono-2.0-boehm.dll", content);
+        Assert.Contains("reinitializeSymbolhandler", content);
+        Assert.Contains("raw:match(\"([^\\\\/]+)$\")", content);
+
+        // E-L9: both public entry points reset DISCRETE_HAD_ERROR; teardown does not call _ensureDir
+        int bootstrapIdx = content.IndexOf("function bootstrap()", StringComparison.Ordinal);
+        int teardownIdx  = content.IndexOf("function teardown()",  StringComparison.Ordinal);
+        Assert.True(bootstrapIdx >= 0 && teardownIdx > bootstrapIdx);
+
+        string bootstrapBody = content.Substring(bootstrapIdx, teardownIdx - bootstrapIdx);
+        string teardownBody  = content.Substring(teardownIdx);
+        Assert.Contains("rawset(_G, \"DISCRETE_HAD_ERROR\", false)", bootstrapBody);
+        Assert.Contains("rawset(_G, \"DISCRETE_HAD_ERROR\", false)", teardownBody);
+        Assert.DoesNotContain("_ensureDir(", teardownBody);
+    }
+
+    [Fact]
+    public void MonoRegisterSymbolHelpers_HasPrimitiveAliases_PositionalSigSplit_AndAmbiguityReject()
+    {
+        // E-M5 regression check on the embedded mono_registersymbol_helpers.lua:
+        // - Primitive alias table maps Mono shorthands (int/single/string/bool) to System.*.
+        // - Positional signature parser splits parameter lists instead of unordered substring matching.
+        // - Both discrete_mono_registerSymbolEx and discrete_mono_registerSymbolBySignatureMatch
+        //   reject ambiguous multi-overload hits via eprint rather than silently picking the first.
+        string content = BridgeLuaResources.Read("mono_registersymbol_helpers.lua");
+
+        Assert.DoesNotContain("\r", content);
+        Assert.Contains("_DISCRETE_PRIMITIVE_ALIASES", content);
+        Assert.Contains("[\"int\"]", content);
+        Assert.Contains("[\"single\"]", content);
+        Assert.Contains("[\"string\"]", content);
+        Assert.Contains("_discrete_split_sig_params", content);
+        Assert.Contains("ambiguous overload match", content);
+        Assert.Contains("ambiguous signature match", content);
+    }
+
+    [Theory]
+    [InlineData("utils.lua")]
+    [InlineData("unity_symbols.lua")]
+    [InlineData("unity_invoke.lua")]
+    public void PipeRpcScripts_UseBoundedTimeout_ConnectToPipe_AndWorkerThreadPump(string fileName)
+    {
+        // E-M4 regression check: CE Lua bridge pipe RPC must never block CE's GUI
+        // thread without a finite timeout. Verify all three pipe-speaking scripts
+        // use CE's connectToPipe (native overlapped timeout + OnTimeout + destroy),
+        // createThread + pump polling, and explicit timeout errors.
+        string content = BridgeLuaResources.Read(fileName);
+
+        Assert.DoesNotContain("\r", content);
+        Assert.Contains("connectToPipe", content);
+        Assert.Contains("createThread", content);
+        Assert.Contains("OnTimeout", content);
+        Assert.Contains("_closePipeOnce", content);
+        Assert.Contains("p.destroy()", content);
+        Assert.Contains("pipe RPC timed out after", content);
+        Assert.Contains("kDefaultRpcTimeoutMs", content);
+    }
+
+    [Fact]
+    public void UnityInvoke_ScalesRpcTimeout_WithMainThreadTimeoutMs()
+    {
+        // E-M4: callMethod with main_thread=true must grant mainThreadTimeoutMs + headroom
+        // (and clamp main_thread_timeout_ms to [1, 60000]) so legitimate main-thread
+        // waits don't spuriously time out on the Lua side while stalled games still abort.
+        string content = BridgeLuaResources.Read("unity_invoke.lua");
+
+        Assert.Contains("opts.rpcTimeoutMs", content);
+        Assert.Contains("if mt < 1 then mt = 1 elseif mt > 60000 then mt = 60000 end", content);
+        Assert.Contains("math.max(kDefaultRpcTimeoutMs, (mt or 5000) + 5000)", content);
+        Assert.Contains("rpc(\"callMethod\", body, rpcTimeoutMs)", content);
+    }
 }

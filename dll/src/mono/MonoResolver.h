@@ -75,6 +75,7 @@ using fn_class_from_mono_type   = MonoClass*     (*)(MonoType*);
 // --- Mono array element metadata (Phase 10 follow-up) ----------------------
 using fn_class_get_element_class = MonoClass*    (*)(MonoClass*);
 using fn_class_value_size       = int            (*)(MonoClass*, std::uint32_t* /*align*/);
+using fn_class_instance_size    = std::int32_t   (*)(MonoClass*);
 using fn_class_is_valuetype     = int            (*)(MonoClass*);
 
 // --- Phase 19 managed-method invocation -------------------------------------
@@ -91,6 +92,11 @@ using fn_object_get_class       = MonoClass*     (*)(MonoObject*);
 using fn_string_new             = MonoString*    (*)(MonoDomain*, const char* /*utf8*/);
 using fn_string_chars           = std::uint16_t* (*)(MonoString*);
 using fn_string_length          = std::int32_t   (*)(MonoString*);
+// B-M2 — GC handle pinning for managed objects allocated during callMethod
+// argument marshaling (e.g. mono_string_new). Optional: falls back to stack
+// rooting when unbound.
+using fn_gchandle_new           = std::uint32_t  (*)(MonoObject*, int /*pinned*/);
+using fn_gchandle_free          = void           (*)(std::uint32_t /*gchandle*/);
 
 // --- Phase 28 — IL body access for findFieldReferences --------------------
 // `mono_method_get_header` returns the per-method IL header (callable on
@@ -105,6 +111,11 @@ using fn_method_get_header      = MonoMethodHeader* (*)(MonoMethod*);
 using fn_method_header_get_code = const unsigned char* (*)(MonoMethodHeader*, std::uint32_t* /*code_size*/, std::uint32_t* /*max_stack*/);
 using fn_metadata_free_mh       = void           (*)(MonoMethodHeader*);
 using fn_class_get_field_token  = std::uint32_t  (*)(MonoClassField*);
+// B-M8 — MemberRef (0x0Axxxxxx) resolution for generic / cross-assembly field
+// references in Mono IL bodies. Optional: missing on minimal builds just falls
+// back to FieldDef-only matching with an advisory note on generic classes.
+using fn_field_from_token       = MonoClassField* (*)(MonoImage*, std::uint32_t /*token*/, MonoClass** /*retklass*/, void* /*generic_context*/);
+using fn_field_get_parent       = MonoClass*     (*)(MonoClassField*);
 
 // --- Disconnect-time GC drain (build #547 follow-up) ----------------------
 // `mono_gc_collect(int generation)` triggers a Mono / BDWGC collection
@@ -196,6 +207,7 @@ struct Resolver {
     fn_class_from_mono_type   class_from_mono_type   = nullptr;
     fn_class_get_element_class class_get_element_class = nullptr;
     fn_class_value_size       class_value_size       = nullptr;
+    fn_class_instance_size    class_instance_size    = nullptr;
     fn_class_is_valuetype     class_is_valuetype     = nullptr;
 
     // Phase 19 — managed-method invocation.
@@ -205,12 +217,16 @@ struct Resolver {
     fn_string_new             string_new             = nullptr;
     fn_string_chars           string_chars           = nullptr;
     fn_string_length          string_length          = nullptr;
+    fn_gchandle_new           gchandle_new           = nullptr;
+    fn_gchandle_free          gchandle_free          = nullptr;
 
     // Phase 28 — IL body access for findFieldReferences.
     fn_method_get_header      method_get_header      = nullptr;
     fn_method_header_get_code method_header_get_code = nullptr;
     fn_metadata_free_mh       metadata_free_mh       = nullptr;
     fn_class_get_field_token  class_get_field_token  = nullptr;
+    fn_field_from_token       field_from_token       = nullptr;
+    fn_field_get_parent       field_get_parent       = nullptr;
 
     // Disconnect-time GC drain — see header comment on fn_gc_collect.
     fn_gc_collect             gc_collect             = nullptr;

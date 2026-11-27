@@ -46,7 +46,8 @@ public sealed class UnityGameEntry
                            ProxyKind installedProxy,
                            string source,
                            string? installedProxyVersion = null,
-                           string? sourceProxyVersion    = null)
+                           string? sourceProxyVersion    = null,
+                           string? foreignProxyPresent   = null)
     {
         ExePath               = exePath;
         GameDirectory         = gameDirectory;
@@ -58,6 +59,7 @@ public sealed class UnityGameEntry
         Source                = source;
         InstalledProxyVersion = installedProxyVersion;
         SourceProxyVersion    = sourceProxyVersion;
+        ForeignProxyPresent   = foreignProxyPresent;
     }
 
     public string       ExePath           { get; }
@@ -77,6 +79,9 @@ public sealed class UnityGameEntry
     /// given scan — surfaced per-row so the deploy grid can show the
     /// installed/source comparison directly.</summary>
     public string?      SourceProxyVersion    { get; }
+    /// <summary>Third-party proxy DLL filename(s) present next to the game .exe
+    /// (e.g. ReShade's <c>version.dll</c>), or null when none.</summary>
+    public string?      ForeignProxyPresent   { get; }
 
     public string BackendLabel => Backend switch
     {

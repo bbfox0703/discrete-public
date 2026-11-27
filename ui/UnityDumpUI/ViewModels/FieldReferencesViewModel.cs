@@ -157,6 +157,14 @@ public sealed partial class FieldReferencesViewModel : ObservableObject
                     ct: ct)
                 .ConfigureAwait(true);
             if (ct.IsCancellationRequested) return;
+            if (result.Cancelled || string.Equals(result.Error, "cancelled", StringComparison.Ordinal))
+            {
+                ErrorMessage = "Field reference search cancelled.";
+                Rows.Clear();
+                MatchCount = 0;
+                Truncated  = false;
+                return;
+            }
             if (!string.IsNullOrEmpty(result.Error))
             {
                 ErrorMessage = result.Error;

@@ -18,6 +18,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -67,9 +68,31 @@ public sealed partial class ProxyDeployViewModel : ObservableObject
     [ObservableProperty] private bool _defaultKindVersion = true;
     [ObservableProperty] private bool _defaultKindWinmm;
 
-    [ObservableProperty] private bool    _isScanning;
-    [ObservableProperty] private bool    _isBusy;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanRefresh))]
+    [NotifyPropertyChangedFor(nameof(CanRunBulk))]
+    [NotifyCanExecuteChangedFor(nameof(RefreshCommand))]
+    [NotifyCanExecuteChangedFor(nameof(InstallSelectedCommand))]
+    [NotifyCanExecuteChangedFor(nameof(UninstallSelectedCommand))]
+    [NotifyCanExecuteChangedFor(nameof(UpdateAllDeployedCommand))]
+    private bool _isScanning;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanRefresh))]
+    [NotifyPropertyChangedFor(nameof(CanRunBulk))]
+    [NotifyCanExecuteChangedFor(nameof(RefreshCommand))]
+    [NotifyCanExecuteChangedFor(nameof(InstallSelectedCommand))]
+    [NotifyCanExecuteChangedFor(nameof(UninstallSelectedCommand))]
+    [NotifyCanExecuteChangedFor(nameof(UpdateAllDeployedCommand))]
+    private bool _isBusy;
+
     [ObservableProperty] private string? _errorMessage;
+
+    /// <summary>True when neither a scan nor a bulk proxy op is in flight.</summary>
+    public bool CanRefresh => !IsScanning && !IsBusy;
+
+    /// <summary>True when neither a bulk proxy op nor a library scan is in flight.</summary>
+    public bool CanRunBulk => !IsBusy && !IsScanning;
 
     /// <summary>"3 selected · 12 deployed · 18 total" label above the grid.</summary>
     [ObservableProperty] private string _summaryText = string.Empty;
@@ -78,20 +101,23 @@ public sealed partial class ProxyDeployViewModel : ObservableObject
     /// or "1 failed: see error column." Cleared on next op.</summary>
     [ObservableProperty] private string? _lastBulkMessage;
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanRefresh))]
     private async Task RefreshAsync()
     {
+        if (IsBusy) return;
         ErrorMessage    = null;
         LastBulkMessage = null;
         IsScanning      = true;
-        _scanCts?.Cancel();
-        _scanCts = new CancellationTokenSource();
-        CancellationToken ct = _scanCts.Token;
+        CancellationTokenSource? prev = _scanCts;
+        var myCts = new CancellationTokenSource();
+        _scanCts = myCts;
+        try { prev?.Cancel(); } catch (ObjectDisposedException) { }
+        CancellationToken ct = myCts.Token;
         try
         {
             IReadOnlyList<UnityGameEntry> list = await _scanner
                 .ScanAsync(ct).ConfigureAwait(true);
-            if (ct.IsCancellationRequested) return;
+            if (ct.IsCancellationRequested || IsBusy || !ReferenceEquals(_scanCts, myCts)) return;
 
             // Preserve selection across refresh by exe path.
             HashSet<string> selectedPaths = new(StringComparer.OrdinalIgnoreCase);
@@ -115,11 +141,17 @@ public sealed partial class ProxyDeployViewModel : ObservableObject
         catch (OperationCanceledException) { /* superseded */ }
         catch (Exception ex)
         {
-            ErrorMessage = ex.Message;
+            if (ReferenceEquals(_scanCts, myCts))
+                ErrorMessage = ex.Message;
         }
         finally
         {
-            IsScanning = false;
+            if (ReferenceEquals(_scanCts, myCts))
+            {
+                IsScanning = false;
+                _scanCts = null;
+            }
+            myCts.Dispose();
         }
     }
 
@@ -134,7 +166,7 @@ public sealed partial class ProxyDeployViewModel : ObservableObject
         }
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanRunBulk))]
     private async Task InstallSelectedAsync()
     {
         ProxyKind kind = DefaultKindWinmm ? ProxyKind.Winmm : ProxyKind.Version;
@@ -143,7 +175,7 @@ public sealed partial class ProxyDeployViewModel : ObservableObject
             row => row.IsSelected && row.IsSupported).ConfigureAwait(true);
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanRunBulk))]
     private async Task UninstallSelectedAsync()
     {
         // Match every "currently deployed" state, not just the unverifiable
@@ -160,7 +192,7 @@ public sealed partial class ProxyDeployViewModel : ObservableObject
     /// currently has. Ignores selection — answers "I rebuilt DiscreteUI,
     /// push fresh DLLs to every game with a proxy."
     /// </summary>
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanRunBulk))]
     private async Task UpdateAllDeployedAsync()
     {
         await RunBulkAsync("Update", row => _installer
@@ -196,7 +228,7 @@ public sealed partial class ProxyDeployViewModel : ObservableObject
         Func<ProxyGameRow, Task<ProxyOperationResult>> op,
         Func<ProxyGameRow, bool> rowFilter)
     {
-        if (IsBusy) return;
+        if (IsBusy || IsScanning) return;
         IsBusy          = true;
         ErrorMessage    = null;
         LastBulkMessage = null;
@@ -204,7 +236,10 @@ public sealed partial class ProxyDeployViewModel : ObservableObject
         int ok = 0, fail = 0, skipped = 0;
         try
         {
-            foreach (ProxyGameRow row in Games)
+            // Snapshot the row list before awaiting any IO so a concurrent
+            // collection mutation can never throw InvalidOperationException
+            // mid-foreach (A-M10).
+            foreach (ProxyGameRow row in Games.ToList())
             {
                 if (!rowFilter(row)) { ++skipped; continue; }
                 try
@@ -215,14 +250,15 @@ public sealed partial class ProxyDeployViewModel : ObservableObject
                     // Refresh status from the post-op snapshot the installer
                     // attached to the result — cheaper than a second Detect.
                     // Pass r.Status into UpdateFrom so the row's
-                    // InstalledVersion / SourceVersion / DeployStatus all
-                    // reflect the version comparison after the op.
+                    // InstalledVersion / SourceVersion / ForeignProxyPresent /
+                    // DeployStatus all reflect the version comparison after the op.
                     var fresh = new UnityGameEntry(
                         row.Game.ExePath, row.Game.GameDirectory, row.Game.DisplayName,
                         row.Game.Backend, row.Game.Bitness,
                         row.Game.DataDirectoryName, r.Status.Kind, row.Game.Source,
                         installedProxyVersion: r.Status.InstalledProxyVersion,
-                        sourceProxyVersion:    r.Status.SourceProxyVersion);
+                        sourceProxyVersion:    r.Status.SourceProxyVersion,
+                        foreignProxyPresent:   r.Status.ForeignProxyPresent);
                     row.UpdateFrom(fresh, r.Status);
                     if (r.Ok) ++ok; else ++fail;
                 }

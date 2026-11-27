@@ -168,7 +168,45 @@ std::uint32_t DetectMainThreadId() {
     return best_tid;
 }
 
+// RAII guard for `t_inside_work_item` (A-L16): saves and restores the flag on
+// both Drain() and the inline main-thread SubmitAndWait() path so nested calls
+// and thrown exceptions never leave t_inside_work_item stuck or unset.
+struct InsideWorkItemGuard {
+    bool prev;
+    InsideWorkItemGuard() noexcept : prev(t_inside_work_item) { t_inside_work_item = true; }
+    ~InsideWorkItemGuard() noexcept { t_inside_work_item = prev; }
+    InsideWorkItemGuard(const InsideWorkItemGuard&)            = delete;
+    InsideWorkItemGuard& operator=(const InsideWorkItemGuard&) = delete;
+};
+
+void AbortPendingLocked() {
+    // Abort every still-queued item so any worker thread waiting on it wakes
+    // and unwinds. Items in the queue are always Pending — Drain pops an item
+    // BEFORE it CASes to Running, so a Running item is never in g_queue. Use
+    // CAS (not a blind store) to stay consistent with the Drain state machine:
+    // if a worker already timed out and Aborted it, leave it be.
+    for (auto& item : g_queue) {
+        ItemState expected = ItemState::Pending;
+        if (item->state.compare_exchange_strong(expected, ItemState::Aborted)) {
+            ::SetEvent(item->done_event);
+        }
+    }
+    g_queue.clear();
+}
+
 }  // namespace
+
+bool WaitUntilZeroWithDeadline(const std::atomic<int>& counter,
+                               std::uint64_t timeoutMs,
+                               std::uint32_t pollSleepMs) noexcept {
+    if (counter.load(std::memory_order_acquire) <= 0) return true;
+    const std::uint64_t startMs = ::GetTickCount64();
+    while (counter.load(std::memory_order_acquire) > 0 &&
+           (::GetTickCount64() - startMs) < timeoutMs) {
+        ::Sleep(pollSleepMs);
+    }
+    return counter.load(std::memory_order_acquire) <= 0;
+}
 
 bool Init() {
     bool expected = false;
@@ -187,22 +225,17 @@ bool Init() {
     return true;
 }
 
-void Shutdown() {
-    g_initialized.store(false);
-
-    // Abort every still-queued item so any worker thread waiting on it wakes
-    // and unwinds. Items in the queue are always Pending — Drain pops an item
-    // BEFORE it CASes to Running, so a Running item is never in g_queue. Use
-    // CAS (not a blind store) to stay consistent with the Drain state machine:
-    // if a worker already timed out and Aborted it, leave it be.
+void AbortPending() {
     std::lock_guard<std::mutex> lock(g_mutex);
-    for (auto& item : g_queue) {
-        ItemState expected = ItemState::Pending;
-        if (item->state.compare_exchange_strong(expected, ItemState::Aborted)) {
-            ::SetEvent(item->done_event);
-        }
-    }
-    g_queue.clear();
+    AbortPendingLocked();
+}
+
+void Shutdown() {
+    // Flip g_initialized under g_mutex so SubmitAndWait's locked re-check
+    // cannot enqueue a new item after AbortPendingLocked() drains g_queue (A-M8).
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_initialized.store(false);
+    AbortPendingLocked();
 }
 
 bool IsInitialized() {
@@ -253,13 +286,14 @@ void Drain() {
         // backend ThreadAttachGuards know to skip the attach/detach
         // pair (Unity main thread is already attached; nested attach
         // tears down its handle — see build #54 forensic).
-        t_inside_work_item = true;
-        try {
-            item->fn();
-        } catch (...) {
-            LogF("[MainThreadDispatcher] Drain: work closure threw — swallowed");
+        {
+            InsideWorkItemGuard workGuard;
+            try {
+                item->fn();
+            } catch (...) {
+                LogF("[MainThreadDispatcher] Drain: work closure threw — swallowed");
+            }
         }
-        t_inside_work_item = false;
         item->state.store(ItemState::Done);
         ::SetEvent(item->done_event);
         g_drain_count.fetch_add(1);
@@ -287,6 +321,9 @@ DispatchResult SubmitAndWait(WorkFn work, std::int32_t timeout_ms) {
     // the main thread waits on an event that only the main thread can set.
     const std::uint32_t main_tid = g_main_thread_id.load();
     if (::GetCurrentThreadId() == main_tid) {
+        // A-L16: set t_inside_work_item on the inline main-thread path too so
+        // ThreadAttachGuard skips attach/detach just like inside Drain().
+        InsideWorkItemGuard workGuard;
         try {
             work();
             dr.ok              = true;
@@ -302,22 +339,10 @@ DispatchResult SubmitAndWait(WorkFn work, std::int32_t timeout_ms) {
 
     g_submit_count.fetch_add(1);
 
-    // Queue full → reject fast. Sustained queue growth signals a frozen
-    // main thread; better to error than block all worker threads.
-    {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        if (g_queue.size() >= kMaxQueuedItems) {
-            g_reject_count.fetch_add(1);
-            dr.rejected        = true;
-            dr.error           = "main-thread queue full (sustained burst or frozen game?)";
-            dr.diagnostic_path = "queue_full";
-            return dr;
-        }
-    }
-
-    // Build work item. The WorkItem destructor owns done_event (see struct),
-    // so the event is closed when the last shared_ptr is released — never
-    // leaked on early-return, never closed out from under Drain's SetEvent.
+    // Build work item before taking the lock so CreateEventW stays outside g_mutex.
+    // The WorkItem destructor owns done_event (see struct), so the event is closed
+    // when the last shared_ptr is released — never leaked on early-return, never
+    // closed out from under Drain's SetEvent.
     auto item = std::make_shared<WorkItem>();
     item->fn         = std::move(work);
     item->done_event = ::CreateEventW(nullptr, FALSE /*auto-reset*/, FALSE, nullptr);
@@ -326,10 +351,23 @@ DispatchResult SubmitAndWait(WorkFn work, std::int32_t timeout_ms) {
         dr.diagnostic_path = "event_create_failed";
         return dr;
     }
-    // state defaults to ItemState::Pending (see WorkItem) — no init needed.
 
+    // Re-check g_initialized and queue cap atomically under g_mutex before
+    // pushing so Shutdown() cannot race between the initial check and push_back (A-M8).
     {
         std::lock_guard<std::mutex> lock(g_mutex);
+        if (!g_initialized.load()) {
+            dr.error           = "dispatcher not initialized";
+            dr.diagnostic_path = "uninitialized";
+            return dr;
+        }
+        if (g_queue.size() >= kMaxQueuedItems) {
+            g_reject_count.fetch_add(1);
+            dr.rejected        = true;
+            dr.error           = "main-thread queue full (sustained burst or frozen game?)";
+            dr.diagnostic_path = "queue_full";
+            return dr;
+        }
         g_queue.push_back(item);
     }
 

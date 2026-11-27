@@ -27,9 +27,13 @@
 //     valueType = Dword (mapped from System.Int32)
 //
 // The "address as a registered symbol + offsets[]" pattern is what
-// CreateAAScriptWithRecords' offsets array represents: each offset is
-// a pointer dereference applied left-to-right. With one offset and a
-// non-pointer value type CE displays the field at <symbol>+offset.
+// CreateAAScriptWithRecords' offsets array represents, using CE's .CT
+// offset order: offsets[0] maps to CE's Offset[0] (added LAST, closest
+// to the value) and offsets[n-1] maps to Offset[n-1] (added FIRST right
+// after dereferencing the symbol). With one offset `[f.Offset]` and a
+// non-pointer value type CE displays the field at `[symbol] + f.Offset`;
+// for managed System.String fields, `[charsOff, f.Offset]` dereferences
+// `[[symbol] + f.Offset] + charsOff` to reach UTF-16 `_firstChar`.
 //
 // Why a fabricated symbol (DiscreteAt_<Cls>_<hex>): bare hex addresses
 // in CE memory records get treated as immediate, but the "Address" cell
@@ -62,6 +66,13 @@ public sealed class AddressLookupRequest
     public          AddressLookupField? Field         { get; init; }
     /// <summary>Closest field below the queried offset (when no exact match).</summary>
     public          AddressLookupField? NearestField  { get; init; }
+    /// <summary>
+    /// Target game pointer size in bytes (8 for x64, 4 for x86; defaults to 8).
+    /// Controls managed <c>System.String</c> character-data offset (<c>2 * ptr + 4</c>:
+    /// <c>0x14</c> on x64, <c>0x0C</c> on x86) and pointer-sized CLR type widths
+    /// (<c>IntPtr</c>/<c>UIntPtr</c>/reference fallback → <c>Qword</c> vs <c>Dword</c>).
+    /// </summary>
+    public          int                 PointerSize   { get; init; } = 8;
 }
 
 public sealed class AddressLookupField
@@ -131,16 +142,17 @@ public static class AddressLookupAaScriptGenerator
         sb.Append("dealloc(").Append(symbol).AppendLine(")");
 
         // ----- Child records -------------------------------------------
+        int ptrSize = req.PointerSize == 4 ? 4 : 8;
         var children = new List<AaScriptChildRecord>(2);
         if (req.Field is { } f)
         {
-            children.Add(BuildChild(symbol, f, exactMatch: true));
+            children.Add(BuildChild(symbol, f, exactMatch: true, ptrSize));
         }
         else if (req.NearestField is { } nf)
         {
             // No exact field at the queried offset; expose the nearest
             // one below as a hint with a clear "delta from query" label.
-            children.Add(BuildChild(symbol, nf, exactMatch: false));
+            children.Add(BuildChild(symbol, nf, exactMatch: false, ptrSize));
         }
 
         // ----- Description --------------------------------------------
@@ -162,9 +174,10 @@ public static class AddressLookupAaScriptGenerator
 
     private static AaScriptChildRecord BuildChild(string parentSymbol,
                                                   AddressLookupField f,
-                                                  bool exactMatch)
+                                                  bool exactMatch,
+                                                  int pointerSize)
     {
-        CeValueType ce = MapClrToCe(f.Type, f.IsEnum, f.UnderlyingType);
+        CeValueType ce = MapClrToCe(f.Type, f.IsEnum, f.UnderlyingType, pointerSize);
         bool signed    = IsSignedClrType(f.IsEnum && f.UnderlyingType is { } u ? u : f.Type);
 
         // Description carries the offset + size + CLR type so the user
@@ -174,24 +187,37 @@ public static class AddressLookupAaScriptGenerator
         string desc = $"{f.Name} @+0x{f.Offset:X}  ({f.Type}, {f.Size}B)";
         if (!exactMatch) desc += "  [closest below]";
 
+        // Managed System.String fields hold a pointer to the String object,
+        // not inline UTF-16 bytes. Dereference through [symbol] + f.Offset
+        // and then add the _firstChar offset (2*ptr + 4: 0x14 x64, 0x0C x86).
+        // CE / AOBMaker Offsets[] uses .CT order (Offsets[0] = Offset[0] is
+        // added LAST; Offsets[n-1] is added FIRST after dereferencing Address).
+        bool isManagedString = !f.IsEnum
+            && string.Equals(f.Type, "System.String", StringComparison.Ordinal);
+        int[] offsets = isManagedString
+            ? new[] { 2 * pointerSize + 4, f.Offset }
+            : new[] { f.Offset };
+
         return new AaScriptChildRecord
         {
             Description = desc,
             Address     = parentSymbol,
             ValueType   = ce,
             IsSigned    = signed,
-            Offsets     = new[] { f.Offset },
+            Offsets     = offsets,
         };
     }
 
     /// <summary>
     /// Map a CLR primitive type name to CE's TVariableType. Falls back
-    /// to <see cref="CeValueType.Qword"/> for anything we don't
-    /// recognise — that's a 64-bit slot in CE which fits a managed
-    /// pointer, so the user can re-classify in CE if it's wrong.
+    /// to <see cref="CeValueType.Qword"/> (x64) or <see cref="CeValueType.Dword"/>
+    /// (x86) for pointer-sized types and anything we don't recognise, so
+    /// the slot matches a managed pointer width and the user can re-classify
+    /// in CE if needed.
     /// </summary>
-    internal static CeValueType MapClrToCe(string clrType, bool isEnum, string? underlying)
+    internal static CeValueType MapClrToCe(string clrType, bool isEnum, string? underlying, int pointerSize = 8)
     {
+        CeValueType ptrType = pointerSize == 4 ? CeValueType.Dword : CeValueType.Qword;
         // Unwrap enums to their underlying integer type.
         string t = (isEnum && !string.IsNullOrEmpty(underlying)) ? underlying! : clrType;
         return t switch
@@ -206,12 +232,12 @@ public static class AddressLookupAaScriptGenerator
             "System.UInt32"  => CeValueType.Dword,
             "System.Int64"   => CeValueType.Qword,
             "System.UInt64"  => CeValueType.Qword,
-            "System.IntPtr"  => CeValueType.Qword,
-            "System.UIntPtr" => CeValueType.Qword,
+            "System.IntPtr"  => ptrType,
+            "System.UIntPtr" => ptrType,
             "System.Single"  => CeValueType.Single,
             "System.Double"  => CeValueType.Double,
             "System.String"  => CeValueType.UnicodeString,
-            _                => CeValueType.Qword,
+            _                => ptrType,
         };
     }
 

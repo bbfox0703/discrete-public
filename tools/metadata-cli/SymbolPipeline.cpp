@@ -241,15 +241,22 @@ std::optional<PipelineResult> ResolveSymbols(const std::wstring& metadataPath,
             auto methods = parser.EnumerateTypeMethods(*type);
             for (const auto& m : methods) {
                 ++res.methodsTotal;
-                std::int32_t localIdx = m.index - image.methodStart;
-                if (localIdx < 0 ||
-                    static_cast<std::uint64_t>(localIdx) >= module.methodCount) {
+                bool indexMismatch = false;
+                auto localIdxOpt = ResolveMethodPointerIndex(
+                    m.token, m.index, image.methodStart, module.methodCount, indexMismatch);
+                if (indexMismatch) {
+                    ++res.methodsIndexMismatch;
+                }
+                if (!localIdxOpt) {
                     continue;
                 }
+                const std::uint64_t slotByteOff = static_cast<std::uint64_t>(*localIdxOpt) * 8u;
                 std::uint64_t methodVa = 0;
-                if (*mptrsFileOff + (localIdx + 1) * 8 <= bytes.size()) {
+                if (*mptrsFileOff <= bytes.size() &&
+                    slotByteOff <= bytes.size() - *mptrsFileOff &&
+                    (bytes.size() - *mptrsFileOff - slotByteOff) >= 8u) {
                     std::memcpy(&methodVa,
-                                bytes.data() + *mptrsFileOff + localIdx * 8, 8);
+                                bytes.data() + *mptrsFileOff + slotByteOff, 8);
                 }
                 if (methodVa == 0 || methodVa < img->imageBase) {
                     ++res.methodsNullPtr;

@@ -177,9 +177,10 @@ method, etc.) — note no `ok` / `returnType` keys, only `error`:
 | Return type | `returnValue` JSON shape |
 |---|---|
 | `System.Void` | `null` |
-| `System.Boolean` | `0` / `1` |
+| `System.Boolean` | `true` / `false` |
 | `System.Byte` / `UInt16` / `UInt32` / `UInt64` / `Char` | unsigned int |
 | `System.SByte` / `Int16` / `Int32` / `Int64` | signed int |
+| Enum types | underlying signed/unsigned int |
 | `System.Single` / `Double` | float |
 | `System.IntPtr` / `UIntPtr` | hex string `"0x..."` |
 | `System.String` | UTF-8 string (decoded from the managed UTF-16 buffer at `+0x14`) |
@@ -214,6 +215,7 @@ then `decodeStructFloats(result, 3)`.
 | `method_is_abstract` | method has no body to invoke | pick a concrete override; instance dispatch routes through the overload's actual native entry |
 | `instance_required_for_non_static` | matched method is non-static, but `instance == null` | pass the managed object pointer as `instance` (typically from `findInstances` / `whatIsAt`) |
 | `arg_count_mismatch` | wire `args.length != formal param count` | match the parameter count |
+| `arg_type_mismatch` | wire arg `type` (or struct byte size) does not match formal parameter type | match the method signature's formal parameter types |
 | `native_crash_in_runtime_invoke` | SEH caught a hard crash inside the JIT/AOT entry point | check the log file and the method's actual signature |
 
 ## Caller responsibilities

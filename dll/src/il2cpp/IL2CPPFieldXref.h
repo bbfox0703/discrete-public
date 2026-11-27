@@ -28,12 +28,9 @@
 namespace Discrete::IL2CPP {
 
 enum class FieldRefKind : int {
-    Any   = 0,   // any reference (mov + lea both count for v1)
-    Read  = 1,   // mov reg, [rip+disp32]  (load)
-    Write = 2,   // mov [rip+disp32], reg  — NOTE: v1 does NOT separately
-                 // detect this opcode; both reads and writes via mov get
-                 // classified as "read" in the output. A separate write
-                 // detector (opcode 0x89 / 0xC7) is a Phase 28c follow-up.
+    Any   = 0,   // read or write
+    Read  = 1,   // mov reg, [rip+disp32] / lea reg, [rip+disp32]
+    Write = 2,   // mov [rip+disp32], reg (0x89) / chain & instance write ops
 };
 
 struct FieldRefMatch {
@@ -52,6 +49,7 @@ struct FieldRefMatch {
 
 struct FindFieldRefsResult {
     bool          ok = false;
+    bool          cancelled = false;
     std::string   error;
     void*         staticAddress = nullptr;  // resolved target absolute address
     std::vector<FieldRefMatch> matches;

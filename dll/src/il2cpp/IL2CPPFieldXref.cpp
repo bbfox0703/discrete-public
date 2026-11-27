@@ -30,9 +30,14 @@
 #include "IL2CPPResolver.h"
 #include "IL2CPPStaticFieldsOffset.h"
 #include "IL2CPPThreadAttach.h"
+#include "../shared/FieldXrefHelpers.h"
 #include "../shared/Logger.h"
 #include "../shared/MagicStrings.h"
+#include "../shared/ManagedLayout.h"
 #include "../shared/Memory.h"
+#include "../shared/RuntimeHealth.h"
+#include "../shared/ScanCancel.h"
+#include "../shared/SehFilter.h"
 #include "../shared/ModuleHelper.h"
 
 #include <windows.h>
@@ -64,6 +69,7 @@ const char* OpcodeKind(std::uint8_t op) noexcept {
 // `std::upper_bound` recovers the enclosing method for any IP.
 struct MethodIndexEntry {
     std::uintptr_t address;
+    Il2CppClass*   klass = nullptr;  // B-L7: pointer identity for nested-class match
     std::string    ns;
     std::string    className;
     std::string    methodName;
@@ -75,31 +81,92 @@ struct MethodIndexEntry {
 #pragma warning(push)
 #pragma warning(disable: 4509)
 const MethodInfo* SehNextMethod(fn_class_get_methods fn, Il2CppClass* k, void** iter) {
-    __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k, iter); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 FieldInfo* SehNextField(fn_class_get_fields fn, Il2CppClass* k, void** iter) {
-    __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    unsigned long code = 0;
+    __try { return fn(k, iter); }
+    __except ((code = GetExceptionCode()),
+              Seh::MemoryAccessExceptionFilter(code, GetExceptionInformation())) {
+        RuntimeHealth::MarkRuntimeFault("il2cpp_class_get_fields", code);
+        return nullptr;
+    }
 }
 void* SehStaticData(fn_class_get_static_data fn, Il2CppClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 void* SehMethodPtr(fn_method_get_pointer fn, const MethodInfo* m) {
-    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(m); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 void* SehMethodPtrFromStruct(const MethodInfo* m) {
     __try { return *reinterpret_cast<void* const*>(m); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 std::uint32_t SehMethodFlags(fn_method_get_flags fn, const MethodInfo* m, std::uint32_t* iflags) {
-    __try { return fn(m, iflags); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0u; }
+    __try { return fn(m, iflags); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
 }
 std::uint32_t SehMethodToken(fn_method_get_token fn, const MethodInfo* m) {
-    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0u; }
+    __try { return fn(m); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
 }
 const char* SehMethodName(fn_method_get_name fn, const MethodInfo* m) {
-    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(m); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+bool SehClassIsValueType(fn_class_is_valuetype fn, Il2CppClass* k) {
+    __try { return (fn(k) & 0xFF) != 0; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return false; }
+}
+Il2CppClass* SehClassGetParent(fn_class_get_parent fn, Il2CppClass* k) {
+    __try { return fn(k); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+const char* SehClassName(fn_class_get_name fn, Il2CppClass* k) {
+    __try { return fn(k); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
+}
+const char* SehClassNs(fn_class_get_namespace fn, Il2CppClass* k) {
+    __try { return fn(k); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 #pragma warning(pop)
+
+bool IsValueTypeClass(Il2CppClass* k) {
+    if (k == nullptr) return false;
+    const auto& r = GetResolver();
+    if (r.class_is_valuetype != nullptr) {
+        return SehClassIsValueType(r.class_is_valuetype, k);
+    }
+    if (r.class_get_parent != nullptr && r.class_get_name != nullptr) {
+        Il2CppClass* parent = SehClassGetParent(r.class_get_parent, k);
+        if (parent != nullptr) {
+            const char* pName = SehClassName(r.class_get_name, parent);
+            const char* pNs   = r.class_get_namespace ? SehClassNs(r.class_get_namespace, parent) : nullptr;
+            if (pName != nullptr && pNs != nullptr && std::strcmp(pNs, "System") == 0 &&
+                (std::strcmp(pName, "ValueType") == 0 || std::strcmp(pName, "Enum") == 0)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// B-M9: query Win64 PE .pdata unwind table for the exact [begin, end) bounds
+// of the AOT function containing `ip`.
+bool LookupRuntimeFunctionBounds(std::uintptr_t ip,
+                                 std::uintptr_t& outBegin,
+                                 std::uintptr_t& outEnd) noexcept {
+#if defined(_M_AMD64) || defined(_M_ARM64)
+    DWORD64 imageBase = 0;
+    PRUNTIME_FUNCTION rf = ::RtlLookupFunctionEntry(
+        static_cast<DWORD64>(ip), &imageBase, nullptr);
+    if (rf == nullptr || imageBase == 0) return false;
+    outBegin = static_cast<std::uintptr_t>(imageBase + rf->BeginAddress);
+    outEnd   = static_cast<std::uintptr_t>(imageBase + rf->EndAddress);
+    return outEnd > outBegin;
+#else
+    (void)ip; (void)outBegin; (void)outEnd;
+    return false;
+#endif
+}
 
 void* ReadMethodPointer(const MethodInfo* m) {
     if (m == nullptr) return nullptr;
@@ -137,6 +204,7 @@ std::vector<MethodIndexEntry> BuildMethodIndex(const Il2CppImage* image,
             if (p == nullptr) continue;
             MethodIndexEntry e;
             e.address     = reinterpret_cast<std::uintptr_t>(p);
+            e.klass       = ce.klass;
             e.ns          = ce.ns;
             e.className   = ce.name;
             if (r.method_get_name != nullptr) {
@@ -161,32 +229,23 @@ std::vector<MethodIndexEntry> BuildMethodIndex(const Il2CppImage* image,
     return idx;
 }
 
-// Locate the largest entry whose address ≤ `ip` (i.e. the enclosing method
-// per the contiguous-AOT-emission assumption). Returns nullptr if no
-// such entry exists. Caller may double-check by computing `ip - entry.address`
-// to reject hits that fall implausibly far past the entry — for v1 we
-// trust the index; a missing entry just means the hit's enclosing method
-// lives in a different assembly.
+// B-M9 — exact enclosing-method attribution using Win64 .pdata bounds
+// (RtlLookupFunctionEntry). Any hit inside another assembly's AOT method
+// interleaved in GameAssembly.dll .text has a funcBegin that is NOT in this
+// image's method index and is cleanly rejected instead of misattributed.
 const MethodIndexEntry* FindEnclosing(const std::vector<MethodIndexEntry>& idx,
                                        std::uintptr_t ip) noexcept {
-    if (idx.empty()) return nullptr;
-    auto it = std::upper_bound(
-        idx.begin(), idx.end(), ip,
-        [](std::uintptr_t value, const MethodIndexEntry& e) {
-            return value < e.address;
-        });
-    if (it == idx.begin()) return nullptr;
-    --it;
-    return &(*it);
+    return FieldXref::FindEnclosingMethodExact(idx, ip, LookupRuntimeFunctionBounds);
 }
 
 struct ResolvedStaticField {
-    Il2CppClass*   klass    = nullptr;
-    void*          address  = nullptr;
-    std::size_t    offset   = 0;
+    Il2CppClass*   klass       = nullptr;
+    void*          address     = nullptr;
+    std::size_t    offset      = 0;
     std::string    typeName;
-    std::uint32_t  flags    = 0;
-    bool           isStatic = false;
+    std::uint32_t  flags       = 0;
+    bool           isStatic    = false;
+    bool           isValueType = false;
     std::string    error;
 };
 
@@ -261,6 +320,13 @@ ResolvedStaticField ResolveStaticField(const Il2CppImage* image,
             "there's nothing for Phase 28 to match against. "
             "This is a semantic limitation of inlined constants, not a "
             "backend bug.";
+        return out;
+    }
+    if (Discrete::ManagedLayout::NormalizeFieldOffset32(out.offset) < 0) {
+        out.error =
+            "thread-static field ([ThreadStatic]) — stored per thread in TLS "
+            "rather than in the class's shared static_fields block (offset=-1), "
+            "so there is no single static address for Phase 28 to scan.";
         return out;
     }
     void* staticBase = SehStaticData(r.class_get_static_data, out.klass);
@@ -349,6 +415,7 @@ ResolvedStaticField ResolveInstanceField(const Il2CppImage* image,
         out.error = "literal field has no instance storage to scan for";
         return out;
     }
+    out.isValueType = IsValueTypeClass(out.klass);
     return out;
 }
 
@@ -395,6 +462,7 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                                               std::size_t        limit) {
     FindFieldRefsResult result;
     if (image == nullptr) { result.error = "image is null"; return result; }
+    if (limit == 0) limit = 200;
 
     const auto& r = GetResolver();
     if (!r.resolved) { result.error = "il2cpp runtime not resolved"; return result; }
@@ -436,6 +504,12 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
     // reused for every hit.
     std::vector<MethodIndexEntry> methodIndex = BuildMethodIndex(image,
                                                                  &result.scannedMethods);
+    if (ScanCancel::IsCancelRequested()) {
+        result.cancelled = true;
+        result.ok = false;
+        result.matches.clear();
+        return result;
+    }
 
     Log::Write(MagicStrings::LogCategoryWalk,
                "FieldXref: methodIndex built — " +
@@ -489,10 +563,22 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
     // cut-off are applied here in that same order, so the result (and the
     // counters logged below) match the original inline loop exactly.
     for (const auto& c : XrefScan::ScanRipRelative(sections, targetAddr)) {
+        if (ScanCancel::IsCancelRequested()) {
+            result.cancelled = true;
+            result.ok = false;
+            result.matches.clear();
+            return result;
+        }
         if (emitHit(c.ip, c.opcode) && result.matches.size() >= limit) {
             result.truncated = true;
             break;
         }
+    }
+    if (ScanCancel::IsCancelRequested()) {
+        result.cancelled = true;
+        result.ok = false;
+        result.matches.clear();
+        return result;
     }
 
     Log::Write(MagicStrings::LogCategoryWalk,
@@ -585,6 +671,12 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                     };
 
                     for (const auto& ls : lazySlots) {
+                        if (ScanCancel::IsCancelRequested()) {
+                            result.cancelled = true;
+                            result.ok = false;
+                            result.matches.clear();
+                            return result;
+                        }
                         if (slotAlreadyKnown(ls.slotAddress)) continue;
 
                         bool matched     = false;
@@ -638,9 +730,21 @@ FindFieldRefsResult FindStaticFieldReferences(const Il2CppImage* image,
                     " totalSlots=" + std::to_string(slots.size()));
 
                 if (!slots.empty()) {
+                    if (ScanCancel::IsCancelRequested()) {
+                        result.cancelled = true;
+                        result.ok = false;
+                        result.matches.clear();
+                        return result;
+                    }
                     ChainScanStats v2stats{};
                     auto chains = DetectFieldAccessChains(
                         slots, sfo, target.offset, limit, &v2stats);
+                    if (ScanCancel::IsCancelRequested()) {
+                        result.cancelled = true;
+                        result.ok = false;
+                        result.matches.clear();
+                        return result;
+                    }
                     Log::Write(MagicStrings::LogCategoryWalk,
                         "FieldXref: v2 scan complete — hopOneCandidates=" +
                         std::to_string(v2stats.hopOneCandidates) +
@@ -834,6 +938,7 @@ FindFieldRefsResult FindInstanceFieldReferences(const Il2CppImage* image,
                                                 std::size_t        limit) {
     FindFieldRefsResult result;
     if (image == nullptr) { result.error = "image is null"; return result; }
+    if (limit == 0) limit = 200;
 
     const auto& r = GetResolver();
     if (!r.resolved) { result.error = "il2cpp runtime not resolved"; return result; }
@@ -848,7 +953,11 @@ FindFieldRefsResult FindInstanceFieldReferences(const Il2CppImage* image,
     if (!target.error.empty()) { result.error = std::move(target.error); return result; }
     result.staticAddress = nullptr;  // instance fields have no single storage addr
 
-    const std::size_t fieldOffset = target.offset;
+    // B-L7: for value-type declaring classes (structs), AOT instance methods
+    // receive an UNBOXED `this` pointer, so the machine-code displacement is
+    // `metadataOffset - kObjectHeader` rather than the boxed field offset.
+    const std::size_t fieldOffset = FieldXref::ComputeIl2CppInstanceScanOffset(
+        target.offset, target.isValueType, ManagedLayout::kObjectHeader);
     if (fieldOffset == 0 || fieldOffset > 0x10000u) {
         // Offset 0 (no real instance slot) / implausibly large (generic /
         // thread-static sentinel). Proceed but log — a disp==0 match would be
@@ -883,6 +992,12 @@ FindFieldRefsResult FindInstanceFieldReferences(const Il2CppImage* image,
     // and the scanned-method count).
     std::vector<MethodIndexEntry> methodIndex = BuildMethodIndex(image,
                                                                  &result.scannedMethods);
+    if (ScanCancel::IsCancelRequested()) {
+        result.cancelled = true;
+        result.ok = false;
+        result.matches.clear();
+        return result;
+    }
 
     Log::Write(MagicStrings::LogCategoryWalk,
                "FieldXref(instance): target " +
@@ -911,11 +1026,21 @@ FindFieldRefsResult FindInstanceFieldReferences(const Il2CppImage* image,
     std::vector<std::size_t> rangeOrdinal;
     for (std::size_t mi = 0; mi < methodIndex.size(); ++mi) {
         const MethodIndexEntry& m = methodIndex[mi];
-        if (m.ns != ns || m.className != className) continue;
+        // B-L7: compare by Il2CppClass* pointer identity rather than (ns, name)
+        // strings so nested classes resolved via dot-fallback (`Ns.Outer` +
+        // `Inner` vs `Ns` + `Outer/Inner`) never silently produce 0 methods.
+        if (m.klass != target.klass) continue;
         ++scannedDeclMethods;
 
         const std::uintptr_t methodStart = m.address;
         std::uintptr_t methodEnd = methodStart + kMaxMethodBytes;
+        // B-M9: clamp to exact .pdata function end when available so we never
+        // bleed into an interleaved method from another assembly.
+        std::uintptr_t pdataBegin = 0, pdataEnd = 0;
+        if (LookupRuntimeFunctionBounds(methodStart, pdataBegin, pdataEnd) &&
+            pdataBegin == methodStart && pdataEnd > methodStart && pdataEnd < methodEnd) {
+            methodEnd = pdataEnd;
+        }
         if (mi + 1 < methodIndex.size()) {
             const std::uintptr_t next = methodIndex[mi + 1].address;
             if (next > methodStart && next < methodEnd) methodEnd = next;
@@ -936,6 +1061,12 @@ FindFieldRefsResult FindInstanceFieldReferences(const Il2CppImage* image,
     // operand in those ranges, in decode order. Kind filter and limit apply
     // here in the same order as the original inline loop.
     for (const auto& h : XrefScan::ScanInstanceAccesses(ranges, fieldOffset)) {
+        if (ScanCancel::IsCancelRequested()) {
+            result.cancelled = true;
+            result.ok = false;
+            result.matches.clear();
+            return result;
+        }
         const char* k = h.write ? "write" : "read";
         ++candidateHits;
         if (kindFilter == FieldRefKind::Read  && std::strcmp(k, "read")  != 0) {

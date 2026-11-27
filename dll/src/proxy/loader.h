@@ -13,9 +13,8 @@
 //      the Unity backend and loads the matching Discrete-{Mono|IL2CPP}.dll
 //      from the same directory as the proxy DLL.
 //
-// 32-bit support is NOT yet implemented (Phase 12d). The current build is
-// x64 only — same as the rest of the project. Running this proxy under a
-// 32-bit Mono game will fail at backend-DLL load (we ship x64 backends only).
+// Ships for both x64 (`dist\`) and x86 (`dist\x86\`). On x86 Mono targets,
+// the proxy loads the sibling x86 `Discrete-Mono.dll`.
 
 #pragma once
 

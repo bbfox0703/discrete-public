@@ -5,6 +5,7 @@
 #include "shared/ExportAPI.h"
 #include "shared/Logger.h"
 #include "shared/MagicStrings.h"
+#include "shared/ModuleLifecycle.h"
 #include "shared/PipeServer.h"
 #include "shared/RustCore.h"
 
@@ -56,17 +57,18 @@ void LogLoadedModules() {
             text += Utf8FromWide(name);
         }
     }
-    Discrete::Log::Write(L"init", text);
+    Discrete::Log::Write(Discrete::MagicStrings::LogCategoryInit, text);
 }
 
 // Phase 12b: per-process named mutex used as a "first injection wins"
-// gate. Both Discrete-Mono.dll and Discrete-IL2CPP.dll, plus the
-// proxy DLLs, all run this same OnAttach. Without the gate, two
-// concurrently-loaded backend DLLs would each try to bind the named pipe
-// and the second would fail noisily; or worse, the second copy of the
-// same DLL (loaded via the proxy and also via the UI's Pick & inject)
-// would re-init handler tables. The mutex makes Init exactly-once per
-// host PID regardless of who loaded us.
+// gate. Both Discrete-Mono.dll and Discrete-IL2CPP.dll run this OnAttach
+// (proxy DLLs have their own DllMain and only load one backend DLL).
+// Without the gate, two concurrently-loaded backend DLLs would each try to
+// bind the named pipe and the second would fail noisily; or worse, a second
+// copy of the same DLL (loaded via proxy and also via the UI's Pick & inject)
+// would re-init handler tables or stack MinHook detours. The mutex makes Init
+// exactly-once per host PID regardless of who loaded us, and SetOwnsInit()
+// propagates that ownership to Discrete_Init / Discrete_StartPipe (A-M4).
 HANDLE g_initMutex = nullptr;
 
 bool TryClaimSingleInit() noexcept {
@@ -74,16 +76,8 @@ bool TryClaimSingleInit() noexcept {
     ::_snwprintf_s(name, _countof(name), _TRUNCATE,
                    L"Global\\Discrete-Init-PID-%lu",
                    ::GetCurrentProcessId());
-    g_initMutex = ::CreateMutexW(nullptr, /*bInitialOwner*/ TRUE, name);
-    if (g_initMutex == nullptr) return false;
-    if (::GetLastError() == ERROR_ALREADY_EXISTS) {
-        // Someone else (a different backend DLL, or a re-injection) has
-        // already initialised this process. Release our handle and bail.
-        ::CloseHandle(g_initMutex);
-        g_initMutex = nullptr;
-        return false;
-    }
-    return true;
+    g_initMutex = Discrete::ModuleLifecycle::TryClaimProcessMutex(name);
+    return g_initMutex != nullptr;
 }
 
 void StartRetentionSweep();
@@ -92,6 +86,7 @@ void OnAttach(HMODULE self) {
     Discrete::Log::Init();
 
     if (!TryClaimSingleInit()) {
+        Discrete::ModuleLifecycle::SetOwnsInit(false);
         std::ostringstream os;
         os << "Discrete DLL skipping init: another backend already "
               "claimed PID " << ::GetCurrentProcessId()
@@ -100,6 +95,20 @@ void OnAttach(HMODULE self) {
         Discrete::Log::Init(os.str());
         ::DisableThreadLibraryCalls(self);
         return;
+    }
+    Discrete::ModuleLifecycle::SetOwnsInit(true);
+
+    // A-H1: pin this module for the host process lifetime so external
+    // FreeLibrary() calls (CE "unload module", Process Hacker, third-party
+    // injectors) cannot unmap code pages under live pipe workers or MinHook
+    // detours, nor trigger cleanup under the OS loader lock. The sole
+    // supported teardown is the explicit off-DllMain Discrete_Shutdown()
+    // export (used by unity_dump.lua), which leaves the module mapped.
+    if (Discrete::ModuleLifecycle::PinModuleContaining(
+            reinterpret_cast<const void*>(&OnAttach))) {
+        Discrete::Log::Init("Module pinned (GET_MODULE_HANDLE_EX_FLAG_PIN)");
+    } else {
+        Discrete::Log::Init("Warning: failed to pin module via GetModuleHandleExW");
     }
 
     // Banner with full version + git short + build timestamp + Debug/Release
@@ -172,52 +181,28 @@ void StartRetentionSweep() {
     Discrete::Log::Init("Log retention sweep skipped: CreateThread failed");
 }
 
-void OnDetach() {
-    Discrete::Log::Init("Discrete DLL detaching");
-    Discrete_Shutdown();
-    if (g_initMutex != nullptr) {
-        ::ReleaseMutex(g_initMutex);
-        ::CloseHandle(g_initMutex);
-        g_initMutex = nullptr;
-    }
-}
-
 }  // namespace
 
-// DllMain — entry point. lpReserved tells us WHY DLL_PROCESS_DETACH fired:
-//   lpReserved == NULL   → FreeLibrary called → we should clean up gracefully
-//                          (process keeps running; leaving hooks pointing at
-//                          unmapped memory would crash the host)
-//   lpReserved != NULL   → process is terminating → SKIP all cleanup, the
-//                          OS reclaims everything. Cleanup at this point is
-//                          actively harmful because:
-//                            (a) `std::thread::join()` in PipeServer::Stop
-//                                deadlocks under the loader lock (DllMain
-//                                holds it; the joinee thread can't make
-//                                progress on Windows operations needing the
-//                                same lock).
-//                            (b) MinHook's MH_RemoveHook SuspendThreads on
-//                                every other thread in the dying process
-//                                to verify nobody's in the trampoline —
-//                                slow (Unity has dozens of threads) and
-//                                potentially deadlocks against
-//                                TerminateProcess.
-//                          Observed live 2026-05-20 against SaGa F2R: ~10s
-//                          delay between window-close and process-exit
-//                          when the DLL is injected. Fixed by short-
-//                          circuiting here.
+// DllMain — entry point.
+//
+// DLL_PROCESS_DETACH is an intentional no-op on BOTH process termination
+// (lpReserved != nullptr) AND FreeLibrary (lpReserved == nullptr):
+//   * OnAttach pins the active backend module via GET_MODULE_HANDLE_EX_FLAG_PIN,
+//     so external FreeLibrary calls cannot unload it.
+//   * Even if pinning failed (or on a dormant second copy that lost single-init),
+//     DllMain executes under the OS loader lock: joining/draining pipe workers
+//     or calling MH_RemoveHook here inevitably deadlocks against
+//     LdrShutdownThread or leaves detached workers returning into unmapped pages.
+//   * Graceful teardown runs exclusively through the explicit off-DllMain
+//     Discrete_Shutdown() export (scripts/unity_dump.lua), which stops the pipe
+//     server and disables hooks while keeping the module mapped.
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
+    (void)lpReserved;
     switch (reason) {
         case DLL_PROCESS_ATTACH:
             OnAttach(hModule);
             break;
         case DLL_PROCESS_DETACH:
-            if (lpReserved != nullptr) {
-                // Process termination — let the OS sweep. Returning TRUE
-                // immediately is the documented best practice.
-                break;
-            }
-            OnDetach();
             break;
         default:
             break;

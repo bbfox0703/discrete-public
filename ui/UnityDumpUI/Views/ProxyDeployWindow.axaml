@@ -24,7 +24,7 @@
                 Spacing="6" Margin="0,0,0,8">
       <Button Content="{StaticResource Deploy.Refresh}"
               Command="{Binding RefreshCommand}"
-              IsEnabled="{Binding !IsScanning}" />
+              IsEnabled="{Binding CanRefresh}" />
       <Border Width="1" Background="#444" Margin="4,2" />
       <Button Content="{StaticResource Deploy.SelectAll}"
               Command="{Binding SelectAllCommand}" />
@@ -82,16 +82,16 @@
         <Button Grid.Column="0"
                 Content="{StaticResource Deploy.InstallSelected}"
                 Command="{Binding InstallSelectedCommand}"
-                IsEnabled="{Binding !IsBusy}"
+                IsEnabled="{Binding CanRunBulk}"
                 Classes="accent" />
         <Button Grid.Column="1"
                 Content="{StaticResource Deploy.UninstallSelected}"
                 Command="{Binding UninstallSelectedCommand}"
-                IsEnabled="{Binding !IsBusy}" />
+                IsEnabled="{Binding CanRunBulk}" />
         <Button Grid.Column="2"
                 Content="{StaticResource Deploy.UpdateAll}"
                 Command="{Binding UpdateAllDeployedCommand}"
-                IsEnabled="{Binding !IsBusy}"
+                IsEnabled="{Binding CanRunBulk}"
                 ToolTip.Tip="{StaticResource Deploy.UpdateAllTooltip}" />
 
         <StackPanel Grid.Column="3" Orientation="Vertical"

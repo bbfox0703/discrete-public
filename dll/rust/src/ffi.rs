@@ -114,6 +114,10 @@ pub struct Reader {
     ctx: *mut c_void,
 }
 
+/// OS page granularity used for D-M1 readable-span fallback when a 1 MiB chunk
+/// read fails on an anti-cheat stripped (`PAGE_NOACCESS` / `PAGE_GUARD`) page.
+pub(crate) const PAGE_SIZE: usize = 4096;
+
 impl Reader {
     /// # Safety
     /// `read` must honour the `dc_read_fn` contract for every call, and `ctx`
@@ -131,6 +135,109 @@ impl Reader {
         // SAFETY: dst is a valid writable buffer of dst.len() bytes; the
         // callback contract (see `new`) covers the rest.
         unsafe { (self.read)(self.ctx, addr, dst.as_mut_ptr(), dst.len()) == 1 }
+    }
+
+    /// Walks `[sec_va, sec_va + sec_size)` in chunks of up to `chunk_size` bytes
+    /// (+ `overlap` tail bytes), invoking `on_span(span_va, span_bytes, owned_len)`
+    /// for each contiguous readable span.
+    ///
+    /// Fast path: reads the full chunk (+ overlap) in one `read()` call — bit-for-bit
+    /// identical to the legacy loop on fully-readable sections.
+    /// Fallback (D-M1): when a whole chunk read fails, walks that chunk page-by-page
+    /// (4 KiB), coalescing consecutive readable pages into contiguous spans (with
+    /// overlap tail into the next chunk when readable) so NO readable pages before
+    /// or after a `PAGE_NOACCESS` page are lost. Increments `*failed_pages` once per
+    /// unreadable page.
+    ///
+    /// `on_span` returns `true` to keep scanning or `false` to stop early.
+    pub(crate) fn scan_readable_spans<F>(
+        &self,
+        sec_va: usize,
+        sec_size: usize,
+        chunk_size: usize,
+        overlap: usize,
+        buf: &mut [u8],
+        failed_pages: &mut usize,
+        mut on_span: F,
+    ) -> bool
+    where
+        F: FnMut(usize, &[u8], usize) -> bool,
+    {
+        debug_assert!(buf.len() >= chunk_size + overlap);
+        let mut pos = 0usize;
+        while pos < sec_size {
+            let want = (sec_size - pos).min(chunk_size);
+            let read_want = (want + overlap).min(sec_size - pos);
+
+            // Fast path: whole chunk + overlap readable in one call.
+            if self.read(sec_va.wrapping_add(pos), &mut buf[..read_want]) {
+                if !on_span(sec_va.wrapping_add(pos), &buf[..read_want], want) {
+                    return false;
+                }
+                pos = pos.wrapping_add(want);
+                continue;
+            }
+
+            // Fallback (D-M1): walk [pos, pos + want) page-by-page, coalescing
+            // adjacent readable pages so readable code before/after the bad page
+            // is never dropped.
+            let chunk_end = pos + want;
+            let mut cursor = pos;
+            let mut span_start = pos;
+            let mut span_len = 0usize;
+
+            while cursor < chunk_end {
+                let va = sec_va.wrapping_add(cursor);
+                let page_rem = PAGE_SIZE - (va & (PAGE_SIZE - 1));
+                let step = (chunk_end - cursor).min(page_rem);
+
+                if self.read(va, &mut buf[span_len..span_len + step]) {
+                    if span_len == 0 {
+                        span_start = cursor;
+                    }
+                    span_len += step;
+                } else {
+                    *failed_pages += 1;
+                    if span_len > 0 {
+                        if !on_span(
+                            sec_va.wrapping_add(span_start),
+                            &buf[..span_len],
+                            span_len,
+                        ) {
+                            return false;
+                        }
+                        span_len = 0;
+                    }
+                }
+                cursor += step;
+            }
+
+            // Flush any trailing readable span at the end of this chunk,
+            // opportunistically appending readable `overlap` bytes past
+            // `chunk_end` so instructions straddling the chunk boundary still decode.
+            if span_len > 0 {
+                let mut total_len = span_len;
+                let tail_avail = (sec_size - chunk_end).min(overlap);
+                if tail_avail > 0
+                    && self.read(
+                        sec_va.wrapping_add(chunk_end),
+                        &mut buf[span_len..span_len + tail_avail],
+                    )
+                {
+                    total_len += tail_avail;
+                }
+                if !on_span(
+                    sec_va.wrapping_add(span_start),
+                    &buf[..total_len],
+                    span_len,
+                ) {
+                    return false;
+                }
+            }
+
+            pos = chunk_end;
+        }
+        true
     }
 }
 

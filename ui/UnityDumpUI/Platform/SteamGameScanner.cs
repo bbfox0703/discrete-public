@@ -216,12 +216,14 @@ public sealed class SteamGameScanner : IUnityGameScanner
         ProxyKind installedProxy = ProxyKind.None;
         string?   installedVer   = null;
         string?   sourceVer      = null;
+        string?   foreignProxy   = null;
         try
         {
             ProxyInstallStatus s = _proxyInstaller.DetectAsync(exePath).GetAwaiter().GetResult();
             installedProxy = s.Kind;
             installedVer   = s.InstalledProxyVersion;
             sourceVer      = s.SourceProxyVersion;
+            foreignProxy   = s.ForeignProxyPresent;
         }
         catch { /* tolerate */ }
 
@@ -230,7 +232,8 @@ public sealed class SteamGameScanner : IUnityGameScanner
             exePath, gameDir, display,
             backend, bitness, dataDirName, installedProxy, source,
             installedProxyVersion: installedVer,
-            sourceProxyVersion:    sourceVer);
+            sourceProxyVersion:    sourceVer,
+            foreignProxyPresent:   foreignProxy);
     }
 
     // ---------- PE header bitness ----------------------------------------

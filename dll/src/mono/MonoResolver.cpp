@@ -123,6 +123,7 @@ void DoResolve() {
     // Phase 10 follow-up: array element-class metadata for walkArray.
     optBind("mono_class_get_element_class",     g_resolver.class_get_element_class);
     optBind("mono_class_value_size",            g_resolver.class_value_size);
+    optBind("mono_class_instance_size",         g_resolver.class_instance_size);
     optBind("mono_class_is_valuetype",          g_resolver.class_is_valuetype);
 
     // Nested-type support — required to resolve `Outer/Inner` style names
@@ -149,6 +150,8 @@ void DoResolve() {
     optBind("mono_string_new",                  g_resolver.string_new);
     optBind("mono_string_chars",                g_resolver.string_chars);
     optBind("mono_string_length",               g_resolver.string_length);
+    optBind("mono_gchandle_new",                g_resolver.gchandle_new);
+    optBind("mono_gchandle_free",               g_resolver.gchandle_free);
 
     // Phase 28 — IL body access. Optional: missing exports just disable
     // findFieldReferences on this backend; the rest of the runtime stays up.
@@ -158,6 +161,8 @@ void DoResolve() {
     optBind("mono_method_header_get_code",      g_resolver.method_header_get_code);
     optBind("mono_metadata_free_mh",            g_resolver.metadata_free_mh);
     optBind("mono_class_get_field_token",       g_resolver.class_get_field_token);
+    optBind("mono_field_from_token",            g_resolver.field_from_token);
+    optBind("mono_field_get_parent",            g_resolver.field_get_parent);
 
     // Disconnect-time GC drain — closes the "game shutdown is slow after
     // a Phase 28 IL walker run" complaint. Exported by every BDWGC-based

@@ -27,6 +27,29 @@ public sealed class WindowsProxyInstaller : IProxyInstaller
     private const string MonoDll    = "Discrete-Mono.dll";
     private const string Il2cppDll  = "Discrete-IL2CPP.dll";
 
+    private readonly Func<bool, string>    _sourceDirProvider;
+    private readonly Func<string, bool>    _isOurDll;
+    private readonly Func<string, string?> _readFileVersion;
+
+    public WindowsProxyInstaller()
+        : this(DefaultSourceDir, DefaultIsOurDll, DefaultReadFileVersion)
+    { }
+
+    /// <summary>
+    /// Internal test seam allowing unit tests to exercise real filesystem
+    /// detect/install/uninstall logic in temporary directories with simulated
+    /// Discrete vs third-party proxy DLLs.
+    /// </summary>
+    internal WindowsProxyInstaller(
+        Func<bool, string>    sourceDirProvider,
+        Func<string, bool>    isOurDll,
+        Func<string, string?> readFileVersion)
+    {
+        _sourceDirProvider = sourceDirProvider;
+        _isOurDll          = isOurDll;
+        _readFileVersion   = readFileVersion;
+    }
+
     public Task<ProxyInstallStatus> DetectAsync(string gameExePath, CancellationToken ct = default)
     {
         return Task.Run(() => DetectSync(gameExePath), ct);
@@ -46,7 +69,7 @@ public sealed class WindowsProxyInstaller : IProxyInstaller
 
     // ---------- Sync implementations -------------------------------------
 
-    private static ProxyInstallStatus DetectSync(string gameExePath)
+    private ProxyInstallStatus DetectSync(string gameExePath)
     {
         if (string.IsNullOrEmpty(gameExePath) || !File.Exists(gameExePath))
         {
@@ -55,21 +78,38 @@ public sealed class WindowsProxyInstaller : IProxyInstaller
                 false, false, "game .exe not found");
         }
         string dir = Path.GetDirectoryName(gameExePath) ?? string.Empty;
-        bool hasVersion = File.Exists(Path.Combine(dir, VersionDll));
-        bool hasWinmm   = File.Exists(Path.Combine(dir, WinmmDll));
-        bool hasMono    = File.Exists(Path.Combine(dir, MonoDll));
-        bool hasIl2cpp  = File.Exists(Path.Combine(dir, Il2cppDll));
+        string versionPath = Path.Combine(dir, VersionDll);
+        string winmmPath   = Path.Combine(dir, WinmmDll);
 
-        // Mutex constraint says version XOR winmm; if both present we
-        // surface this as an error so the user can clean up manually.
-        if (hasVersion && hasWinmm)
+        bool hasVersionFile = File.Exists(versionPath);
+        bool hasWinmmFile   = File.Exists(winmmPath);
+        bool ourVersion     = hasVersionFile && _isOurDll(versionPath);
+        bool ourWinmm       = hasWinmmFile   && _isOurDll(winmmPath);
+        bool foreignVersion = hasVersionFile && !ourVersion;
+        bool foreignWinmm   = hasWinmmFile   && !ourWinmm;
+        bool hasMono        = File.Exists(Path.Combine(dir, MonoDll));
+        bool hasIl2cpp      = File.Exists(Path.Combine(dir, Il2cppDll));
+
+        string? foreignProxy = (foreignVersion, foreignWinmm) switch
+        {
+            (true, true)   => $"{VersionDll}, {WinmmDll}",
+            (true, false)  => VersionDll,
+            (false, true)  => WinmmDll,
+            (false, false) => null,
+        };
+
+        // Only OUR two proxies are mutually exclusive. A third-party version.dll
+        // (ReShade/ENB/SpecialK/mod loader) coexisting with OUR winmm.dll — or
+        // vice versa — is an explicitly supported deployment (see InstallSync).
+        if (ourVersion && ourWinmm)
         {
             return new ProxyInstallStatus(
                 gameExePath, ProxyKind.None, hasMono, hasIl2cpp,
-                "both version.dll and winmm.dll present — uninstall manually first");
+                "both Discrete version.dll and winmm.dll present — uninstall manually first",
+                foreignProxyPresent: foreignProxy);
         }
-        ProxyKind kind = hasVersion ? ProxyKind.Version
-                       : hasWinmm   ? ProxyKind.Winmm
+        ProxyKind kind = ourVersion ? ProxyKind.Version
+                       : ourWinmm   ? ProxyKind.Winmm
                        :              ProxyKind.None;
 
         // Read PE FileVersion off both sides so the deploy UI can flag
@@ -85,18 +125,19 @@ public sealed class WindowsProxyInstaller : IProxyInstaller
         };
         string? installedVersion = (kind == ProxyKind.None)
             ? null
-            : ReadFileVersion(Path.Combine(dir, proxyName));
+            : _readFileVersion(Path.Combine(dir, proxyName));
         // 32-bit Mono games take the x86 build from dist/x86/, so the
         // source-version comparison must read the matching proxy there —
         // otherwise an x86 game would always read "outdated" against the
         // x64 dist proxy (different build chain, different version stamp).
-        string? sourceVersion = ReadFileVersion(
-            Path.Combine(SourceDir(TargetIsX86(gameExePath)), proxyName));
+        string? sourceVersion = _readFileVersion(
+            Path.Combine(_sourceDirProvider(TargetIsX86(gameExePath)), proxyName));
 
         return new ProxyInstallStatus(gameExePath, kind, hasMono, hasIl2cpp,
             errorMessage: null,
             installedProxyVersion: installedVersion,
-            sourceProxyVersion:    sourceVersion);
+            sourceProxyVersion:    sourceVersion,
+            foreignProxyPresent:   foreignProxy);
     }
 
     /// <summary>
@@ -105,7 +146,7 @@ public sealed class WindowsProxyInstaller : IProxyInstaller
     /// when the file is missing or has no version resource (rare; would
     /// indicate a build that didn't pick up version.rc).
     /// </summary>
-    private static string? ReadFileVersion(string path)
+    private static string? DefaultReadFileVersion(string path)
     {
         try
         {
@@ -135,7 +176,7 @@ public sealed class WindowsProxyInstaller : IProxyInstaller
     /// version resource, unreadable file). "Unknown" must never be treated as
     /// "ours" — the whole point is to refuse to destroy what we did not create.
     /// </summary>
-    private static bool IsOurDll(string path)
+    private static bool DefaultIsOurDll(string path)
     {
         try
         {
@@ -149,7 +190,7 @@ public sealed class WindowsProxyInstaller : IProxyInstaller
         }
     }
 
-    private static ProxyOperationResult InstallSync(string gameExePath, ProxyKind kind)
+    private ProxyOperationResult InstallSync(string gameExePath, ProxyKind kind)
     {
         if (kind == ProxyKind.None)
         {
@@ -163,7 +204,7 @@ public sealed class WindowsProxyInstaller : IProxyInstaller
         }
 
         bool   isX86  = TargetIsX86(gameExePath);
-        string srcDir = SourceDir(isX86);
+        string srcDir = _sourceDirProvider(isX86);
         string dstDir = Path.GetDirectoryName(gameExePath) ?? string.Empty;
         string proxyName  = (kind == ProxyKind.Version) ? VersionDll : WinmmDll;
         string otherProxy = (kind == ProxyKind.Version) ? WinmmDll   : VersionDll;
@@ -191,7 +232,7 @@ public sealed class WindowsProxyInstaller : IProxyInstaller
         // uses too; silently replacing one costs the user their ReShade / ENB /
         // mod loader with no error and no way back.
         string targetPath = Path.Combine(dstDir, proxyName);
-        if (File.Exists(targetPath) && !IsOurDll(targetPath))
+        if (File.Exists(targetPath) && !_isOurDll(targetPath))
         {
             var st0 = DetectSync(gameExePath);
             return new ProxyOperationResult(false,
@@ -209,7 +250,7 @@ public sealed class WindowsProxyInstaller : IProxyInstaller
             // keep their existing tool, and the two can coexist (Windows loads
             // both). Only OUR two proxies are mutually exclusive.
             string otherPath = Path.Combine(dstDir, otherProxy);
-            if (File.Exists(otherPath) && IsOurDll(otherPath)) File.Delete(otherPath);
+            if (File.Exists(otherPath) && _isOurDll(otherPath)) File.Delete(otherPath);
 
             foreach (string f in required)
             {
@@ -228,7 +269,7 @@ public sealed class WindowsProxyInstaller : IProxyInstaller
             $"Installed {proxyName} + {backendList} in {dstDir}", st);
     }
 
-    private static ProxyOperationResult UninstallSync(string gameExePath)
+    private ProxyOperationResult UninstallSync(string gameExePath)
     {
         if (string.IsNullOrEmpty(gameExePath) || !File.Exists(gameExePath))
         {
@@ -249,7 +290,7 @@ public sealed class WindowsProxyInstaller : IProxyInstaller
                 // belong to ReShade / ENB / SpecialK / a mod loader — deleting
                 // one of those on "uninstall Discrete" is unrecoverable data
                 // loss from the user's point of view.
-                if (!IsOurDll(p)) { skipped.Add(f); continue; }
+                if (!_isOurDll(p)) { skipped.Add(f); continue; }
                 File.Delete(p);
                 ++removed;
             }
@@ -274,7 +315,7 @@ public sealed class WindowsProxyInstaller : IProxyInstaller
     /// <summary>Directory the backend + proxy DLLs are copied FROM. x64 build
     /// ships next to DiscreteUI.exe (dist/); the x86 build lives in the
     /// <c>x86/</c> sub-directory (dist/x86/) — see build.ps1 <c>-Arch x86</c>.</summary>
-    private static string SourceDir(bool isX86)
+    private static string DefaultSourceDir(bool isX86)
     {
         string baseDir = BaseDir();
         return isX86 ? Path.Combine(baseDir, "x86") : baseDir;

@@ -4,6 +4,7 @@
 
 #include "../shared/Logger.h"
 #include "../shared/MagicStrings.h"
+#include "../shared/SehFilter.h"
 #include "IL2CPPResolver.h"
 #include "IL2CPPThreadAttach.h"
 
@@ -23,7 +24,7 @@ const char* SafeStr(const char* s) { return s ? s : ""; }
 const Il2CppAssembly** SehGetAssemblies(fn_domain_get_assemblies fn,
                                         Il2CppDomain* d, std::size_t* sz) {
     __try { return fn(d, sz); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 #pragma warning(pop)
 

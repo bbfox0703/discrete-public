@@ -7,6 +7,9 @@
   -->
   <PropertyGroup>
     <TargetFramework>net10.0-windows</TargetFramework>
+    <!-- Declare win-x64 so NuGet packages.lock.json records the win-x64 RID
+         graph consistently for both RID-less builds and -r win-x64 publishes (D-M7). -->
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
     <RootNamespace>UnityDumpUI.Core</RootNamespace>
     <AssemblyName>UnityDumpUI.Core</AssemblyName>
 

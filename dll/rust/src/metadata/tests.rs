@@ -816,7 +816,8 @@ fn v38_section_header_fixed_parameter_index() {
 
 #[test]
 fn v38_type_index_size_falls_back_to_4() {
-    // parameters.size / count - 8 = 3 -> not 1/2/4, keep the default 4.
+    // parameters.size / count - 8 = 3 -> not 1/2/4, keep the default 4 and
+    // mark tablesDegraded + zero the mismatched parameters table (D-M3).
     let p = Parser::load_from_bytes(section_file(
         38,
         &[(header_v38::PARAMETERS, vec![0u8; 11], 1)],
@@ -824,6 +825,61 @@ fn v38_type_index_size_falls_back_to_4() {
     assert_eq!(p.index_sizes().type_index_size, 4);
     // count = 0 leaves everything at its row-count width (count 0 -> 1).
     assert_eq!(p.index_sizes().type_definition_index_size, 1);
+    assert!(p.tables_degraded());
+    assert_eq!(p.parameter_count(), 0);
+}
+
+#[test]
+fn v38_mismatched_method_and_image_table_strides_zero_only_corrupt_tables() {
+    // D-M3: A valid TypeDef[0] (<Module>) is NOT enough when another table's
+    // stride*count disagrees with its header section size (e.g. TDIS/PIS drift).
+    // The mismatched table must be zeroed and tables_degraded() set true while
+    // valid tables (types/fields/params) stay intact.
+    let mut heap = Heap::new();
+    let mod_name = heap.add(b"<Module>");
+    let param_bytes = vec![0u8; 8 + 2]; // TIS = 2, count = 1
+    let types = typedef_row_v38(
+        2,
+        1,
+        &Td {
+            name: mod_name,
+            token: MODULE,
+            ..Td::default()
+        },
+        0xFFFF,
+    );
+    // Deliberately wrong methods byte size (3 bytes off from count=1 * stride)
+    // and wrong images byte size (non-multiple of stride).
+    let raw = section_file(
+        39,
+        &[
+            (header_v38::STRINGS, heap.0, 0),
+            (header_v38::TYPE_DEFINITIONS, types, 1),
+            (header_v38::PARAMETERS, param_bytes, 1),
+            (header_v38::METHODS, vec![0u8; 19], 1),
+            (header_v38::IMAGES, vec![0u8; 17], 1),
+        ],
+    );
+    let p = Parser::load_from_bytes(raw.clone());
+    assert!(p.loaded());
+    assert!(p.tables_degraded());
+    assert_eq!(p.type_definition_count(), 1);
+    assert_eq!(p.parameter_count(), 1);
+    assert_eq!(p.method_definition_count(), 0);
+    assert_eq!(p.image_count(), 0);
+
+    // FFI dc_md_tables_degraded mirrors Parser::tables_degraded().
+    let path = temp_file("v39_degraded.dat", &raw);
+    let w = wide(&path);
+    // SAFETY: valid UTF-16 path; handle freed below.
+    unsafe {
+        let md = dc_md_load_path_w(w.as_ptr(), w.len());
+        assert_eq!(dc_md_loaded(md), 1);
+        assert_eq!(dc_md_tables_degraded(md), 1);
+        assert_eq!(dc_md_tables_degraded(std::ptr::null()), 0);
+        dc_md_free(md);
+    }
+    let _ = std::fs::remove_file(path);
 }
 
 // ---------------------------------------------------------------------------
@@ -1286,13 +1342,23 @@ fn log_lines_match_cpp_text() {
 // ---------------------------------------------------------------------------
 
 /// Loads every file in `DISCRETE_METADATA_FIXTURES` (semicolon-separated).
-/// A no-op when the variable is unset.
+/// Prints `SKIPPED` to stderr when the variable is unset or empty (D-M4).
 #[test]
 fn real_metadata_fixtures() {
     let Ok(list) = std::env::var("DISCRETE_METADATA_FIXTURES") else {
+        eprintln!("SKIPPED real_metadata_fixtures: DISCRETE_METADATA_FIXTURES is unset");
         return;
     };
-    for path in list.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+    let paths: Vec<&str> = list
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if paths.is_empty() {
+        eprintln!("SKIPPED real_metadata_fixtures: DISCRETE_METADATA_FIXTURES is empty");
+        return;
+    }
+    for path in paths {
         let w = wide(std::path::Path::new(path));
         let p = Parser::load_from_path(&w);
         assert!(p.loaded(), "{path}: not loaded");

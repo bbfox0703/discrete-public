@@ -273,6 +273,13 @@ public sealed partial class AddressLookupViewModel : ObservableObject
     public bool HasAobMaker => _aobMaker is not null;
 
     /// <summary>
+    /// Target game pointer width in bytes (8 for x64, 4 for x86; 0 when unknown,
+    /// which defaults to 8). Set by <c>MainWindowViewModel</c> from handshake so
+    /// Send-to-CE emits the right String offset and pointer-width CE value types.
+    /// </summary>
+    public int GamePointerSize { get; set; }
+
+    /// <summary>
     /// Phase 22e — push the current lookup result to CE's address list
     /// as a parent AA-script (registers the instance pointer as a
     /// CE symbol) plus child memory records (one per resolved field
@@ -296,12 +303,13 @@ public sealed partial class AddressLookupViewModel : ObservableObject
         {
             var req = new AddressLookupRequest
             {
-                Instance  = r.Instance!,
-                ClassName = r.Class!,
-                Namespace = r.Namespace,
-                Assembly  = r.Assembly,
+                Instance     = r.Instance!,
+                ClassName    = r.Class!,
+                Namespace    = r.Namespace,
+                Assembly     = r.Assembly,
                 Field        = r.Field        is null ? null : ToGenField(r.Field),
                 NearestField = r.NearestField is null ? null : ToGenField(r.NearestField),
+                PointerSize  = GamePointerSize == 4 ? 4 : 8,
             };
 
             AddressLookupAaPayload payload = AddressLookupAaScriptGenerator.Build(req);

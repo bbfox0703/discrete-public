@@ -1,9 +1,12 @@
-// PipeClient.cs — async, single-flight wrapper around the DLL named pipe.
+// PipeClient.cs — async, single-flight wrapper around one connection to the
+// DLL named pipe.
 //
-// The protocol is line-delimited JSON over a duplex named pipe. There is one
-// client at a time and requests are handled one-at-a-time on the server, so
-// we serialize concurrent callers with a SemaphoreSlim and correlate every
-// response by `id` for sanity (mismatches are bugs, not normal).
+// The protocol is line-delimited JSON over a duplex named pipe. The DLL pipe
+// server accepts up to kMaxPipeInstances (4) concurrent client connections on
+// independent worker threads; each PipeClient instance owns one connection,
+// serializes concurrent callers on that connection with a SemaphoreSlim, and
+// correlates every response by `id` (mismatches tear down the connection so
+// subsequent callers reconnect cleanly instead of drifting out of sync).
 //
 // Phase 14a: surfaces pipe teardown to subscribers via the
 // <see cref="Disconnected"/> event. When the target game exits, the next
@@ -35,6 +38,17 @@ public sealed class PipeClient : IAsyncDisposable
     /// connection — guards against double-fires when both write and read
     /// fail in quick succession.</summary>
     private int                     _disconnectFired;
+    private int                     _disposed;
+
+    /// <summary>
+    /// Optional per-request read timeout waiting for a response line from the
+    /// DLL. Defaults to <see cref="Timeout.InfiniteTimeSpan"/> so long-running
+    /// bulk commands (snapshots, scans) are never prematurely cut off; callers
+    /// can configure a finite timeout globally or per call. On timeout the pipe
+    /// is torn down and <see cref="PipeDisconnectedException"/> is thrown so a
+    /// late response can never desynchronize subsequent requests.
+    /// </summary>
+    public TimeSpan ReadTimeout { get; set; } = Timeout.InfiniteTimeSpan;
 
     /// <summary>
     /// Raised exactly once per connection when the pipe is detected to be
@@ -49,6 +63,9 @@ public sealed class PipeClient : IAsyncDisposable
     {
         _pipeName = pipeName;
     }
+
+    /// <summary>The named-pipe endpoint name this client connects to.</summary>
+    public string PipeName => _pipeName;
 
     public bool IsConnected => _pipe is { IsConnected: true };
 
@@ -150,7 +167,8 @@ public sealed class PipeClient : IAsyncDisposable
         string cmd,
         Dictionary<string, JsonElement>? args,
         System.Text.Json.Serialization.Metadata.JsonTypeInfo<RpcEnvelope<TResult>> envelopeType,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        TimeSpan? readTimeout = null)
         where TResult : class
     {
         ArgumentNullException.ThrowIfNull(cmd);
@@ -158,16 +176,21 @@ public sealed class PipeClient : IAsyncDisposable
 
         // Honour cancellation while waiting for the gate (caller can still
         // bail before they own the wire); once we own the gate we deliberately
-        // run the actual write+read uncancellable so we never abandon a
-        // response in the pipe buffer for the next caller to misread.
+        // run the actual write+read uncancellable by `ct` so we never abandon a
+        // response in the pipe buffer for the next caller to misread. A finite
+        // read timeout or DisconnectAsync/DisposeAsync tears down the pipe
+        // outright so the next caller starts on a clean connection.
         await _gate.WaitAsync(ct).ConfigureAwait(false);
-        // Set inside the gate when an IO failure tells us the pipe is gone;
-        // the actual event fire happens after we release the gate so handlers
-        // can call back into the client without deadlocking.
+        // Set inside the gate when an IO failure, timeout, or desync tells us
+        // the pipe is gone; the actual event fire happens after we release the
+        // gate so handlers can call back into the client without deadlocking.
         PipeDisconnectedInfo? disconnectInfo = null;
         try
         {
-            if (_pipe is null || _writer is null || _reader is null || !_pipe.IsConnected)
+            var pipe   = _pipe;
+            var writer = _writer;
+            var reader = _reader;
+            if (pipe is null || writer is null || reader is null || !pipe.IsConnected)
             {
                 throw new InvalidOperationException("PipeClient is not connected.");
             }
@@ -180,14 +203,9 @@ public sealed class PipeClient : IAsyncDisposable
             string requestLine = JsonSerializer.Serialize(
                 request, ProtocolJsonContext.Default.PipeRequest);
 
-            // CRITICAL: do not pass `ct` past this point. If the caller cancels
-            // between our write and our read, the DLL's response for `id` ends
-            // up sitting unread in the pipe buffer and the *next* SendAsync
-            // (different `id`) reads our stale response → id-mismatch crash.
-            // We always drain the response and check `ct` after.
             try
             {
-                await _writer.WriteLineAsync(requestLine.AsMemory()).ConfigureAwait(false);
+                await writer.WriteLineAsync(requestLine.AsMemory()).ConfigureAwait(false);
             }
             catch (Exception ex) when (IsPipeBrokenException(ex))
             {
@@ -198,15 +216,33 @@ public sealed class PipeClient : IAsyncDisposable
 
             string? responseLine;
             var readSw = Stopwatch.StartNew();
+            TimeSpan effectiveTimeout = readTimeout ?? ReadTimeout;
+            CancellationTokenSource? readTimeoutCts =
+                (effectiveTimeout > TimeSpan.Zero && effectiveTimeout != Timeout.InfiniteTimeSpan)
+                    ? new CancellationTokenSource(effectiveTimeout)
+                    : null;
             try
             {
-                responseLine = await _reader.ReadLineAsync().ConfigureAwait(false);
+                responseLine = readTimeoutCts is not null
+                    ? await reader.ReadLineAsync(readTimeoutCts.Token).ConfigureAwait(false)
+                    : await reader.ReadLineAsync().ConfigureAwait(false);
+            }
+            catch (OperationCanceledException ex) when (readTimeoutCts is { IsCancellationRequested: true })
+            {
+                disconnectInfo = new PipeDisconnectedInfo(
+                    $"read timed out after {(int)effectiveTimeout.TotalMilliseconds} ms for '{cmd}'");
+                await DisposeStreamsAsync().ConfigureAwait(false);
+                throw new PipeDisconnectedException(disconnectInfo.Reason, ex);
             }
             catch (Exception ex) when (IsPipeBrokenException(ex))
             {
                 disconnectInfo = new PipeDisconnectedInfo("read failed: " + ex.Message);
                 await DisposeStreamsAsync().ConfigureAwait(false);
                 throw new PipeDisconnectedException(disconnectInfo.Reason, ex);
+            }
+            finally
+            {
+                readTimeoutCts?.Dispose();
             }
             readSw.Stop();
             if (responseLine is null)
@@ -221,18 +257,39 @@ public sealed class PipeClient : IAsyncDisposable
             LastReadMs        = readSw.ElapsedMilliseconds;
             LastResponseChars = responseLine.Length;
             var parseSw = Stopwatch.StartNew();
-            RpcEnvelope<TResult>? envelope =
-                JsonSerializer.Deserialize(responseLine, envelopeType);
+            RpcEnvelope<TResult>? envelope;
+            try
+            {
+                envelope = JsonSerializer.Deserialize(responseLine, envelopeType);
+            }
+            catch (JsonException ex)
+            {
+                throw new PipeProtocolException("Invalid JSON response: " + ex.Message, ex);
+            }
             parseSw.Stop();
             LastParseMs = parseSw.ElapsedMilliseconds;
             if (envelope is null)
             {
                 throw new PipeProtocolException("Empty response envelope.");
             }
-            if (envelope.Id != id)
+            // C-M2: JSON-RPC allows `"id": null` on parse / framing / fallback
+            // error envelopes (e.g. -32700 / -32600 / -32603). Surface the
+            // server's real error instead of treating null id as a mismatch.
+            if (envelope.Id is null && envelope.Error is not null)
             {
                 throw new PipeProtocolException(
-                    $"Response id mismatch: expected {id}, got {envelope.Id}.");
+                    $"Pipe error {envelope.Error.Code}: {envelope.Error.Message}");
+            }
+            if (envelope.Id != id)
+            {
+                // C-M2: an out-of-sync response id means the stream is desynchronized;
+                // tear down the pipe and fire Disconnected so callers reconnect cleanly
+                // instead of failing every subsequent request with id mismatch.
+                string got = envelope.Id?.ToString() ?? "null";
+                disconnectInfo = new PipeDisconnectedInfo(
+                    $"Response id mismatch: expected {id}, got {got}.");
+                await DisposeStreamsAsync().ConfigureAwait(false);
+                throw new PipeProtocolException(disconnectInfo.Reason);
             }
             // Honour the late cancel now — pipe is back in a clean state.
             ct.ThrowIfCancellationRequested();
@@ -268,9 +325,15 @@ public sealed class PipeClient : IAsyncDisposable
     /// afterwards. Intended for user-initiated Disconnect (DLL still alive
     /// in the target, user just wants to stop talking to it). Pairs with
     /// <see cref="DisposeAsync"/>, which is for final teardown only.
+    ///
+    /// Aborts the underlying <see cref="NamedPipeClientStream"/> BEFORE
+    /// acquiring <c>_gate</c> so any in-flight <see cref="SendAsync"/> blocked
+    /// on a stalled server handler wakes up immediately instead of deadlocking
+    /// Disconnect / app shutdown (C-M3).
     /// </summary>
     public async Task DisconnectAsync()
     {
+        AbortUnderlyingPipe();
         await _gate.WaitAsync().ConfigureAwait(false);
         try { await DisposeStreamsAsync().ConfigureAwait(false); }
         finally { _gate.Release(); }
@@ -278,16 +341,30 @@ public sealed class PipeClient : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        AbortUnderlyingPipe();
         await _gate.WaitAsync().ConfigureAwait(false);
         try { await DisposeStreamsAsync().ConfigureAwait(false); }
         finally { _gate.Release(); _gate.Dispose(); }
     }
 
+    private void AbortUnderlyingPipe()
+    {
+        var pipe = Interlocked.Exchange(ref _pipe, null);
+        if (pipe is not null)
+        {
+            try { pipe.Dispose(); } catch { /* best-effort abort */ }
+        }
+    }
+
     private async ValueTask DisposeStreamsAsync()
     {
-        if (_writer is not null) { await _writer.DisposeAsync().ConfigureAwait(false); _writer = null; }
-        if (_reader is not null) { _reader.Dispose(); _reader = null; }
-        if (_pipe is not null)   { await _pipe.DisposeAsync().ConfigureAwait(false);   _pipe   = null; }
+        var writer = _writer; _writer = null;
+        var reader = _reader; _reader = null;
+        var pipe   = Interlocked.Exchange(ref _pipe, null);
+        if (writer is not null) { try { await writer.DisposeAsync().ConfigureAwait(false); } catch { } }
+        if (reader is not null) { try { reader.Dispose(); } catch { } }
+        if (pipe   is not null) { try { await pipe.DisposeAsync().ConfigureAwait(false); } catch { } }
     }
 }
 

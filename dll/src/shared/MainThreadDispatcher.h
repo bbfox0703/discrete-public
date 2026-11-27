@@ -19,7 +19,11 @@
 //   * Init() — call once after backend resolver is bound. Captures main
 //     thread id from the process snapshot (oldest-created thread = OS
 //     process main thread, which is always the Unity main thread).
-//   * Shutdown() — uninstall hooks. Optional; DLL usually stays loaded.
+//   * AbortPending() — wake and abort all currently queued Pending items
+//     without disabling the dispatcher (called by PipeServer::Stop before
+//     draining workers so stalled SubmitAndWait calls exit immediately).
+//   * Shutdown() — disable the dispatcher and abort all pending work (does
+//     NOT uninstall backend MinHook detours; Discrete_Shutdown handles those).
 //   * SubmitAndWait(work, timeout_ms) — pipe handler entry. Pushes the
 //     work item, blocks the worker thread until main-thread drain
 //     signals completion (or timeout fires).
@@ -33,10 +37,12 @@
 
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 
 namespace Discrete::MainThreadDispatcher {
 
@@ -48,10 +54,31 @@ namespace Discrete::MainThreadDispatcher {
 constexpr std::size_t kMaxQueuedItems = 256;
 
 // Soft-health window: if NotifyMainThreadTick hasn't fired in this many
-// ms, IsHealthy() returns false. Tuned for the worst-case render frame —
-// 32 ms covers even a 30 FPS game with one stutter frame. Lower would
-// false-alarm; higher would let frozen games go undetected.
+// ms, IsHealthy() returns false. 1000 ms tolerates loading hiccups and low-FPS
+// frames without false-alarming while still detecting paused/frozen games.
 constexpr std::int64_t kHealthyWindowMs = 1000;
+
+// Bounds for client-supplied `main_thread_timeout_ms` on pipe RPCs (C-M3).
+// Clamping prevents negative values from turning SubmitAndWait into INFINITE
+// or oversized values from wedging a pipe worker indefinitely.
+constexpr std::int32_t kMinMainThreadTimeoutMs     = 1;
+constexpr std::int32_t kDefaultMainThreadTimeoutMs = 5000;
+constexpr std::int32_t kMaxMainThreadTimeoutMs     = 60000;
+
+constexpr std::int32_t ClampMainThreadTimeoutMs(std::int32_t raw) noexcept {
+    if (raw < kMinMainThreadTimeoutMs) return kMinMainThreadTimeoutMs;
+    if (raw > kMaxMainThreadTimeoutMs) return kMaxMainThreadTimeoutMs;
+    return raw;
+}
+
+/// Poll `counter` until it reaches <= 0 or `timeoutMs` of real wall-clock time
+/// (GetTickCount64) has elapsed. Returns true iff the counter drained to <= 0.
+/// Shared by MainThreadHook::Uninstall (A-M7) and PipeServer::Stop so neither
+/// relies on iteration-counted Sleep(1) loops (which stretch ~15x under the
+/// default 15.6 ms system timer tick).
+bool WaitUntilZeroWithDeadline(const std::atomic<int>& counter,
+                               std::uint64_t timeoutMs,
+                               std::uint32_t pollSleepMs = 1) noexcept;
 
 /// Opaque handle returned by SubmitAndWait — the dispatcher owns the
 /// underlying buffers, the caller just reads `ok`, `error`, and `result`.
@@ -75,8 +102,13 @@ using WorkFn = std::function<void()>;
 /// returned no threads).
 bool Init();
 
-/// Uninstall all hooks and clear pending work. Currently only called on
-/// DLL detach; the DLL normally lives until process exit.
+/// Wake and abort all currently queued Pending work items without disabling
+/// the dispatcher (A-M8). Called by PipeServer::Stop() before draining worker
+/// threads so workers blocked in SubmitAndWait wake promptly.
+void AbortPending();
+
+/// Mark the dispatcher uninitialized and abort all pending work (A-M8).
+/// Does not uninstall backend MinHook detours (caller runs MainThreadHook::Uninstall).
 void Shutdown();
 
 /// True if Init() has been called and main thread id is known. Both

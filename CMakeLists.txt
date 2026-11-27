@@ -207,3 +207,9 @@ endif()
 if(DISCRETE_ARCH STREQUAL "x86")
     add_subdirectory(tools/inject-x86)
 endif()
+
+# Offline C++ DLL self-tests (built and run for both x64 and x86 via build.ps1).
+option(BUILD_TESTS "Build offline C++ DLL self-tests" OFF)
+if(BUILD_TESTS)
+    add_subdirectory(dll/tests)
+endif()

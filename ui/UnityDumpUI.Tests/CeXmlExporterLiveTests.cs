@@ -66,10 +66,17 @@ public class CeXmlExporterLiveTests
             string assembly, string @namespace, string name, CancellationToken ct = default)
             => Task.FromResult(_classes.TryGetValue($"{@namespace}.{name}", out GetClassInfoResult? c) ? c : null);
 
+        public int? LastReadMemorySize { get; private set; }
+
         public Task<ReadMemoryResult> ReadMemoryAsync(string address, int size, CancellationToken ct = default)
-            => Task.FromResult(_memory.TryGetValue(Norm(address), out string? hex)
-                ? new ReadMemoryResult { Address = address, Size = size, Hex = hex }
-                : new ReadMemoryResult { Address = address, Size = size, Error = "unmapped" });
+        {
+            LastReadMemorySize = size;
+            if (!_memory.TryGetValue(Norm(address), out string? hex))
+                return Task.FromResult(new ReadMemoryResult { Address = address, Size = size, Error = "unmapped" });
+            int wantChars = size > 0 ? size * 2 : 0;
+            string slice = hex.Length > wantChars ? hex.Substring(0, wantChars) : hex;
+            return Task.FromResult(new ReadMemoryResult { Address = address, Size = size, Hex = slice });
+        }
 
         public Task<WalkArrayResult> WalkArrayAsync(
             string address, string? elementType, int? limit, int? elementSize,
@@ -931,5 +938,112 @@ public class CeXmlExporterLiveTests
             baseAddr, RootClass(), ancestors: null, "MainGame", off, live,
             TestContext.Current.CancellationToken);
         Assert.Equal(1, CountOccurrences(xmlOff, "pageCount"));
+    }
+
+    [Fact]
+    public async Task RenderLive_X86_NonEmptyList_ReadsFourByteItemsPointer()
+    {
+        // Regression for E-H1: on 32-bit Mono targets (PointerSize == 4),
+        // List<T>._items sits at +0x8 (4 bytes) and _size sits right next to it
+        // at +0xC (4 bytes). Reading 8 bytes swept _size into the upper 32 bits
+        // of the pointer (_items | (_size << 32)), causing WalkArrayAsync to fail
+        // on every non-empty List<T>.
+        const string baseAddr = "0x0000000010000000";
+        const string listObj  = "0x0000000012340000";
+        const string itemsArr = "0x0000000020001000";
+        const string s0       = "0x0000000020005000";
+
+        var live = new FakeLive();
+        live.AddInstance(baseAddr, new List<WalkedField>
+        {
+            new() { Name = "skills_",
+                    Type = "System.Collections.Generic.List`1<System.String>",
+                    Offset = 0x14, Address = "0x0000000010000014", Ptr = listObj },
+        });
+
+        // Memory at listObj + 0x8 holds 4-byte _items (0x20001000) followed by
+        // 4-byte _size (3). An 8-byte read would produce 0x0000000320001000 and
+        // miss the array entry below; a 4-byte read slices to the 8 hex chars of
+        // _items and resolves itemsArr cleanly.
+        live.AddMemory(HexAdd(listObj, 0x8), LeHex(0x00000003_20001000UL));
+        live.AddArray(itemsArr, new WalkArrayResult
+        {
+            Length = 3, Count = 1, IsPointer = true, ElementSize = 4,
+            DataAddress = "0x0000000020001010",   // x86 SZARRAY data start = +0x10
+            ElementClassName = "String",
+            Elements = new List<WalkedArrayElement>
+            {
+                new() { Index = 0, Address = "0x0000000020001010", Ptr = s0,
+                        String = "HeroSkill_01", StringLength = 12 },
+            },
+        });
+
+        var options = new ExportOptions(
+            DrilldownDepth: 3, ArrayLimit: 16, CollapsePointerNodes: true,
+            LiveData: true, PointerSize: 4);
+
+        string xml = await CeXmlExporter.RenderAsync(
+            baseAddr, RootClass(), ancestors: null, "Assembly-CSharp",
+            options, live, TestContext.Current.CancellationToken);
+
+        Assert.Equal(4, live.LastReadMemorySize);
+        Assert.DoesNotContain("(walk failed)", xml);
+        Assert.DoesNotContain("&lt;empty&gt;", xml);
+        Assert.Contains("skills_", xml);
+        Assert.Contains("_items", xml);
+        Assert.Contains("<Address>+8</Address>", xml);    // x86 _items offset (2 * 4)
+        Assert.Contains("<Address>+10</Address>", xml);   // x86 array data start (4 * 4)
+        Assert.Contains("HeroSkill_01", xml);
+        Assert.Contains("<Address>+C</Address>", xml);    // x86 String._firstChar (2 * 4 + 4)
+        Assert.Equal(1, CountOccurrences(xml, "<Address>0x"));
+    }
+
+    [Fact]
+    public async Task RenderLive_X86_NonEmptyList_ParsesExactFourByteHexResponse()
+    {
+        // Complement to the 8-byte buffer test: when the DLL returns an exact
+        // 4-byte (8-hex-char) readMemory payload on x86, the exporter must parse
+        // it rather than rejecting lengths < 16 as empty.
+        const string baseAddr = "0x0000000010000000";
+        const string listObj  = "0x0000000012340000";
+        const string itemsArr = "0x0000000020001000";
+
+        var live = new FakeLive();
+        live.AddInstance(baseAddr, new List<WalkedField>
+        {
+            new() { Name = "ids_",
+                    Type = "System.Collections.Generic.List`1<System.Int32>",
+                    Offset = 0x10, Address = "0x0000000010000010", Ptr = listObj },
+        });
+
+        // Exact 4-byte little-endian hex for 0x20001000 (8 hex chars).
+        live.AddMemory(HexAdd(listObj, 0x8), "00100020");
+        live.AddArray(itemsArr, new WalkArrayResult
+        {
+            Length = 2, Count = 2, IsPointer = false, ElementSize = 4,
+            DataAddress = "0x0000000020001010",
+            ElementClassName = "Int32",
+            Elements = new List<WalkedArrayElement>
+            {
+                new() { Index = 0, Address = "0x0000000020001010", Value = Json("42") },
+                new() { Index = 1, Address = "0x0000000020001014", Value = Json("99") },
+            },
+        });
+
+        var options = new ExportOptions(
+            DrilldownDepth: 3, ArrayLimit: 16, CollapsePointerNodes: true,
+            LiveData: true, PointerSize: 4);
+
+        string xml = await CeXmlExporter.RenderAsync(
+            baseAddr, RootClass(), ancestors: null, "Assembly-CSharp",
+            options, live, TestContext.Current.CancellationToken);
+
+        Assert.Equal(4, live.LastReadMemorySize);
+        Assert.DoesNotContain("(walk failed)", xml);
+        Assert.DoesNotContain("&lt;empty&gt;", xml);
+        Assert.Contains("[0]", xml);
+        Assert.Contains("[1]", xml);
+        Assert.Contains("<Address>+10</Address>", xml);   // slot 0: dataOff (0x10)
+        Assert.Contains("<Address>+14</Address>", xml);   // slot 1: dataOff + 4
     }
 }

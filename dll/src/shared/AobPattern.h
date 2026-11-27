@@ -51,8 +51,11 @@ struct PatternResult {
 // 308 MB of executable memory. Padding also moves between runs, so signing it
 // makes the pattern fail later for no benefit.
 //
-// Pass false to get exactly `len` bytes regardless (raw-window behaviour).
+// Pass false for `stopAtTerminal` to get exactly `len` bytes regardless.
+// `bitness` defaults to the active DLL's pointer width (32 on x86 Mono,
+// 64 on x64 Mono/IL2CPP) so 32-bit JIT code is decoded in x86 mode (D-H1).
 PatternResult BuildPattern(const std::uint8_t* bytes, std::size_t len,
-                           bool stopAtTerminal = true);
+                           bool stopAtTerminal = true,
+                           std::uint32_t bitness = static_cast<std::uint32_t>(sizeof(void*) * 8));
 
 }  // namespace Discrete::Aob

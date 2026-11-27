@@ -78,7 +78,10 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
 
     /// <summary>Abort the in-progress Copy CE XML / Copy CE field export.</summary>
     [RelayCommand(CanExecute = nameof(IsExporting))]
-    private void CancelExport() => _exportCts?.Cancel();
+    private void CancelExport()
+    {
+        try { _exportCts?.Cancel(); } catch (ObjectDisposedException) { }
+    }
 
     /// <summary>
     /// View-supplied accessor for the Fields DataGrid's current multi-row
@@ -133,11 +136,17 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
     /// element class's metadata so every array slot carries data. Off by default.</summary>
     [ObservableProperty] private bool _fillEmptyArraySlots;
 
+    /// <summary>Game-process pointer size (4 = x86/WOW64, 8 = x64, 0 = unknown →
+    /// defaults to 8). Set by <see cref="MainWindowViewModel"/> after handshake so
+    /// template CE XML and CSX exports use the target's true pointer layout.</summary>
+    public int GamePointerSize { get; set; }
+
     internal ExportOptions CurrentExportOptions => new(
         DrilldownDepth: Math.Max(0, DrilldownDepth),
         ArrayLimit:     Math.Max(0, ArrayLimit),
         CollapsePointerNodes: CollapsePointerNodes,
         LiveData: UseLiveData,
+        PointerSize: GamePointerSize == 4 ? 4 : 8,
         VerboseDescription: VerboseCeXmlDescription,
         DescShowOffset:       DescShowOffset,
         FlattenValueStructs:  FlattenValueStructs,
@@ -281,6 +290,12 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
 
     partial void OnSelectedClassChanged(ClassItem? value)
     {
+        // E-M6: drop any prior class's chain immediately and cancel in-flight
+        // detail loads so export commands disable until the newly selected
+        // class actually finishes loading (never export the previous class).
+        try { _detailCts?.Cancel(); } catch (ObjectDisposedException) { }
+        _currentChain = new List<GetClassInfoResult>();
+        NotifyExportCommandsCanExecuteChanged();
         Fields.Clear();
         Methods.Clear();
         FilteredFields.Clear();
@@ -289,6 +304,25 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
         if (value is null || SelectedAssembly is null) return;
         _ = LoadClassDetailAsync(SelectedAssembly.Name, value.Namespace, value.Name);
     }
+
+    private void NotifyExportCommandsCanExecuteChanged()
+    {
+        ExportSdkHeaderCommand.NotifyCanExecuteChanged();
+        ExportCsxCommand.NotifyCanExecuteChanged();
+        ExportCeXmlCommand.NotifyCanExecuteChanged();
+        CopyCeXmlCommand.NotifyCanExecuteChanged();
+        CopyCeFieldCommand.NotifyCanExecuteChanged();
+    }
+
+    // Internal test seam for verifying E-M6 chain/selection synchronization
+    // without spinning up a live named pipe.
+    internal void SetLoadedChainForTest(List<GetClassInfoResult> chain)
+    {
+        _currentChain = chain;
+        NotifyExportCommandsCanExecuteChanged();
+    }
+
+    internal int CurrentChainCountForTest => _currentChain.Count;
 
     // ---------- Fields / Methods ------------------------------------------
 
@@ -344,6 +378,13 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
         try
         {
             GetAssembliesResult result = await _backend.GetAssembliesAsync().ConfigureAwait(true);
+            if (!string.IsNullOrEmpty(result.Error))
+            {
+                ErrorMessage = result.Error;
+                _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
+                    $"refreshAssemblies error: {result.Error}");
+                return;
+            }
             Assemblies.Clear();
             // Sort alphabetically (case-insensitive). Backend order is image-load
             // order which is engine-implementation-defined; the user expects
@@ -415,9 +456,11 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
 
     private async Task LoadClassDetailAsync(string assembly, string @namespace, string name)
     {
-        _detailCts?.Cancel();
-        _detailCts = new CancellationTokenSource();
-        CancellationToken ct = _detailCts.Token;
+        CancellationTokenSource? prev = _detailCts;
+        var myCts = new CancellationTokenSource();
+        _detailCts = myCts;
+        try { prev?.Cancel(); } catch (ObjectDisposedException) { }
+        CancellationToken ct = myCts.Token;
 
         ErrorMessage = null;
         IsLoadingDetail = true;
@@ -432,7 +475,7 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
                 GetClassInfoResult info = await _backend
                     .GetClassInfoAsync(assembly, curNs ?? string.Empty, curName, ct)
                     .ConfigureAwait(true);
-                if (ct.IsCancellationRequested) return;
+                if (ct.IsCancellationRequested || !ReferenceEquals(_detailCts, myCts)) return;
                 if (!string.IsNullOrEmpty(info.Error))
                 {
                     if (i == 0)
@@ -451,18 +494,14 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
                 curName = info.Parent.Name;
             }
 
+            if (ct.IsCancellationRequested || !ReferenceEquals(_detailCts, myCts)) return;
+
             // Merge oldest-first so derived classes' members come last in the
             // grids — a familiar layout when reading top-to-bottom is "what
             // you inherited" then "what you added".
             chain.Reverse();
             _currentChain = chain;
-            // The chain is what the export commands actually consume; ping
-            // their CanExecute so any UI bindings that latched the disabled
-            // state during the brief load window flip to enabled now.
-            ExportSdkHeaderCommand.NotifyCanExecuteChanged();
-            ExportCsxCommand.NotifyCanExecuteChanged();
-            ExportCeXmlCommand.NotifyCanExecuteChanged();
-            CopyCeXmlCommand.NotifyCanExecuteChanged();
+            NotifyExportCommandsCanExecuteChanged();
             Fields.Clear();
             Methods.Clear();
             ParentChain = BuildParentChainLabel(chain);
@@ -496,13 +535,19 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
         catch (OperationCanceledException) { /* superseded */ }
         catch (Exception ex)
         {
-            ErrorMessage = ex.Message;
+            if (ReferenceEquals(_detailCts, myCts))
+                ErrorMessage = ex.Message;
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
                 $"getClassInfo({assembly}!{@namespace}.{name}) failed: {ex.GetType().Name}: {ex.Message}");
         }
         finally
         {
-            IsLoadingDetail = false;
+            if (ReferenceEquals(_detailCts, myCts))
+            {
+                IsLoadingDetail = false;
+                _detailCts = null;
+            }
+            myCts.Dispose();
         }
     }
 
@@ -510,8 +555,8 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
 
     [RelayCommand(CanExecute = nameof(CanExport))]
     private Task ExportSdkHeaderAsync() =>
-        ExportAsync("h", "C/C++ header", (self, ancestors, assembly, _, _, _) =>
-            Task.FromResult(SdkHeaderExporter.Render(self, ancestors, assembly)));
+        ExportAsync("h", "C/C++ header", (self, ancestors, assembly, options, lookup, ct) =>
+            SdkHeaderExporter.RenderAsync(self, ancestors, assembly, options, lookup, ct));
 
     [RelayCommand(CanExecute = nameof(CanExport))]
     private Task ExportCsxAsync() =>
@@ -532,7 +577,7 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanExport))]
     private async Task CopyCeXmlAsync()
     {
-        if (CopyToClipboardAsync is null || _currentChain.Count == 0) return;
+        if (CopyToClipboardAsync is null || !CanExport()) return;
 
         GetClassInfoResult self = _currentChain[^1];
         IReadOnlyList<GetClassInfoResult>? ancestors =
@@ -541,20 +586,29 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
                 : null;
         string assembly = SelectedAssembly?.Name ?? "Assembly";
 
-        _exportCts?.Cancel();
-        _exportCts = new CancellationTokenSource();
-        CancellationToken ct = _exportCts.Token;
+        CancellationTokenSource? prev = _exportCts;
+        var myCts = new CancellationTokenSource();
+        _exportCts = myCts;
+        try { prev?.Cancel(); } catch (ObjectDisposedException) { }
+        CancellationToken ct = myCts.Token;
         IsExporting = true;
         try
         {
             // Progress<T> created on the UI thread → its Report() marshals the
             // count back here, so the label updates live during a long export.
             CopyCeXmlProgress = "exporting…";
-            var progress = new Progress<int>(n => CopyCeXmlProgress = $"exporting… {n:N0} entries");
+            var progress = new Progress<int>(n =>
+            {
+                if (ReferenceEquals(_exportCts, myCts))
+                    CopyCeXmlProgress = $"exporting… {n:N0} entries";
+            });
             string xml = await CeXmlExporter.RenderAsync(
                 CeXmlBaseAddress, self, ancestors, assembly,
                 CurrentExportOptions, _backend, ct, progress).ConfigureAwait(true);
+            ct.ThrowIfCancellationRequested();
+            if (!ReferenceEquals(_exportCts, myCts)) return;
             await CopyToClipboardAsync(xml).ConfigureAwait(true);
+            if (!ReferenceEquals(_exportCts, myCts)) return;
             int lines = CountLines(xml);
             CopyCeXmlProgress = $"copied {lines:N0} lines";
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
@@ -562,18 +616,27 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
         }
         catch (OperationCanceledException)
         {
-            CopyCeXmlProgress = "export cancelled";
+            if (ReferenceEquals(_exportCts, myCts))
+                CopyCeXmlProgress = "export cancelled";
         }
         catch (Exception ex)
         {
-            CopyCeXmlProgress = "export failed";
-            ErrorMessage = $"copy CE XML failed: {ex.Message}";
+            if (ReferenceEquals(_exportCts, myCts))
+            {
+                CopyCeXmlProgress = "export failed";
+                ErrorMessage = $"copy CE XML failed: {ex.Message}";
+            }
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
                 $"copy CE XML failed: {ex.GetType().Name}: {ex.Message}");
         }
         finally
         {
-            IsExporting = false;
+            if (ReferenceEquals(_exportCts, myCts))
+            {
+                IsExporting = false;
+                _exportCts = null;
+            }
+            myCts.Dispose();
         }
     }
 
@@ -647,9 +710,11 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
 
         string assembly = SelectedAssembly?.Name ?? "Assembly";
 
-        _exportCts?.Cancel();
-        _exportCts = new CancellationTokenSource();
-        CancellationToken ct = _exportCts.Token;
+        CancellationTokenSource? prev = _exportCts;
+        var myCts = new CancellationTokenSource();
+        _exportCts = myCts;
+        try { prev?.Cancel(); } catch (ObjectDisposedException) { }
+        CancellationToken ct = myCts.Token;
         IsExporting = true;
         try
         {
@@ -657,7 +722,10 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
             string xml = await CeXmlExporter.RenderFieldsAsync(
                 CeXmlBaseAddress, entries, declaring, assembly,
                 CurrentExportOptions, _backend, ct).ConfigureAwait(true);
+            ct.ThrowIfCancellationRequested();
+            if (!ReferenceEquals(_exportCts, myCts)) return;
             await CopyToClipboardAsync(xml).ConfigureAwait(true);
+            if (!ReferenceEquals(_exportCts, myCts)) return;
             string nameSummary = entries.Count == 1
                 ? entries[0].Name
                 : $"{entries.Count} fields ({entries[0].Name}, …)";
@@ -667,28 +735,44 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
         }
         catch (OperationCanceledException)
         {
-            CopyCeXmlProgress = "export cancelled";
+            if (ReferenceEquals(_exportCts, myCts))
+                CopyCeXmlProgress = "export cancelled";
         }
         catch (Exception ex)
         {
-            CopyCeXmlProgress = "export failed";
-            ErrorMessage = $"copy CE field failed: {ex.Message}";
+            if (ReferenceEquals(_exportCts, myCts))
+            {
+                CopyCeXmlProgress = "export failed";
+                ErrorMessage = $"copy CE field failed: {ex.Message}";
+            }
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
                 $"copy CE field failed: {ex.GetType().Name}: {ex.Message}");
         }
         finally
         {
-            IsExporting = false;
+            if (ReferenceEquals(_exportCts, myCts))
+            {
+                IsExporting = false;
+                _exportCts = null;
+            }
+            myCts.Dispose();
         }
     }
 
-    // CanExport / CanCopyField only gate on the *visible* selection state —
-    // _currentChain is populated asynchronously after SelectedClass changes,
-    // and there's no observable signal to drive a CanExecute re-evaluation
-    // on a private field. Each command no-ops safely when the chain is
-    // momentarily empty (rare race window during initial load).
-    private bool CanCopyField() => SelectedFieldRow is not null;
-    private bool CanExport()    => SelectedClass is not null;
+    // E-M6: gate export on BOTH a selected class AND a matching loaded chain.
+    // OnSelectedClassChanged clears _currentChain immediately and pings
+    // CanExecuteChanged, so export commands stay disabled while a newly
+    // selected class is loading or if its getClassInfo fails.
+    private bool CanCopyField() => SelectedFieldRow is not null && _currentChain.Count > 0;
+    private bool CanExport()
+    {
+        if (SelectedClass is null || _currentChain.Count == 0) return false;
+        GetClassInfoResult self = _currentChain[^1];
+        return string.Equals(self.Name, SelectedClass.Name, StringComparison.Ordinal)
+            && string.Equals(self.Namespace ?? string.Empty,
+                             SelectedClass.Namespace ?? string.Empty,
+                             StringComparison.Ordinal);
+    }
 
     private async Task ExportAsync(
         string ext, string description,
@@ -697,7 +781,7 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
              Task<string>> renderer)
     {
         if (SaveFileAsync is null) return;
-        if (_currentChain.Count == 0) return;
+        if (!CanExport()) return;
 
         GetClassInfoResult self = _currentChain[^1];
         IReadOnlyList<GetClassInfoResult>? ancestors =
@@ -721,19 +805,48 @@ public sealed partial class AssemblyBrowserViewModel : ObservableObject
         }
         if (path is null) return;
 
+        CancellationTokenSource? prev = _exportCts;
+        var myCts = new CancellationTokenSource();
+        _exportCts = myCts;
+        try { prev?.Cancel(); } catch (ObjectDisposedException) { }
+        CancellationToken ct = myCts.Token;
+        IsExporting = true;
         try
         {
+            CopyCeXmlProgress = "exporting…";
             string text = await renderer(self, ancestors, assembly,
-                CurrentExportOptions, _backend, default).ConfigureAwait(true);
-            await File.WriteAllTextAsync(path, text).ConfigureAwait(true);
+                CurrentExportOptions, _backend, ct).ConfigureAwait(true);
+            ct.ThrowIfCancellationRequested();
+            if (!ReferenceEquals(_exportCts, myCts)) return;
+            await File.WriteAllTextAsync(path, text, ct).ConfigureAwait(true);
+            if (!ReferenceEquals(_exportCts, myCts)) return;
+            CopyCeXmlProgress = $"exported {CountLines(text):N0} lines";
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
                 $"export {ext} -> {path} ({text.Length} bytes, drilldown={DrilldownDepth} arr={ArrayLimit} collapse={CollapsePointerNodes})");
         }
+        catch (OperationCanceledException)
+        {
+            if (ReferenceEquals(_exportCts, myCts))
+                CopyCeXmlProgress = "export cancelled";
+        }
         catch (Exception ex)
         {
-            ErrorMessage = $"export failed: {ex.Message}";
+            if (ReferenceEquals(_exportCts, myCts))
+            {
+                CopyCeXmlProgress = "export failed";
+                ErrorMessage = $"export failed: {ex.Message}";
+            }
             _logger.Write(UnityDumpUI.Core.Constants.LogCategoryView,
                 $"export {ext} failed: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            if (ReferenceEquals(_exportCts, myCts))
+            {
+                IsExporting = false;
+                _exportCts = null;
+            }
+            myCts.Dispose();
         }
     }
 

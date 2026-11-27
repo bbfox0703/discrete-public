@@ -47,14 +47,17 @@ CachedRealDll  g_cache[kMaxCachedDlls] = {};
 int            g_cacheCount = 0;
 SRWLOCK        g_cacheLock = SRWLOCK_INIT;
 
-std::wstring SystemDllPath(const wchar_t* dllName) {
-    wchar_t sysDir[MAX_PATH];
-    UINT n = ::GetSystemDirectoryW(sysDir, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return {};
-    std::wstring path(sysDir, sysDir + n);
-    path += L"\\";
-    path += dllName;
-    return path;
+// Allocation-free system-DLL path builder (A-L10): called from noexcept
+// Proxy_LoadRealDll so it must never allocate via std::wstring / throw bad_alloc.
+bool BuildSystemDllPath(const wchar_t* dllName, wchar_t* out, std::size_t outCap) noexcept {
+    if (dllName == nullptr || out == nullptr || outCap == 0) return false;
+    UINT n = ::GetSystemDirectoryW(out, static_cast<UINT>(outCap));
+    if (n == 0 || n >= outCap) return false;
+    const std::size_t nameLen = ::wcslen(dllName);
+    if (static_cast<std::size_t>(n) + 1u + nameLen + 1u > outCap) return false;
+    out[n] = L'\\';
+    ::wmemcpy(out + n + 1u, dllName, nameLen + 1u);
+    return true;
 }
 
 std::wstring DirOfSelf(HMODULE self) {
@@ -64,6 +67,30 @@ std::wstring DirOfSelf(HMODULE self) {
     std::wstring full(buf, buf + n);
     auto pos = full.find_last_of(L"\\/");
     return (pos == std::wstring::npos) ? std::wstring() : full.substr(0, pos);
+}
+
+// Minimal ntdll DLL-load notification ABI (Vista+ stable) for event-driven
+// backend discovery (A-M5). Avoids polling timeouts when a game sits at a
+// Unity resolution dialog, launcher splash, or slow cold start for >5 s.
+constexpr ULONG kLdrDllNotificationReasonLoaded = 1;
+using fn_LdrDllNotification = VOID(CALLBACK*)(ULONG reason, const void* data, PVOID context);
+using fn_LdrRegisterDllNotification = LONG(NTAPI*)(
+    ULONG flags, fn_LdrDllNotification callback, PVOID context, PVOID* cookie);
+using fn_LdrUnregisterDllNotification = LONG(NTAPI*)(PVOID cookie);
+
+VOID CALLBACK OnDllLoadedNotify(ULONG reason, const void*, PVOID context) {
+    if (reason == kLdrDllNotificationReasonLoaded && context != nullptr) {
+        // Pure kernel SetEvent — safe under loader lock, zero heap/CRT use.
+        ::SetEvent(static_cast<HANDLE>(context));
+    }
+}
+
+void LogProxyLine(const char* line) noexcept {
+    try {
+        Discrete::Log::Init();
+        Discrete::Log::Init(line);
+    } catch (...) {
+    }
 }
 
 // Report pre-CRT refusals, once, from OFF the loader lock.
@@ -103,32 +130,90 @@ DWORD WINAPI BackendLoaderThread(LPVOID lpParam) {
 
     HMODULE proxySelf = reinterpret_cast<HMODULE>(lpParam);
     std::wstring proxyDir = DirOfSelf(proxySelf);
-    if (proxyDir.empty()) return 1;
+    if (proxyDir.empty()) {
+        char msg[160];
+        std::snprintf(msg, sizeof(msg),
+                      "[PROXY] ERROR: GetModuleFileNameW failed (GetLastError=%lu); "
+                      "cannot locate sibling backend DLL.",
+                      ::GetLastError());
+        LogProxyLine(msg);
+        return 1;
+    }
 
-    // Backend detection polls loaded modules, which can race with the host's
-    // own engine-DLL load. Give the engine up to ~5 seconds to settle.
+    // A-M5: wait for Unity's runtime DLL (mono* / GameAssembly.dll /
+    // UserAssembly.dll) without a brittle 5-second cutoff. Register an ntdll
+    // DLL-load notification when available so we wake instantaneously the moment
+    // the engine loads (even after a multi-minute resolution dialog or splash
+    // screen), backed by capped exponential backoff so idle wait uses ~0% CPU.
+    HANDLE dllEvent = ::CreateEventW(nullptr, FALSE /*auto-reset*/, FALSE, nullptr);
+    PVOID notifyCookie = nullptr;
+    fn_LdrUnregisterDllNotification unregisterFn = nullptr;
+    if (dllEvent != nullptr) {
+        if (HMODULE ntdll = ::GetModuleHandleW(L"ntdll.dll")) {
+            auto regFn = reinterpret_cast<fn_LdrRegisterDllNotification>(
+                ::GetProcAddress(ntdll, "LdrRegisterDllNotification"));
+            unregisterFn = reinterpret_cast<fn_LdrUnregisterDllNotification>(
+                ::GetProcAddress(ntdll, "LdrUnregisterDllNotification"));
+            if (regFn != nullptr && unregisterFn != nullptr) {
+                if (regFn(0, &OnDllLoadedNotify, dllEvent, &notifyCookie) != 0) {
+                    notifyCookie = nullptr;
+                }
+            }
+        }
+    }
+
+    const ULONGLONG startMs = ::GetTickCount64();
+    bool loggedWaiting = false;
+    DWORD waitMs = 100;
     BackendDetector::Backend backend = BackendDetector::Backend::Unknown;
-    for (int attempt = 0; attempt < 50; ++attempt) {
+    for (;;) {
         auto d = BackendDetector::Detect();
         if (d.backend != BackendDetector::Backend::Unknown) {
             backend = d.backend;
             break;
         }
-        ::Sleep(100);
-    }
-    if (backend == BackendDetector::Backend::Unknown) {
-        // Give up silently — the host game probably isn't Unity, or the
-        // engine never loaded.
-        return 2;
+        if (!loggedWaiting && (::GetTickCount64() - startMs) >= 5000ull) {
+            loggedWaiting = true;
+            LogProxyLine("[PROXY] INFO: still waiting for Unity runtime (mono / GameAssembly) to load...");
+        }
+        if (dllEvent != nullptr && notifyCookie != nullptr) {
+            ::WaitForSingleObject(dllEvent, waitMs);
+        } else {
+            ::Sleep(waitMs);
+        }
+        if (waitMs < 5000u) {
+            waitMs = (waitMs < 2500u) ? (waitMs * 2u) : 5000u;
+        }
     }
 
-    std::wstring backendDll = proxyDir + L"\\";
-    backendDll += (backend == BackendDetector::Backend::IL2CPP)
+    if (notifyCookie != nullptr && unregisterFn != nullptr) {
+        unregisterFn(notifyCookie);
+    }
+    if (dllEvent != nullptr) {
+        ::CloseHandle(dllEvent);
+    }
+
+    const wchar_t* backendLeafW = (backend == BackendDetector::Backend::IL2CPP)
         ? L"Discrete-IL2CPP.dll"
         : L"Discrete-Mono.dll";
+    const char* backendLeafA = (backend == BackendDetector::Backend::IL2CPP)
+        ? "Discrete-IL2CPP.dll"
+        : "Discrete-Mono.dll";
 
+    std::wstring backendDll = proxyDir + L"\\" + backendLeafW;
     HMODULE h = ::LoadLibraryW(backendDll.c_str());
-    return (h != nullptr) ? 0 : 3;
+    if (h == nullptr) {
+        DWORD err = ::GetLastError();
+        char msg[256];
+        std::snprintf(msg, sizeof(msg),
+                      "[PROXY] ERROR: LoadLibraryW failed for %s (GetLastError=%lu). "
+                      "Verify the matching %s backend DLL is deployed next to the proxy.",
+                      backendLeafA, err,
+                      (sizeof(void*) == 4) ? "x86" : "x64");
+        LogProxyLine(msg);
+        return 3;
+    }
+    return 0;
 }
 
 }  // namespace
@@ -164,16 +249,12 @@ HMODULE Proxy_LoadRealDll(const wchar_t* dllName) noexcept {
     }
     ::ReleaseSRWLockShared(&g_cacheLock);
 
-    // Slow path: load the real system DLL. Use the absolute System32 path
-    // so the loader doesn't pick up our proxy again under the same name.
-    std::wstring path = SystemDllPath(dllName);
-    // SystemDllPath returns empty when GetSystemDirectoryW failed or the result
-    // would not fit. Refuse rather than handing LoadLibraryW a bare file name:
-    // the proxy IS named version.dll / winmm.dll in the game directory, which
-    // precedes System32 in the search order, so a name-only load would resolve
-    // back to US.
-    if (path.empty()) return nullptr;
-    HMODULE h = ::LoadLibraryW(path.c_str());
+    // Slow path: load the real system DLL. Use the absolute System32 path in a
+    // stack buffer (allocation-free) so the loader never picks up our proxy
+    // again under the same name and cannot throw std::bad_alloc in noexcept.
+    wchar_t path[MAX_PATH * 2] = {};
+    if (!BuildSystemDllPath(dllName, path, std::size(path))) return nullptr;
+    HMODULE h = ::LoadLibraryW(path);
 
     ::AcquireSRWLockExclusive(&g_cacheLock);
     // Re-check under the exclusive lock in case another thread populated.

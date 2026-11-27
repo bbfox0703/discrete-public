@@ -4,6 +4,9 @@
 
 #include "Logger.h"
 #include "MagicStrings.h"
+#include "MainThreadDispatcher.h"
+#include "PipeLineBuffer.h"
+#include "PipeSecurity.h"
 #include "ScanCancel.h"
 
 #include <windows.h>
@@ -12,7 +15,6 @@
 #include <mutex>
 #include <string>
 #include <thread>  // Phase 22f: detached worker thread per client
-#include <thread>
 #include <vector>
 
 using nlohmann::json;
@@ -80,22 +82,36 @@ bool WriteLine(HANDLE pipe, const std::string& data) {
     return ok;
 }
 
-// Read until '\n' or disconnect. Returns false if the connection closed before a line arrived
-// or the server is being stopped.
-bool ReadLine(HANDLE pipe, std::string& out) {
-    out.clear();
+enum class ReadLineResult {
+    Ok,
+    Closed,
+    TooLarge,
+};
+
+// Read until '\n' or disconnect, preserving bytes after '\n' in `rxBuf` for
+// subsequent pipelined requests (A-M2). Reports TooLarge explicitly so the
+// caller can emit a -32600 JSON-RPC error before closing (A-L5).
+ReadLineResult ReadLine(HANDLE pipe, Discrete::PipeFraming::LineBuffer& rxBuf, std::string& out) {
+    using Discrete::PipeFraming::LineBuffer;
+
+    // Fast path: a pipelined request is already buffered from the previous ReadFile.
+    {
+        auto st = rxBuf.TryPopLine(out);
+        if (st == LineBuffer::ExtractStatus::LineReady) return ReadLineResult::Ok;
+        if (st == LineBuffer::ExtractStatus::TooLarge)  return ReadLineResult::TooLarge;
+    }
+
     char buf[1024];
     OVERLAPPED ov{};
     ov.hEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (!ov.hEvent) return false;
+    if (!ov.hEvent) return ReadLineResult::Closed;
 
-    bool ok = true;
-    while (ok) {
+    ReadLineResult result = ReadLineResult::Closed;
+    for (;;) {
         ::ResetEvent(ov.hEvent);
         DWORD read = 0;
         BOOL r = ::ReadFile(pipe, buf, sizeof(buf), &read, &ov);
         if (!r && ::GetLastError() != ERROR_IO_PENDING) {
-            ok = false;
             break;
         }
         HANDLE waits[2] = { ov.hEvent, g_stopEvent };
@@ -106,27 +122,24 @@ bool ReadLine(HANDLE pipe, std::string& out) {
             // CancelIoEx is async, so the kernel may still write into the
             // stack-resident OVERLAPPED / read buffer after it returns.
             ::GetOverlappedResult(pipe, &ov, &read, TRUE);
-            ok = false;
             break;
         }
         if (!::GetOverlappedResult(pipe, &ov, &read, FALSE) || read == 0) {
-            ok = false;
             break;
         }
-        for (DWORD i = 0; i < read; ++i) {
-            if (buf[i] == '\n') {
-                ::CloseHandle(ov.hEvent);
-                return true;
-            }
-            if (buf[i] != '\r') out.push_back(buf[i]);
+        rxBuf.Append(buf, read);
+        auto st = rxBuf.TryPopLine(out);
+        if (st == LineBuffer::ExtractStatus::LineReady) {
+            result = ReadLineResult::Ok;
+            break;
         }
-        if (out.size() > 1024 * 1024) {  // 1 MiB sanity cap
-            ok = false;
+        if (st == LineBuffer::ExtractStatus::TooLarge) {
+            result = ReadLineResult::TooLarge;
             break;
         }
     }
     ::CloseHandle(ov.hEvent);
-    return false;
+    return result;
 }
 
 json BuildError(json id, int code, const std::string& message) {
@@ -163,19 +176,20 @@ json Dispatch(const json& request) {
 
 void ServeClient(HANDLE pipe) {
     LogPipe("client connected");
-    // Disconnect monitor. A long scan handler runs SYNCHRONOUSLY on this thread,
-    // so while it's running we can't notice the pipe breaking until it returns
-    // (could be minutes). A side thread polls the pipe; if the client vanished
-    // (UI force-quit) it arms the cooperative scan-cancel so the DLL stops
-    // promptly + frees its work instead of churning to completion. It only
-    // probes WHILE a scan is active — then the main thread does no pipe IO, so
-    // PeekNamedPipe can't race the overlapped ReadFile on the same handle.
+    // Per-client disconnect monitor (A-M1). A long scan handler runs
+    // SYNCHRONOUSLY on this thread, so while it's running we can't notice the
+    // pipe breaking until it returns (could be minutes). A side thread polls
+    // THIS client's pipe ONLY while THIS client's worker owns a ScanCancel::Scope
+    // (`clientScanDepth > 0`) — never on global scan activity. That guarantees:
+    //   1. A second client (e.g. a CE bridge burst) disconnecting during a
+    //      non-scan RPC never cancels another client's active scan.
+    //   2. PeekNamedPipe never races this worker's own overlapped ReadFile.
+    std::atomic<int> clientScanDepth{0};
+    Discrete::ScanCancel::ClientSlotGuard clientSlotGuard(clientScanDepth);
     std::atomic<bool> monitorStop{false};
-    std::thread monitor([pipe, &monitorStop]() {
+    std::thread monitor([pipe, &monitorStop, &clientScanDepth]() {
         while (!monitorStop.load(std::memory_order_relaxed)) {
-            // g_scanActive is a COUNT of live scan Scopes (see ScanCancel.h), so
-            // "a scan is running" is > 0 — including while several overlap.
-            if (Discrete::ScanCancel::g_scanActive.load(std::memory_order_relaxed) > 0) {
+            if (clientScanDepth.load(std::memory_order_acquire) > 0) {
                 DWORD avail = 0;
                 if (!::PeekNamedPipe(pipe, nullptr, 0, nullptr, &avail, nullptr)) {
                     DWORD e = ::GetLastError();
@@ -199,9 +213,16 @@ void ServeClient(HANDLE pipe) {
             if (w != WAIT_TIMEOUT) ::Sleep(150);   // never busy-wait
         }
     });
+    Discrete::PipeFraming::LineBuffer rxBuf;
     while (g_running.load()) {
         std::string line;
-        if (!ReadLine(pipe, line)) break;
+        ReadLineResult rl = ReadLine(pipe, rxBuf, line);
+        if (rl == ReadLineResult::TooLarge) {
+            LogPipe("request exceeded 1 MiB line cap — sending -32600 and closing");
+            WriteLine(pipe, BuildError(nullptr, -32600, "request too large").dump());
+            break;
+        }
+        if (rl != ReadLineResult::Ok) break;
         if (line.empty()) continue;
 
         json request;
@@ -223,7 +244,8 @@ void ServeClient(HANDLE pipe) {
             serialized = response.dump(-1, ' ', false, json::error_handler_t::replace);
         } catch (const std::exception& ex) {
             LogPipe(std::string("response dump failed: ") + ex.what());
-            serialized = BuildError(nullptr, -32603,
+            const json reqId = request.contains("id") ? request["id"] : json(nullptr);
+            serialized = BuildError(reqId, -32603,
                                     std::string("response serialization failed: ") + ex.what()).dump();
         }
         if (!WriteLine(pipe, serialized)) break;
@@ -256,33 +278,81 @@ void ServeClient(HANDLE pipe) {
 // game-relaunch, and DiscreteUI's ConnectWithRetryAsync already
 // tolerates the transient "Pipe is broken" hits that path produces.
 constexpr DWORD kMaxPipeInstances = 4;
+std::atomic<bool> g_acceptorAlive{false};
 
 void WorkerThread() {
+    struct AcceptorAliveGuard {
+        ~AcceptorAliveGuard() noexcept {
+            g_acceptorAlive.store(false, std::memory_order_release);
+        }
+    } aliveGuard;
+
+    Discrete::PipeSecurity::ScopedPipeSecurityAttributes pipeSec;
+    if (!pipeSec.IsValid()) {
+        LogPipe("WARN: failed to construct user+SYSTEM pipe security descriptor; using default DACL");
+    }
+
     LogPipe("pipe server started");
+    bool firstInstance = true;
+    std::uint64_t lastCreateFailLogMs = 0;
+    std::size_t suppressedCreateFails = 0;
+    constexpr std::uint64_t kCreateFailLogThrottleMs = 10000;
+
     while (g_running.load()) {
         HANDLE pipe = ::CreateNamedPipeW(
             MagicStrings::PipeName,
-            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            Discrete::PipeSecurity::MakePipeOpenMode(firstInstance),
+            Discrete::PipeSecurity::MakePipeMode(),
             kMaxPipeInstances,                                  // nMaxInstances
-            kPipeBufferSize, kPipeBufferSize, 0, nullptr);
+            kPipeBufferSize, kPipeBufferSize, 0, pipeSec.Get());
         if (pipe == INVALID_HANDLE_VALUE) {
             DWORD err = ::GetLastError();
-            // ERROR_PIPE_BUSY (231) is the "all instance slots taken"
-            // case — should be rare with kMaxPipeInstances=4 but
-            // still possible if a ghost holds a slot during game
-            // relaunch. ERROR_ACCESS_DENIED (5) shows up under the
-            // same conditions on some Windows builds.
-            LogPipe("CreateNamedPipeW failed: " + std::to_string(err)
-                    + (err == 231 ? " (ERROR_PIPE_BUSY — all "
-                                    + std::to_string(kMaxPipeInstances)
-                                    + " slots in use)" : ""));
+            // A-M3: FILE_FLAG_FIRST_PIPE_INSTANCE returns ERROR_ACCESS_DENIED
+            // when another process already owns \\.\pipe\DiscreteBfx. Refuse to
+            // hijack or silently share the pipe name.
+            if (firstInstance && err == ERROR_ACCESS_DENIED) {
+                LogPipe("CreateNamedPipeW rejected (ERROR_ACCESS_DENIED on "
+                        "FILE_FLAG_FIRST_PIPE_INSTANCE) — pipe name already "
+                        "owned by another process; stopping pipe server");
+                g_running.store(false);
+                break;
+            }
+            // A-L6: throttle repeated slot-full / transient creation failures
+            // instead of writing a log line every 500 ms.
+            const std::uint64_t nowMs = ::GetTickCount64();
+            if (lastCreateFailLogMs == 0 ||
+                (nowMs - lastCreateFailLogMs) >= kCreateFailLogThrottleMs) {
+                std::string msg = "CreateNamedPipeW failed: " + std::to_string(err);
+                if (err == ERROR_PIPE_BUSY) {
+                    msg += " (ERROR_PIPE_BUSY — all " + std::to_string(kMaxPipeInstances) +
+                           " slots in use)";
+                }
+                if (suppressedCreateFails > 0) {
+                    msg += " (suppressed " + std::to_string(suppressedCreateFails) + " repeats)";
+                    suppressedCreateFails = 0;
+                }
+                LogPipe(msg);
+                lastCreateFailLogMs = nowMs;
+            } else {
+                ++suppressedCreateFails;
+            }
             ::Sleep(500);
             continue;
         }
+        firstInstance = false;
+        lastCreateFailLogMs = 0;
+        suppressedCreateFails = 0;
 
         OVERLAPPED ov{};
         ov.hEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (ov.hEvent == nullptr) {
+            // A-L6: never pass a NULL event to WaitForMultipleObjects (would
+            // return WAIT_FAILED immediately and busy-spin).
+            LogPipe("CreateEventW failed in WorkerThread: " + std::to_string(::GetLastError()));
+            ::CloseHandle(pipe);
+            ::Sleep(100);
+            continue;
+        }
 
         BOOL connected = ::ConnectNamedPipe(pipe, &ov);
         DWORD err = ::GetLastError();
@@ -340,58 +410,70 @@ void WorkerThread() {
             // g_activeClients reflects every live worker — no spawn can slip
             // in after Stop() starts waiting.
             g_activeClients.fetch_add(1, std::memory_order_relaxed);
-            std::thread([pipe]() {
-              // Exception barrier for the WHOLE thread body. This is a detached
-              // std::thread, so anything escaping its function calls
-              // std::terminate and takes the GAME process down with it. Dispatch
-              // guards handler exceptions, but plenty of allocation happens
-              // outside that guard — ReadLine growing its buffer, WriteLine's
-              // string copy, the json id/cmd extraction in Dispatch itself, and
-              // even BuildError inside Dispatch's own catch (which re-throws if
-              // the original exception was bad_alloc). A DLL sharing a 32-bit
-              // game's 2 GB address space can genuinely hit bad_alloc on a large
-              // scan response. Losing one client beats killing the game.
-              try {
-                ServeClient(pipe);
-              } catch (const std::exception& ex) {
-                LogPipe(std::string("client worker aborted: ") + ex.what());
-              } catch (...) {
-                LogPipe("client worker aborted: non-std exception");
-              }
+            try {
+              std::thread([pipe]() {
+                // Exception barrier for the WHOLE thread body. This is a detached
+                // std::thread, so anything escaping its function calls
+                // std::terminate and takes the GAME process down with it. Dispatch
+                // guards handler exceptions, but plenty of allocation happens
+                // outside that guard — ReadLine growing its buffer, WriteLine's
+                // string copy, the json id/cmd extraction in Dispatch itself, and
+                // even BuildError inside Dispatch's own catch (which re-throws if
+                // the original exception was bad_alloc). A DLL sharing a 32-bit
+                // game's 2 GB address space can genuinely hit bad_alloc on a large
+                // scan response. Losing one client beats killing the game.
+                try {
+                  ServeClient(pipe);
+                } catch (const std::exception& ex) {
+                  LogPipe(std::string("client worker aborted: ") + ex.what());
+                } catch (...) {
+                  LogPipe("client worker aborted: non-std exception");
+                }
+                  ::DisconnectNamedPipe(pipe);
+                  ::CloseHandle(pipe);
+
+                  // Run disconnect hooks ONLY for a genuine mid-session client
+                  // disconnect — NOT during shutdown / unload. The hooks do
+                  // real runtime work (the IL2CPP one calls gc_collect on this
+                  // worker thread); running that while the DLL is being torn
+                  // down + unloaded, with the game main thread still mutating
+                  // the heap, crashes the game. When g_running is already false
+                  // the server is stopping, so skip them entirely (the whole
+                  // DLL is about to go away — any cleanup they'd do is moot).
+                  if (g_running.load()) {
+                      // Snapshot the hook list under the mutex so a concurrent
+                      // RegisterDisconnectHook (unlikely after init but cheap to
+                      // be safe) doesn't race with iteration.
+                      std::vector<DisconnectHook> hooks;
+                      {
+                          std::lock_guard lock(g_mutex);
+                          hooks = g_disconnectHooks;
+                      }
+                      for (const auto& h : hooks) {
+                          if (!h) continue;
+                          try {
+                              h();
+                          } catch (const std::exception& ex) {
+                              LogPipe(std::string("disconnect hook threw: ") + ex.what());
+                          } catch (...) {
+                              LogPipe("disconnect hook threw non-std exception");
+                          }
+                      }
+                  }
+                  // Last thing the worker does: it's now leaving DLL-owned work.
+                  g_activeClients.fetch_sub(1, std::memory_order_relaxed);
+              }).detach();
+            } catch (const std::exception& ex) {
+                g_activeClients.fetch_sub(1, std::memory_order_relaxed);
+                LogPipe(std::string("failed to spawn client worker thread: ") + ex.what());
                 ::DisconnectNamedPipe(pipe);
                 ::CloseHandle(pipe);
-
-                // Run disconnect hooks ONLY for a genuine mid-session client
-                // disconnect — NOT during shutdown / unload. The hooks do
-                // real runtime work (the IL2CPP one calls gc_collect on this
-                // worker thread); running that while the DLL is being torn
-                // down + unloaded, with the game main thread still mutating
-                // the heap, crashes the game. When g_running is already false
-                // the server is stopping, so skip them entirely (the whole
-                // DLL is about to go away — any cleanup they'd do is moot).
-                if (g_running.load()) {
-                    // Snapshot the hook list under the mutex so a concurrent
-                    // RegisterDisconnectHook (unlikely after init but cheap to
-                    // be safe) doesn't race with iteration.
-                    std::vector<DisconnectHook> hooks;
-                    {
-                        std::lock_guard lock(g_mutex);
-                        hooks = g_disconnectHooks;
-                    }
-                    for (const auto& h : hooks) {
-                        if (!h) continue;
-                        try {
-                            h();
-                        } catch (const std::exception& ex) {
-                            LogPipe(std::string("disconnect hook threw: ") + ex.what());
-                        } catch (...) {
-                            LogPipe("disconnect hook threw non-std exception");
-                        }
-                    }
-                }
-                // Last thing the worker does: it's now leaving DLL-owned work.
+            } catch (...) {
                 g_activeClients.fetch_sub(1, std::memory_order_relaxed);
-            }).detach();
+                LogPipe("failed to spawn client worker thread: non-std exception");
+                ::DisconnectNamedPipe(pipe);
+                ::CloseHandle(pipe);
+            }
         } else {
             ::DisconnectNamedPipe(pipe);
             ::CloseHandle(pipe);
@@ -423,6 +505,14 @@ int ActiveClientCount() {
 }
 
 bool Start() {
+    // A-L6: refuse restart if a previous Stop() timed out and detached a still-
+    // running acceptor thread (otherwise flipping g_running=true would run two
+    // acceptors concurrently).
+    if (g_acceptorAlive.load(std::memory_order_acquire)) {
+        LogPipe("PipeServer::Start: previous acceptor thread still alive — refusing restart");
+        return false;
+    }
+
     bool expected = false;
     if (!g_running.compare_exchange_strong(expected, true)) return false;
 
@@ -431,37 +521,38 @@ bool Start() {
         g_running = false;
         return false;
     }
-    g_worker = std::thread(WorkerThread);
+
+    g_acceptorAlive.store(true, std::memory_order_release);
+    try {
+        g_worker = std::thread(WorkerThread);
+    } catch (...) {
+        // A-L6: roll back state cleanly on thread-spawn failure so Start()
+        // never leaks g_stopEvent, leaves g_running=true, or throws into DllMain.
+        g_acceptorAlive.store(false, std::memory_order_release);
+        ::CloseHandle(g_stopEvent);
+        g_stopEvent = nullptr;
+        g_running = false;
+        LogPipe("PipeServer::Start: failed to spawn acceptor thread");
+        return false;
+    }
     return true;
 }
 
 void Stop() {
     if (!g_running.exchange(false)) return;
     if (g_stopEvent) ::SetEvent(g_stopEvent);
-    // Arm the cooperative scan cancel. A client worker sitting in a multi-minute
-    // value scan polls this and bails within milliseconds; without it the drain
-    // below simply burns its full 2 s and gives up while the scan grinds on,
-    // which is the case that then trips the g_stopEvent lifetime problem handled
-    // at the end of this function.
+    // Arm cooperative scan cancel AND wake any worker blocked in
+    // MainThreadDispatcher::SubmitAndWait (A-M8) before draining clients.
     Discrete::ScanCancel::RequestCancel();
+    Discrete::MainThreadDispatcher::AbortPending();
 
     if (g_worker.joinable()) {
-        // BOUNDED wait, never a bare join(). Stop() is reachable from DllMain:
-        // main.cpp OnDetach() -> Discrete_Shutdown() -> here, on the
-        // lpReserved == NULL (FreeLibrary) path — and DllMain runs holding the
-        // loader lock. The worker's own exit epilogue (_endthreadex ->
-        // ExitThread -> ntdll!LdrShutdownThread) must ACQUIRE that same lock to
-        // run DLL_THREAD_DETACH across every loaded module, so it can never
-        // finish while we hold it. An unconditional join() therefore wedges the
-        // calling thread forever *while still holding the loader lock*, which
-        // then blocks every LoadLibrary and every thread exit in the game —
-        // the whole process freezes, not just us. DisableThreadLibraryCalls on
-        // our own module (main.cpp) does not help: the walk still covers
-        // ucrtbase / UnityPlayer / mono-2.0-bdwgc / GameAssembly.
-        //
-        // g_stopEvent is already signalled above, so a worker that is free to
-        // run exits within milliseconds and the wait returns at once. Only the
-        // pathological case falls through to detach.
+        // BOUNDED wait, never a bare join(). Normally Stop() runs off-DllMain
+        // via Discrete_Shutdown() (the module is pinned in main.cpp and
+        // DLL_PROCESS_DETACH is a no-op), so g_stopEvent wakes the acceptor
+        // within milliseconds and WaitForSingleObject returns WAIT_OBJECT_0.
+        // Keeping the bounded wait defends against any caller that ever invokes
+        // Stop() while a thread is stalled in an OS call.
         const DWORD w = ::WaitForSingleObject(g_worker.native_handle(),
                                               kWorkerExitTimeoutMs);
         if (w == WAIT_OBJECT_0) {
@@ -473,16 +564,12 @@ void Stop() {
         }
     }
 
-    // The acceptor has stopped — no new client threads will be created, so
-    // g_activeClients can now only decrease. Wait for in-flight ServeClient
-    // workers to finish running DLL code before returning. Without this, the
-    // "Unload Discrete DLL" path's FreeLibrary could unmap the module while a
-    // detached worker is still executing it → CTD. The g_stopEvent we just
-    // signalled breaks any worker blocked in ReadLine, so they exit promptly;
-    // the cap is a safety bound, not the expected wait.
-    for (int i = 0; i < 400 && g_activeClients.load(std::memory_order_relaxed) > 0; ++i) {
-        ::Sleep(5); // up to ~2 s worst case
-    }
+    // Re-abort any item queued by a worker in the brief window while the
+    // acceptor was exiting, then drain in-flight ServeClient workers with a
+    // real wall-clock deadline (2 s).
+    Discrete::MainThreadDispatcher::AbortPending();
+    Discrete::MainThreadDispatcher::WaitUntilZeroWithDeadline(
+        g_activeClients, kWorkerExitTimeoutMs, /*pollSleepMs=*/5);
 
     // Only reclaim the event once the drain actually succeeded. Client workers
     // and their disconnect monitors read g_stopEvent without synchronisation, so
@@ -501,12 +588,9 @@ void Stop() {
         LogPipe("PipeServer::Stop: clients still active after drain — "
                 "leaking the stop event rather than closing it under them");
     }
-
-    // Registered by Discrete_Init, which can run again after Discrete_Shutdown
-    // clears the init latch. The hook list is append-only, so without this a
-    // Shutdown -> Init cycle leaves two copies of each backend hook and every
-    // later client disconnect runs that many full GC drains (~100 ms each).
-    ClearDisconnectHooks();
+    // Note (A-L3): do NOT ClearDisconnectHooks() here — Discrete_StopPipe ->
+    // Discrete_StartPipe must preserve hooks registered by Discrete_Init().
+    // Discrete_Shutdown() owns ClearDisconnectHooks().
 }
 
 bool IsRunning() noexcept {

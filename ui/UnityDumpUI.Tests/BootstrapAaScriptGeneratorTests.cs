@@ -263,4 +263,17 @@ public class BootstrapAaScriptGeneratorTests
         string script = BootstrapAaScriptGenerator.Build();
         Assert.DoesNotMatch(@"\w''\w", script);
     }
+
+    [Fact]
+    public void Build_SmokeHandshake_UsesBoundedTimeoutPipeRpcRawUnderPcall()
+    {
+        // E-M4: bootstrap smoke handshake must go through U.pipeRpcRaw with a
+        // finite timeout (5000 ms) wrapped in pcall so a stalled DLL cannot freeze
+        // CE's GUI thread on table load.
+        string script = BootstrapAaScriptGenerator.Build();
+
+        Assert.Contains("pcall(require, 'utils')", script);
+        Assert.Contains("pcall(U.pipeRpcRaw,", script);
+        Assert.Contains(", 5000)", script);
+    }
 }

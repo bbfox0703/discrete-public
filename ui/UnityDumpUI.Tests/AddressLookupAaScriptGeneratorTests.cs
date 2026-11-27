@@ -20,7 +20,8 @@ public class AddressLookupAaScriptGeneratorTests
                                                  AddressLookupField? nearest = null,
                                                  string instance = "0x000002201761E3D0",
                                                  string className = "PLY_WORK",
-                                                 string? @namespace = "MainGame") =>
+                                                 string? @namespace = "MainGame",
+                                                 int pointerSize = 8) =>
         new()
         {
             Instance     = instance,
@@ -28,6 +29,7 @@ public class AddressLookupAaScriptGeneratorTests
             Namespace    = @namespace,
             Field        = field,
             NearestField = nearest,
+            PointerSize  = pointerSize,
         };
 
     [Fact]
@@ -244,5 +246,77 @@ public class AddressLookupAaScriptGeneratorTests
             Assert.DoesNotMatch(bugPattern, child.Description);
             Assert.DoesNotMatch(bugPattern, child.Address);
         }
+    }
+
+    [Theory]
+    [InlineData(8, 0x14)]
+    [InlineData(4, 0x0C)]
+    public void Build_SystemStringField_DereferencesToFirstCharInCeOffsetOrder(
+        int pointerSize, int expectedCharsOffset)
+    {
+        // E-M2: managed System.String fields hold a pointer to the String object,
+        // not inline UTF-16 bytes. CE .CT / Offset[0..n-1] order puts the final
+        // offset (_firstChar = 2*ptr + 4) at index 0 and the field offset at
+        // index 1 so CE evaluates [[symbol] + f.Offset] + charsOffset.
+        var p = AddressLookupAaScriptGenerator.Build(BasicReq(
+            field: new AddressLookupField
+            {
+                Name   = "playerName",
+                Type   = "System.String",
+                Offset = 0x28,
+                Size   = pointerSize,
+            },
+            pointerSize: pointerSize));
+
+        var child = Assert.Single(p.ChildRecords);
+        Assert.Equal(CeValueType.UnicodeString, child.ValueType);
+        Assert.False(child.IsSigned);
+        Assert.Equal(new[] { expectedCharsOffset, 0x28 }, child.Offsets);
+    }
+
+    [Fact]
+    public void Build_SystemStringNearestField_AlsoDereferencesToFirstChar()
+    {
+        var p = AddressLookupAaScriptGenerator.Build(BasicReq(
+            nearest: new AddressLookupField
+            {
+                Name   = "label",
+                Type   = "System.String",
+                Offset = 0x18,
+                Size   = 4,
+            },
+            pointerSize: 4));
+
+        var child = Assert.Single(p.ChildRecords);
+        Assert.Equal(CeValueType.UnicodeString, child.ValueType);
+        Assert.Contains("[closest below]", child.Description);
+        Assert.Equal(new[] { 0x0C, 0x18 }, child.Offsets);
+    }
+
+    [Theory]
+    [InlineData("System.IntPtr",  4, CeValueType.Dword)]
+    [InlineData("System.UIntPtr", 4, CeValueType.Dword)]
+    [InlineData("MyNs.MyClass",   4, CeValueType.Dword)]
+    [InlineData("System.IntPtr",  8, CeValueType.Qword)]
+    [InlineData("System.UIntPtr", 8, CeValueType.Qword)]
+    [InlineData("MyNs.MyClass",   8, CeValueType.Qword)]
+    public void Build_PointerSizedTypes_RespectPointerSize(
+        string clrType, int pointerSize, CeValueType expected)
+    {
+        // E-M2 / E-L4: x86 targets must map IntPtr/UIntPtr/reference fallback
+        // to 4-byte Dword instead of 8-byte Qword.
+        var p = AddressLookupAaScriptGenerator.Build(BasicReq(
+            field: new AddressLookupField
+            {
+                Name   = "ptrField",
+                Type   = clrType,
+                Offset = 0x20,
+                Size   = pointerSize,
+            },
+            pointerSize: pointerSize));
+
+        var child = Assert.Single(p.ChildRecords);
+        Assert.Equal(expected, child.ValueType);
+        Assert.Equal(new[] { 0x20 }, child.Offsets);
     }
 }

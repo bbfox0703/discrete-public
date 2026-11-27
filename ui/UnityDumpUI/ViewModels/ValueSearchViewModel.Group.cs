@@ -16,6 +16,7 @@ using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -116,24 +117,26 @@ public sealed partial class ValueSearchViewModel
                 StatusMessage = "First Scan failed.";
                 return;
             }
-            if (!double.TryParse(s.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out double v))
+            string wireDt = WireDataType(s.DataType);
+            if (!ValueScanWireEncoder.TryEncodeNumericArg(wireDt, s.Value, out JsonElement vEl, out string vErr))
             {
-                ErrorMessage  = $"Slot {i + 1}: '{s.Value}' is not a valid number.";
+                ErrorMessage  = $"Slot {i + 1}: {vErr}";
                 StatusMessage = "First Scan failed.";
                 return;
             }
-            var req = new GroupSlotRequest { DataType = WireDataType(s.DataType), ScanType = s.ScanType, Value = v };
+            var req = new GroupSlotRequest { DataType = wireDt, ScanType = s.ScanType, Value = vEl };
             if (s.ScanType == "range")
             {
-                if (!double.TryParse(s.ValueTo, NumberStyles.Float, CultureInfo.InvariantCulture, out double vt))
+                if (!ValueScanWireEncoder.TryEncodeNumericArg(wireDt, s.ValueTo, out JsonElement vtEl, out string vtErr))
                 {
-                    ErrorMessage  = $"Slot {i + 1}: range upper bound '{s.ValueTo}' is not a valid number.";
+                    ErrorMessage  = $"Slot {i + 1} range upper bound: {vtErr}";
                     StatusMessage = "First Scan failed.";
                     return;
                 }
-                req.ValueTo = vt;
+                req.ValueTo = vtEl;
             }
-            if (double.TryParse(s.Tolerance, NumberStyles.Float, CultureInfo.InvariantCulture, out double tol))
+            if (double.TryParse(s.Tolerance, NumberStyles.Float, CultureInfo.InvariantCulture, out double tol)
+                && double.IsFinite(tol))
                 req.Tolerance = tol;
             slots.Add(req);
         }
@@ -209,28 +212,30 @@ public sealed partial class ValueSearchViewModel
         for (int i = 0; i < GroupInputs.Count; i++)
         {
             var s = GroupInputs[i];
-            var req = new GroupSlotRequest { ScanType = s.ScanType };
+            string wireDt = WireDataType(s.DataType);
+            var req = new GroupSlotRequest { DataType = wireDt, ScanType = s.ScanType };
             if (s.ScanType is "exact" or "range" or "newValue")
             {
-                if (!double.TryParse(s.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out double v))
+                if (!ValueScanWireEncoder.TryEncodeNumericArg(wireDt, s.Value, out JsonElement vEl, out string vErr))
                 {
-                    ErrorMessage  = $"Slot {i + 1}: '{s.Value}' is not a valid number for {s.ScanType}.";
+                    ErrorMessage  = $"Slot {i + 1} ({s.ScanType}): {vErr}";
                     StatusMessage = "Next Scan failed.";
                     return;
                 }
-                req.Value = v;
+                req.Value = vEl;
                 if (s.ScanType == "range")
                 {
-                    if (!double.TryParse(s.ValueTo, NumberStyles.Float, CultureInfo.InvariantCulture, out double vt))
+                    if (!ValueScanWireEncoder.TryEncodeNumericArg(wireDt, s.ValueTo, out JsonElement vtEl, out string vtErr))
                     {
-                        ErrorMessage  = $"Slot {i + 1}: range upper bound '{s.ValueTo}' is not a valid number.";
+                        ErrorMessage  = $"Slot {i + 1} range upper bound: {vtErr}";
                         StatusMessage = "Next Scan failed.";
                         return;
                     }
-                    req.ValueTo = vt;
+                    req.ValueTo = vtEl;
                 }
             }
-            if (double.TryParse(s.Tolerance, NumberStyles.Float, CultureInfo.InvariantCulture, out double tol))
+            if (double.TryParse(s.Tolerance, NumberStyles.Float, CultureInfo.InvariantCulture, out double tol)
+                && double.IsFinite(tol))
                 req.Tolerance = tol;
             slots.Add(req);
         }

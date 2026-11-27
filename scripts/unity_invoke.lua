@@ -257,7 +257,10 @@ end
 -- ---------- Pipe RPC ----------------------------------------------------
 -- Same retry scaffolding + main-thread yield as the sibling scripts.
 
-local PIPE   = [[\\.\pipe\DiscreteBfx]]
+local PIPE      = [[\\.\pipe\DiscreteBfx]]
+local PIPE_NAME = "DiscreteBfx"
+local kDefaultRpcTimeoutMs  = 10000
+local kConnectRetryBudgetMs = 3000
 -- Keep CE's window alive while we block. CE's Lua `sleep` is a bare Win32
 -- Sleep and pumps NOTHING, so every sleep in a retry loop must be paired with
 -- this or Cheat Engine freezes for the loop's whole duration.
@@ -272,9 +275,149 @@ local function pump()
     if type(f) == "function" then pcall(f) end
 end
 
+local function _nowMs()
+    local tc = rawget(_G, "getTickCount")
+    if type(tc) == "function" then
+        local ok, v = pcall(tc)
+        if ok and type(v) == "number" then return v end
+    end
+    return math.floor(os.clock() * 1000)
+end
+
+local function _elapsedMs(startMs, fallbackMs)
+    local cur = _nowMs()
+    if cur >= startMs then return cur - startMs end
+    return fallbackMs
+end
+
+local function _closePipeOnce(state)
+    local p = state.pipe
+    state.pipe = nil
+    if p ~= nil then pcall(function() p.destroy() end) end
+end
+
+-- E-M4: Bounded-timeout pipe transaction. Uses CE's connectToPipe (native
+-- overlapped timeout + CancelIo) inside createThread + GUI pump polling so
+-- callMethod (especially main_thread=true on a paused/minimized game) never
+-- freezes Cheat Engine indefinitely.
+local function pipeTransact(line, timeoutMs)
+    local budget = tonumber(timeoutMs) or kDefaultRpcTimeoutMs
+    if budget < 500 then budget = 500 elseif budget > 120000 then budget = 120000 end
+    local payload = line .. "\n"
+
+    local ceConnect = rawget(_G, "connectToPipe")
+    local ceThread  = rawget(_G, "createThread")
+    local ceSleep   = rawget(_G, "sleep")
+
+    local function transactCePipe(state)
+        local pipe = nil
+        local cStart, cElapsed = _nowMs(), 0
+        while not state.aborted do
+            local okC, p = pcall(ceConnect, PIPE_NAME, budget)
+            if okC and p ~= nil then pipe = p; break end
+            if _elapsedMs(cStart, cElapsed) >= kConnectRetryBudgetMs then break end
+            if type(ceSleep) == "function" then ceSleep(200) end
+            cElapsed = cElapsed + 200
+            if not state.inWorker then pump() end
+        end
+        if pipe == nil then
+            return nil, "cannot open pipe " .. PIPE ..
+                        " — run unity_dump.lua first to inject the DLL."
+        end
+        state.pipe = pipe
+        if state.aborted then
+            _closePipeOnce(state)
+            return nil, "pipe RPC timed out after " .. tostring(budget) .. " ms"
+        end
+        local timedOut = false
+        pcall(function() pipe.OnTimeout = function() timedOut = true end end)
+        local okW, written = pcall(function() return pipe.writeString(payload, false) end)
+        if not okW or written == nil then
+            _closePipeOnce(state)
+            if timedOut or state.aborted then
+                return nil, "pipe RPC timed out after " .. tostring(budget) .. " ms"
+            end
+            return nil, "pipe write failed"
+        end
+        local bytes, n, gotNewline = {}, 0, false
+        while not state.aborted do
+            local okR, b = pcall(function() return pipe.readByte() end)
+            if not okR or b == nil then break end
+            if b == 10 then gotNewline = true; break end
+            if b ~= 13 then n = n + 1; bytes[n] = string.char(b) end
+        end
+        _closePipeOnce(state)
+        if timedOut or state.aborted then
+            return nil, "pipe RPC timed out after " .. tostring(budget) .. " ms"
+        end
+        if not gotNewline or n == 0 then
+            return nil, "empty or truncated response"
+        end
+        return table.concat(bytes), nil
+    end
+
+    local function transactStdIo(state)
+        local f, fe
+        local cStart, cElapsed = _nowMs(), 0
+        while not state.aborted do
+            f, fe = io.open(PIPE, "r+b")
+            if f ~= nil then break end
+            if _elapsedMs(cStart, cElapsed) >= kConnectRetryBudgetMs then break end
+            if type(ceSleep) == "function" then ceSleep(200) end
+            cElapsed = cElapsed + 200
+            if not state.inWorker then pump() end
+        end
+        if f == nil then
+            return nil, "cannot open pipe " .. PIPE .. ": " .. tostring(fe) ..
+                        " — run unity_dump.lua first to inject the DLL."
+        end
+        local okW, wErr = f:write(payload)
+        if not okW then
+            pcall(function() f:close() end)
+            return nil, "pipe write failed: " .. tostring(wErr)
+        end
+        f:flush()
+        local resp = f:read("*l")
+        pcall(function() f:close() end)
+        if resp == nil then return nil, "empty response" end
+        return resp, nil
+    end
+
+    local runner = (type(ceConnect) == "function") and transactCePipe or transactStdIo
+
+    if type(ceThread) == "function" and type(ceSleep) == "function" then
+        local state = { done = false, aborted = false, inWorker = true,
+                        resp = nil, err = nil, pipe = nil }
+        local okT, th = pcall(ceThread, function()
+            local okCall, r, e = pcall(runner, state)
+            if okCall then state.resp, state.err = r, e
+            else           state.err = tostring(r) end
+            state.done = true
+        end)
+        if okT and th ~= nil then
+            local totalDeadline = budget + kConnectRetryBudgetMs
+            local tStart, tElapsed = _nowMs(), 0
+            while not state.done do
+                if _elapsedMs(tStart, tElapsed) >= totalDeadline then
+                    state.aborted = true
+                    _closePipeOnce(state)
+                    pcall(function() th.terminate() end)
+                    return nil, "pipe RPC timed out after " .. tostring(budget) .. " ms"
+                end
+                ceSleep(20)
+                tElapsed = tElapsed + 20
+                pump()
+            end
+            return state.resp, state.err
+        end
+    end
+
+    return runner({ done = false, aborted = false, inWorker = false, pipe = nil })
+end
+
 local nextId = 0
 
-local function rpc(cmd, args)
+local function rpc(cmd, args, timeoutMs)
     pump()
     nextId = nextId + 1
     local id = nextId
@@ -283,27 +426,10 @@ local function rpc(cmd, args)
     local line = string.format('{"id":%d,"cmd":%s,"args":%s}',
                                id, escapeStr(cmd), argsJson)
 
-    local f, fe
-    for _ = 1, 15 do
-        f, fe = io.open(PIPE, "r+b")
-        if f then break end
-        -- pump() must be INSIDE the loop. The one at the top of rpc() fires
-        -- once, before it, so without this the 15 x 200 ms retry budget is
-        -- three seconds of frozen Cheat Engine — on exactly the path that runs
-        -- when the DLL's pipe is not up yet, i.e. the common first attempt.
-        if sleep then sleep(200) end
-        pump()
+    local resp, rerr = pipeTransact(line, timeoutMs)
+    if resp == nil then
+        error(TAG .. " " .. tostring(cmd) .. ": " .. tostring(rerr))
     end
-    if f == nil then
-        error(TAG .. " cannot open pipe " .. PIPE .. ": " .. tostring(fe) ..
-              " — run unity_dump.lua first to inject the DLL.")
-    end
-
-    f:write(line .. "\n")
-    f:flush()
-    local resp = f:read("*l")
-    f:close()
-    if resp == nil then error(TAG .. " empty response for " .. cmd) end
     return parseJson(resp)
 end
 
@@ -419,10 +545,16 @@ function callUnityMethod(assembly, namespace, class, method, args, opts)
     end
     -- Phase 20-MT: run on the Unity main thread (required for engine methods
     -- that touch the scene graph, e.g. Transform.set_position).
+    local rpcTimeoutMs = tonumber(opts.rpcTimeoutMs)
     if opts.mainThread then
         body.main_thread = true
-        if opts.mainThreadTimeoutMs then
-            body.main_thread_timeout_ms = opts.mainThreadTimeoutMs
+        local mt = tonumber(opts.mainThreadTimeoutMs)
+        if mt ~= nil then
+            if mt < 1 then mt = 1 elseif mt > 60000 then mt = 60000 end
+            body.main_thread_timeout_ms = mt
+        end
+        if rpcTimeoutMs == nil then
+            rpcTimeoutMs = math.max(kDefaultRpcTimeoutMs, (mt or 5000) + 5000)
         end
     end
     -- Opt into value-type-by-value return decode (get_position et al) — the DLL
@@ -433,7 +565,7 @@ function callUnityMethod(assembly, namespace, class, method, args, opts)
         if opts.returnStructSize then body.returnStructSize = opts.returnStructSize end
     end
 
-    local resp = rpc("callMethod", body)
+    local resp = rpc("callMethod", body, rpcTimeoutMs)
     if resp.error then
         error(TAG .. " pipe error " .. tostring(resp.error.code or "?") ..
               ": " .. tostring(resp.error.message or "?"))

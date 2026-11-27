@@ -53,6 +53,7 @@ public static partial class CeXmlExporter
         int currentDepth, CancellationToken ct,
         string? addrOverride = null)
     {
+        ct.ThrowIfCancellationRequested();
         string desc = FieldDesc(f.Name, f.Type, options, f.Offset);
         // Normally a field is addressed RELATIVE to its parent (+offset). When
         // addrOverride is set (the "Copy CE field" standalone root), this node
@@ -274,7 +275,7 @@ public static partial class CeXmlExporter
                                 return;
                             }
                         }
-                        catch { /* fall through to default path */ }
+                        catch (Exception ex) when (ex is not OperationCanceledException) { /* fall through to default path */ }
                         finally { visited.Remove(fcycle); }
                     }
                 }
@@ -428,7 +429,7 @@ public static partial class CeXmlExporter
             if (string.IsNullOrEmpty(attempt.Error) && attempt.Fields is { Count: > 0 })
                 res = attempt;
         }
-        catch { /* fall through to name path */ }
+        catch (Exception ex) when (ex is not OperationCanceledException) { /* fall through to name path */ }
 
         // Mono (or header-resolve miss): retry by declared type name across the
         // parent assembly + well-known fallbacks, same as the Inspector.
@@ -448,7 +449,7 @@ public static partial class CeXmlExporter
                         if (string.IsNullOrEmpty(attempt.Error) && attempt.Fields is { Count: > 0 })
                         { res = attempt; break; }
                     }
-                    catch { /* try next */ }
+                    catch (Exception ex) when (ex is not OperationCanceledException) { /* try next */ }
                 }
                 if (res is not null) break;
             }
@@ -528,7 +529,7 @@ public static partial class CeXmlExporter
                     if (string.IsNullOrEmpty(attempt.Error) && attempt.Fields is { Count: > 0 })
                     { res = attempt; break; }
                 }
-                catch { /* try next */ }
+                catch (Exception ex) when (ex is not OperationCanceledException) { /* try next */ }
             }
             if (res is not null) break;
         }
@@ -635,7 +636,7 @@ public static partial class CeXmlExporter
             {
                 (bool hex, bool signed) = UnityTypeMap.CeDisplay(child.Type);
                 EmitLeaf(sb, indent, ids, label,
-                         vartype: UnityTypeMap.Resolve(child.Type).CeTypeKeyword,
+                         vartype: UnityTypeMap.Resolve(child.Type, options.PointerSize).CeTypeKeyword,
                          showAsHex: hex, showAsSigned: signed, address: rel, offsets: null);
             }
         }
@@ -668,7 +669,7 @@ public static partial class CeXmlExporter
         {
             (bool hex, bool signed) = UnityTypeMap.CeDisplay(child.Type);
             EmitLeaf(sb, indent, ids, label,
-                     vartype: UnityTypeMap.Resolve(child.Type).CeTypeKeyword,
+                     vartype: UnityTypeMap.Resolve(child.Type, options.PointerSize).CeTypeKeyword,
                      showAsHex: hex, showAsSigned: signed, address: rel, offsets: offsets);
         }
     }
@@ -909,12 +910,15 @@ public static partial class CeXmlExporter
         {
             try
             {
+                // List<T>._items is pointer-sized (4 bytes on x86, 8 on x64).
+                // Reading 8 bytes on x86 sweeps in the adjacent _size field at +0xC,
+                // turning any non-empty List into a bogus >4 GiB address.
                 ReadMemoryResult itemsMem = await live.ReadMemoryAsync(
-                    $"0x{(fieldPtr + (ulong)itemsOff):X16}", 8, ct).ConfigureAwait(false);
+                    $"0x{(fieldPtr + (ulong)itemsOff):X16}", ptr, ct).ConfigureAwait(false);
                 arrayAbs = (string.IsNullOrEmpty(itemsMem.Error) && !string.IsNullOrEmpty(itemsMem.Hex))
-                    ? ParseLeQword(itemsMem.Hex!) : 0;
+                    ? ParseLePointer(itemsMem.Hex!, ptr) : 0;
             }
-            catch { arrayAbs = 0; }
+            catch (Exception ex) when (ex is not OperationCanceledException) { arrayAbs = 0; }
         }
         if (arrayAbs == 0)
         {
@@ -943,7 +947,7 @@ public static partial class CeXmlExporter
                 elementNamespace: elemSpec?.ns,
                 elementName:      elemSpec?.name, ct).ConfigureAwait(false);
         }
-        catch { /* tolerate */ }
+        catch (Exception ex) when (ex is not OperationCanceledException) { /* tolerate */ }
 
         // Prefer the DLL-reported data start (data_address − array object) for
         // the element base offset — it's the exact SZARRAY vector offset for
@@ -1215,6 +1219,7 @@ public static partial class CeXmlExporter
         bool slotDrill = (currentDepth + 1) < options.DrilldownDepth;
         for (int i = 0; i < options.ArrayLimit; ++i)
         {
+            ct.ThrowIfCancellationRequested();
             string slotLabel  = $"[{i}]";
             string slotRel    = RelAddr(dataOff + i * ptr);   // reference elements → pointer stride
             string? elemColor = RecordColorFor(options, i);
@@ -1247,8 +1252,12 @@ public static partial class CeXmlExporter
         foreach (string asm in BuildExportAssemblyCandidates(assemblyName, ns))
         {
             GetClassInfoResult? info;
-            try { info = await live.GetClassInfoAsync(asm, ns, name, ct).ConfigureAwait(false); }
-            catch { info = null; }
+            try
+            {
+                ct.ThrowIfCancellationRequested();
+                info = await live.GetClassInfoAsync(asm, ns, name, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException) { info = null; }
             if (info is not null && string.IsNullOrEmpty(info.Error) && info.Fields is { Count: > 0 })
                 return info;
         }
@@ -1282,8 +1291,12 @@ public static partial class CeXmlExporter
         {
             if (string.IsNullOrEmpty(e.Ptr) || e.Ptr == "0x0000000000000000") continue;
             WalkInstanceResult r;
-            try { r = await live.WalkInstanceFromHeaderAsync(e.Ptr!, ct).ConfigureAwait(false); }
-            catch { continue; }
+            try
+            {
+                ct.ThrowIfCancellationRequested();
+                r = await live.WalkInstanceFromHeaderAsync(e.Ptr!, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException) { continue; }
             if (!string.IsNullOrEmpty(r.Error) || string.IsNullOrEmpty(r.Name)) continue;
             string cns = r.Namespace ?? string.Empty;
             seen.Add($"{cns}.{r.Name}");
@@ -1361,6 +1374,7 @@ public static partial class CeXmlExporter
             {
                 foreach (FieldEntry fld in fields)
                 {
+                    ct.ThrowIfCancellationRequested();
                     if (fld.Static) continue;
                     await EmitMetadataFieldAsync(sb, indent, ids, fld, assemblyName,
                                                  options, live, typeVisited, currentDepth, ct)
@@ -1427,12 +1441,15 @@ public static partial class CeXmlExporter
                      showAsHex: true, address: rel, offsets: null);
             return;
         }
-        // Enum is terminal — inline 4-byte signed leaf regardless of depth
-        // (matches the live Leaf/enum emit).
+        // Enum is terminal — inline scalar leaf matching the enum's underlying
+        // integer width/signedness regardless of depth.
         if (IsEnumClass(mi))
         {
-            EmitLeaf(sb, indent, ids, desc, vartype: "4 Bytes",
-                     showAsHex: false, showAsSigned: true, address: rel, offsets: null);
+            string underlying = TemplateExportHelpers.ResolveEnumUnderlyingType(mi);
+            ManagedTypeShape es = UnityTypeMap.Resolve(underlying);
+            (bool hex, bool signed) = UnityTypeMap.CeDisplay(underlying);
+            EmitLeaf(sb, indent, ids, desc, vartype: es.CeTypeKeyword,
+                     showAsHex: hex, showAsSigned: signed, address: rel, offsets: null);
             return;
         }
         bool valueStruct = IsValueTypeClass(mi);
@@ -1499,6 +1516,7 @@ public static partial class CeXmlExporter
 
         foreach ((WalkedField field, string absoluteAddress) in nodes)
         {
+            ct.ThrowIfCancellationRequested();
             var visited = new HashSet<string>();
             string root = rootAsOffset ? RelAddr(field.Offset) : absoluteAddress;
             await EmitWalkedFieldLiveAsync(sb, "    ", ids, field, assemblyName,

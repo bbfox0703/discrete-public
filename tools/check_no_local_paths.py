@@ -80,8 +80,16 @@ ALLOWED = {"public", "default", "all", "username", "user", "you", "youruser",
 #
 # ⚠ It must NOT fire on the correct form: `%USERPROFILE%\.claude\projects\…` has no drive
 # letter, so this pattern does not match, which is exactly the distinction being drawn.
-SESSION_DIR_PATTERN = re.compile(r"[A-Za-z]:" + _SEP + r"(?:[^\s:*?\"<>|]{0,120}" + _SEP +
-                                 r")*?\.claude" + _SEP + "projects", re.IGNORECASE)
+# Exclude path separators from each intermediate segment so the regex has a
+# unique decomposition per path and runs in linear time (A-M12: without
+# excluding `/` and `\`, non-matching long paths like `"C:/" + "a/"*25 + "x"`
+# trigger exponential backtracking).
+_NO_SEP = r'[^\s:*?"<>|' + chr(92) + chr(92) + r'/]'
+SESSION_DIR_PATTERN = re.compile(
+    r"[A-Za-z]:" + _SEP + r"(?:" + _NO_SEP + r"{0,120}" + _SEP +
+    r")*?\.claude" + _SEP + "projects",
+    re.IGNORECASE,
+)
 
 SKIP = ("tools/check_no_local_paths.py",)
 

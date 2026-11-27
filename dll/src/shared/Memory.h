@@ -46,16 +46,6 @@ bool SafeWrite(void* addr, const T& value) noexcept {
     return SafeWriteBytes(addr, &value, sizeof(T));
 }
 
-// AOB scan in [base, base+size). `pattern` is the bytes; `mask` is one char per pattern byte:
-// 'x' = match, '?' = wildcard. Returns first match or nullptr.
-// Pattern and mask must have equal length.
-const std::uint8_t* AOBScan(const std::uint8_t* base, std::size_t size,
-                            const std::uint8_t* pattern, std::string_view mask) noexcept;
-
-// Convenience: scan an entire module's image for a pattern.
-const std::uint8_t* AOBScanModule(const wchar_t* moduleName,
-                                  const std::uint8_t* pattern, std::string_view mask) noexcept;
-
 // One committed memory region as reported by VirtualQueryEx.
 struct CommittedRegion {
     const std::uint8_t* base;
@@ -86,23 +76,29 @@ std::vector<ThreadStackRange> CollectThreadStackRanges();
 // walk (IL2CPPAddressFinder::FindAllInstances).
 unsigned int ScanThreadCount() noexcept;
 
-// Per-scan thread cap (2026-06-08). The Value Search "Parallel" toggle lets the
-// user force single-threaded scanning on games whose anti-tamper reacts to many
-// threads hammering memory in parallel, without touching the hardware default
-// everywhere else. A value-scan handler opens a ScanThreadCapScope(cap) for its
-// duration; the parallel drivers (RunParallelScan + the IL2CPP reverse-lookup
-// index sweep) consult EffectiveScanThreads() instead of ScanThreadCount().
+// Per-scan thread cap (2026-06-08; thread-local since A-L15). The Value Search
+// "Parallel" toggle lets the user force single-threaded scanning on games whose
+// anti-tamper reacts to many threads hammering memory in parallel, without
+// touching the hardware default everywhere else. A scan handler opens a
+// ScanThreadCapScope(cap) for its duration; the parallel drivers
+// (RunParallelScan, IL2CPP::FindAllInstances, and IL2CPP::ReverseLookupIndex)
+// consult EffectiveScanThreads() instead of ScanThreadCount().
 //   cap == 0 → no cap (use ScanThreadCount, i.e. full parallel — the default).
 //   cap >= 1 → clamp to that many threads (cap == 1 ⇒ serial single-thread).
-// Global, not per-client — scans are serialized in practice (one at a time),
-// mirroring ScanCancel. NOTE: the Mono reverse-lookup index walk is ALWAYS
-// single-threaded by design (BDWGC bandwidth-starvation freeze risk) regardless
-// of this cap; it does not go through these drivers.
+// Thread-local so concurrent pipe clients never clobber each other's cap;
+// ScanThreadCapScope saves and restores the previous cap on exit. NOTE: the
+// Mono reverse-lookup index walk is ALWAYS single-threaded by design (BDWGC
+// bandwidth-starvation freeze risk) regardless of this cap.
 void         SetScanThreadCap(unsigned int cap) noexcept;
+unsigned int GetScanThreadCap() noexcept;
 unsigned int EffectiveScanThreads() noexcept;
 struct ScanThreadCapScope {
-    explicit ScanThreadCapScope(unsigned int cap) noexcept { SetScanThreadCap(cap); }
-    ~ScanThreadCapScope() noexcept { SetScanThreadCap(0); }
+    unsigned int prevCap_ = 0;
+    explicit ScanThreadCapScope(unsigned int cap) noexcept
+        : prevCap_(GetScanThreadCap()) {
+        SetScanThreadCap(cap);
+    }
+    ~ScanThreadCapScope() noexcept { SetScanThreadCap(prevCap_); }
     ScanThreadCapScope(const ScanThreadCapScope&)            = delete;
     ScanThreadCapScope& operator=(const ScanThreadCapScope&) = delete;
 };
@@ -180,15 +176,17 @@ struct ValueScanStats {
 // `ScanForPointer` so module .data / stack residue don't pollute results.
 // Returns at most `req.limit` matches.
 //
-// The scan is in-process and single-threaded. SEH-protected SafeReadBytes
-// covers each region so AC-stripped pages don't crash the host. Failed
-// regions count toward `stats->readFailureBytes` but don't abort the scan.
+// The scan runs in-process across a bounded worker pool (or single-threaded
+// when capped / on thread-creation fallback), with SEH protection covering each
+// 1 MB chunk so AC-stripped pages don't crash the host. Failed chunks count
+// toward `stats->readFailureBytes` without aborting the scan.
+// May throw std::bad_alloc under severe memory pressure (caught by PipeServer).
 //
 // For float / double, comparison uses `std::fabs(value - target) <= tolerance`.
 // For integers, exact bitwise comparison.
 // For range, comparison is typed (lo and hi reinterpreted as the dataType).
 std::vector<ValueScanCandidate> ScanForValue(const ValueScanRequest& req,
-                                              ValueScanStats*         stats = nullptr) noexcept;
+                                              ValueScanStats*         stats = nullptr);
 
 // Convenience helpers — pack a typed value into the request's `lo` or `hi`
 // bytes without the caller having to memcpy by hand.
@@ -238,12 +236,18 @@ struct StringScanCandidate {
 
 // Scans committed RW pages (with the same MEM_IMAGE + thread-stack
 // filtering as ScanForValue) for the needle byte sequence at the
-// requested alignment. Boyer–Moore-Horspool would be faster for Contains
-// on long needles, but Unity targets typically search short strings
-// (< 64 chars) — the naive O(N*M) loop is fast enough at < 100 MB/s
-// and avoids the cache footprint of a skip table.
+// requested alignment. May throw std::bad_alloc under severe memory pressure.
 std::vector<StringScanCandidate> ScanForString(const StringScanRequest& req,
-                                                ValueScanStats* stats = nullptr) noexcept;
+                                                ValueScanStats* stats = nullptr);
+
+// Pure in-memory span scan used by ScanForString (and offline unit tests).
+// Scans `[base, base + size)` for `needle[0..needleSize)` at offsets
+// `0, stride, 2*stride, ...` up to `limit` matches, appending to `matches`.
+bool ScanStringSpan(const std::uint8_t* base, std::size_t size,
+                    const std::uint8_t* needle, std::size_t needleSize,
+                    std::size_t stride,
+                    std::vector<StringScanCandidate>& matches,
+                    std::size_t limit);
 
 // Scans heap-like RW memory for pointer-sized values equal to `target`, at
 // 8-byte alignment. Used by findInstances: in IL2CPP the first qword of an

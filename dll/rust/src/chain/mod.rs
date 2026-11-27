@@ -391,90 +391,92 @@ pub(crate) fn detect(
         if truncated {
             break;
         }
-        let mut pos = 0usize;
-        while pos < sec_size && !truncated {
-            let want = (sec_size - pos).min(CHUNK_SIZE);
-            let mut read_want = want + TAIL_OVERLAP;
-            // C++: `if (pos + readWant > sec.size)` in size_t arithmetic.
-            if pos.wrapping_add(read_want) > sec_size {
-                read_want = sec_size - pos;
-            }
-            if read_want < 6 {
-                break;
-            }
-            if !reader.read(sec_va.wrapping_add(pos), &mut buf[..read_want]) {
-                stats.failed_reads += 1;
-                pos = pos.wrapping_add(4096);
-                continue;
-            }
-            // Candidates start only in the owned part of the chunk; the
-            // overlap is decode context.
-            let scan_end = want.min(read_want - 6 + 1);
-            for p in 0..scan_end {
-                if truncated {
-                    break;
+        reader.scan_readable_spans(
+            sec_va,
+            sec_size,
+            CHUNK_SIZE,
+            TAIL_OVERLAP,
+            &mut buf,
+            &mut stats.failed_reads,
+            |span_va, span, owned_len| {
+                let read_want = span.len();
+                if read_want < 6 {
+                    return true;
                 }
-                let avail = read_want - p;
-                let insn_ip = sec_va.wrapping_add(pos).wrapping_add(p);
+                // Candidates start only in the owned part of the span; the
+                // overlap is decode context.
+                let scan_end = owned_len.min(read_want - 6 + 1);
+                for p in 0..scan_end {
+                    if truncated {
+                        break;
+                    }
+                    let avail = read_want - p;
+                    let insn_ip = span_va.wrapping_add(p);
 
-                // Byte-pattern pre-filter: [REX] 8B|8D modrm(rip) disp32.
-                let mut off = 0usize;
-                if is_rex(buf[p]) {
-                    if avail < 7 {
+                    // Byte-pattern pre-filter: [REX] 8B|8D modrm(rip) disp32.
+                    let mut off = 0usize;
+                    if is_rex(span[p]) {
+                        if avail < 7 {
+                            continue;
+                        }
+                        off += 1;
+                    }
+                    if avail - off < 6 {
                         continue;
                     }
-                    off += 1;
-                }
-                if avail - off < 6 {
-                    continue;
-                }
-                let op = buf[p + off];
-                if op != 0x8B && op != 0x8D {
-                    continue;
-                }
-                if !is_rip_relative_modrm(buf[p + off + 1]) {
-                    continue;
-                }
-                let d = p + off + 2;
-                let disp = i32::from_le_bytes([buf[d], buf[d + 1], buf[d + 2], buf[d + 3]]);
-                let insn_len = off + 2 + 4;
-                if avail < insn_len {
-                    continue;
-                }
-                let target = insn_ip.wrapping_add(insn_len).wrapping_add(disp as isize as usize);
-                if !slot_set.contains(&target) {
-                    continue;
-                }
+                    let op = span[p + off];
+                    if op != 0x8B && op != 0x8D {
+                        continue;
+                    }
+                    if !is_rip_relative_modrm(span[p + off + 1]) {
+                        continue;
+                    }
+                    let d = p + off + 2;
+                    let disp =
+                        i32::from_le_bytes([span[d], span[d + 1], span[d + 2], span[d + 3]]);
+                    let insn_len = off + 2 + 4;
+                    if avail < insn_len {
+                        continue;
+                    }
+                    let target = insn_ip.wrapping_add(insn_len).wrapping_add(disp as isize as usize);
+                    if !slot_set.contains(&target) {
+                        continue;
+                    }
 
-                stats.hop_one_candidates += 1;
-                let Some(class_ptr) = hop_one_dest(&mut dec, &buf[p..p + insn_len]) else {
-                    continue;
-                };
-                let found = forward_trace(
-                    &mut dec,
-                    &buf[p + insn_len..read_want],
-                    insn_ip.wrapping_add(insn_len),
-                    class_ptr,
-                    sfo,
-                    tfo,
-                );
-                let Some((hit_ip, is_write)) = found else {
-                    stats.chain_broken += 1;
-                    continue;
-                };
-                if !emitted.insert((target, hit_ip)) {
-                    continue;
+                    stats.hop_one_candidates += 1;
+                    let Some(class_ptr) = hop_one_dest(&mut dec, &span[p..p + insn_len]) else {
+                        continue;
+                    };
+                    let found = forward_trace(
+                        &mut dec,
+                        &span[p + insn_len..read_want],
+                        insn_ip.wrapping_add(insn_len),
+                        class_ptr,
+                        sfo,
+                        tfo,
+                    );
+                    let Some((hit_ip, is_write)) = found else {
+                        stats.chain_broken += 1;
+                        continue;
+                    };
+                    if !emitted.insert((target, hit_ip)) {
+                        continue;
+                    }
+                    result.matches.push(DcChainMatch {
+                        hit_ip,
+                        hop_one_ip: insn_ip,
+                        is_write: u8::from(is_write),
+                    });
+                    // Checked after the push: match_limit 0 still yields one match.
+                    if result.matches.len() >= match_limit {
+                        truncated = true;
+                        break;
+                    }
                 }
-                result.matches.push(DcChainMatch { hit_ip, hop_one_ip: insn_ip, is_write: u8::from(is_write) });
-                // Checked after the push: match_limit 0 still yields one match.
-                if result.matches.len() >= match_limit {
-                    truncated = true;
-                    break;
-                }
-            }
-            stats.bytes_scanned += want;
-            pos += want;
-        }
+                stats.bytes_scanned += owned_len;
+                !truncated
+            },
+        );
     }
 
     // Converging hop-1 loads reach the same hop-3 instruction: sort by hit IP

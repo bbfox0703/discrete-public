@@ -119,16 +119,38 @@ local function _closeLuaEngineIfQuiet()
     end)
 end
 
-local function _extractDir()
+local function _extractDirPath()
     local tempRoot = os.getenv("TEMP") or os.getenv("TMP") or os.getenv("LOCALAPPDATA")
     if not tempRoot or #tempRoot == 0 then
         error("[bootstrap] no TEMP / TMP / LOCALAPPDATA env var — can't pick extract dir")
     end
-    local dir = tempRoot .. "\\Discrete_Dumper\\" .. TABLE_ID .. "\\"
-    -- Make sure it exists. CE's Lua doesn't expose mkdir directly, so
-    -- shell-out via os.execute. The /q flag silences "directory exists".
+    local parent = tempRoot .. "\\Discrete_Dumper"
+    local dir    = parent .. "\\" .. TABLE_ID .. "\\"
+    return dir, parent
+end
+
+local function _dirWritable(dir)
+    local probe = dir .. ".discrete_probe"
+    local f = io.open(probe, "wb")
+    if f then
+        f:close()
+        os.remove(probe)
+        return true
+    end
+    return false
+end
+
+local function _ensureDir(dir, parent)
+    -- Skip shelling out (and flashing a console window) when the target dir
+    -- already exists from an earlier activation.
+    if _dirWritable(dir) then return end
+    if createDir ~= nil then
+        pcall(createDir, parent)
+        pcall(createDir, dir:gsub("\\$", ""))
+        if _dirWritable(dir) then return end
+    end
+    -- Fallback when CE doesn't expose createDir: shell out once to mkdir.
     os.execute('mkdir "' .. dir .. '" 2>nul')
-    return dir
 end
 
 local function _extractOne(tableFileName, outPath)
@@ -193,16 +215,46 @@ local function _detectBackendInTarget()
     if pid == nil or pid == 0 then
         return nil, "no opened process — open the game first"
     end
-    local mods = enumModules(pid)
-    if not mods then return nil, "enumModules returned nil" end
-    for _, m in ipairs(mods) do
-        local name = (m.Name or m.name or ""):lower()
-        if name:find("gameassembly%.dll") then return "IL2CPP" end
-        if name:find("mono%-2%.0%-bdwgc%.dll") or name == "mono.dll" then
-            return "Mono"
+
+    -- Known module names per backend, kept in sync with utils.lua M.detectBackend().
+    local IL2CPP_NAMES = {
+        ["gameassembly.dll"] = true,
+        ["userassembly.dll"] = true,
+    }
+    local MONO_NAMES = {
+        ["mono-2.0-bdwgc.dll"] = true,
+        ["mono-2.0-sgen.dll"]  = true,
+        ["mono-2.0-boehm.dll"] = true,
+        ["mono.dll"]           = true,
+    }
+
+    if reinitializeSymbolhandler ~= nil then
+        pcall(reinitializeSymbolhandler)
+    end
+    if enumModules ~= nil then
+        local mods = enumModules(pid)
+        if mods then
+            for _, m in ipairs(mods) do
+                -- Some CE builds expose .Name, others .name; some return full paths.
+                local raw  = m.Name or m.name or ""
+                local base = raw:match("([^\\/]+)$") or raw
+                local name = base:lower()
+                if IL2CPP_NAMES[name] then return "IL2CPP" end
+                if MONO_NAMES[name]   then return "Mono"   end
+            end
         end
     end
-    return nil, "no GameAssembly.dll / mono*.dll found among modules"
+
+    -- Fallback: getModule() if enumModules isn't available or returned nil.
+    if getModule ~= nil then
+        if getModule("GameAssembly.dll")   ~= nil then return "IL2CPP" end
+        if getModule("UserAssembly.dll")   ~= nil then return "IL2CPP" end
+        if getModule("mono-2.0-bdwgc.dll") ~= nil then return "Mono"   end
+        if getModule("mono-2.0-sgen.dll")  ~= nil then return "Mono"   end
+        if getModule("mono-2.0-boehm.dll") ~= nil then return "Mono"   end
+        if getModule("mono.dll")           ~= nil then return "Mono"   end
+    end
+    return nil, "no GameAssembly.dll / UserAssembly.dll / mono*.dll found among modules"
 end
 
 local function _is32bit()
@@ -216,7 +268,9 @@ end
 
 --- Public entry point. Call from your CT's [ENABLE] script.
 function bootstrap()
-    local extractDir = _extractDir()
+    rawset(_G, "DISCRETE_HAD_ERROR", false)
+    local extractDir, parentDir = _extractDirPath()
+    _ensureDir(extractDir, parentDir)
     _msg("extract dir = %s", extractDir)
 
     -- 1. Extract every embedded file. Capture per-kind paths so we
@@ -254,9 +308,12 @@ function bootstrap()
     _msg("injecting %s", dllPath)
 
     -- 3. Inject the backend DLL.
+    -- ⚠️ CE's injectDLL returns boolean `false` on failure (NOT `nil`,
+    -- per celua.txt and CLAUDE.md §Cheat Engine) — `== nil` silently misses
+    -- every failed injection.
     if injectDLL ~= nil then
-        if injectDLL(dllPath) == nil then
-            error("[bootstrap] injectDLL returned nil — check %LOCALAPPDATA%\\discrete\\Logs\\<pid>\\init\\current.log")
+        if not injectDLL(dllPath) then
+            error("[bootstrap] injectDLL failed (returned false/nil) — check %LOCALAPPDATA%\\discrete\\Logs\\<pid>\\init\\current.log")
         end
     elseif loadLibrary ~= nil then
         local h = loadLibrary(dllPath)
@@ -293,7 +350,8 @@ end
 --- Optional companion: tear down on table disable. Worth calling so a
 --- next-launch fresh start doesn't pile up old extracts. Idempotent.
 function teardown()
-    local extractDir = _extractDir()
+    rawset(_G, "DISCRETE_HAD_ERROR", false)
+    local extractDir = _extractDirPath()
     _msg("teardown — leaving extracted files in %s (no-op cleanup; OS reclaims TEMP eventually)", extractDir)
     -- We intentionally don't rmdir here because (a) the DLL is still
     -- loaded in the game process so its file handle is held, and (b)

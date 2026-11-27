@@ -2,9 +2,13 @@
 
 #include "IL2CPPClassWalker.h"
 
+#include "../shared/AddressBounds.h"
 #include "../shared/Logger.h"
 #include "../shared/MagicStrings.h"
+#include "../shared/ManagedLayout.h"
 #include "../shared/MethodSignatureFormat.h"
+#include "../shared/RuntimeHealth.h"
+#include "../shared/SehFilter.h"
 #include "IL2CPPDomain.h"
 #include "IL2CPPResolver.h"
 #include "IL2CPPThreadAttach.h"
@@ -34,17 +38,17 @@ template <typename Fn, typename Arg>
 auto SehCall(Fn fn, Arg a) -> decltype(fn(a)) {
     using R = decltype(fn(a));
     __try { return fn(a); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return R{}; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return R{}; }
 }
 #pragma warning(pop)
 
 #pragma warning(push)
 #pragma warning(disable: 4509)
 Il2CppClass* SehDeclaring(fn_class_get_declaring fn, Il2CppClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 Il2CppClass* SehNextNested(fn_class_get_nested_types fn, Il2CppClass* k, void** iter) {
-    __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k, iter); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 #pragma warning(pop)
 
@@ -96,87 +100,97 @@ Il2CppClass* FindNestedByName(Il2CppClass* outer, const std::string& nestedName)
 #pragma warning(push)
 #pragma warning(disable: 4509)
 std::size_t SehClassCount(fn_image_get_class_count fn, const Il2CppImage* img) {
-    __try { return fn(img); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    __try { return fn(img); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
 }
 Il2CppClass* SehClassByIdx(fn_image_get_class fn, const Il2CppImage* img, std::size_t i) {
-    __try { return fn(img, i); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(img, i); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 Il2CppClass* SehClassFromName(fn_class_from_name fn, const Il2CppImage* img,
                               const char* ns, const char* nm) {
-    __try { return fn(img, ns, nm); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(img, ns, nm); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 Il2CppClass* SehParent(fn_class_get_parent fn, Il2CppClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 FieldInfo* SehNextField(fn_class_get_fields fn, Il2CppClass* k, void** iter) {
-    __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    unsigned long code = 0;
+    __try { return fn(k, iter); }
+    __except ((code = GetExceptionCode()),
+              Seh::MemoryAccessExceptionFilter(code, GetExceptionInformation())) {
+        RuntimeHealth::MarkRuntimeFault("il2cpp_class_get_fields", code);
+        return nullptr;
+    }
 }
 const MethodInfo* SehNextMethod(fn_class_get_methods fn, Il2CppClass* k, void** iter) {
-    __try { return fn(k, iter); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k, iter); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 void* SehStaticData(fn_class_get_static_data fn, Il2CppClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 void* SehMethodPtr(fn_method_get_pointer fn, const MethodInfo* m) {
-    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(m); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 // MethodInfo's first qword (`methodPointer` field) is the AOT native entry
 // point. Reading it directly is the only path on Unity 2021.3+ where
 // il2cpp_method_get_pointer is no longer exported.
 void* SehMethodPtrFromStruct(const MethodInfo* m) {
     __try { return *reinterpret_cast<void* const*>(m); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 const char* SehClassName(fn_class_get_name fn, Il2CppClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 Il2CppClass* SehClassFromIl2CppType(fn_class_from_il2cpp_type fn, const Il2CppType* t) {
-    __try { return fn(t); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(t); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 int SehClassIsValueType(fn_class_is_valuetype fn, Il2CppClass* k) {
-    __try { return fn(k); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    __try { return fn(k); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
+}
+int SehClassValueSize(fn_class_value_size fn, Il2CppClass* k) {
+    __try { std::uint32_t align = 0; return fn(k, &align); }
+    __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0; }
 }
 std::uint32_t SehParamCount(fn_method_get_param_count fn, const MethodInfo* m) {
-    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0u; }
+    __try { return fn(m); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
 }
 const Il2CppType* SehParamType(fn_method_get_param fn, const MethodInfo* m, std::uint32_t i) {
-    __try { return fn(m, i); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(m, i); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 const char* SehMethodName(fn_method_get_name fn, const MethodInfo* m) {
-    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(m); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
 std::uint32_t SehMethodToken(fn_method_get_token fn, const MethodInfo* m) {
-    __try { return fn(m); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0u; }
+    __try { return fn(m); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
 }
 std::uint32_t SehMethodFlags(fn_method_get_flags fn, const MethodInfo* m, std::uint32_t* iflags) {
-    __try { return fn(m, iflags); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0u; }
+    __try { return fn(m, iflags); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return 0u; }
 }
 Il2CppClass* SehObjectGetClass(fn_object_get_class fn, Il2CppObject* o) {
-    __try { return fn(o); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __try { return fn(o); } __except (Seh::MemoryAccessExceptionFilter(GetExceptionCode(), GetExceptionInformation())) { return nullptr; }
 }
-// A real managed type / image name is a short printable-ASCII string. The
-// runtime accessors (class_get_name / image_get_name) only SEH-guard the FIELD
-// read that fetches the name pointer — they hand back whatever pointer sits in
-// that struct slot. For a garbage class (a managed-object pointer misread as an
-// Il2CppClass*) that slot holds an arbitrary value, and building a std::string
-// from it runs an UNBOUNDED strlen that AVs off the end of mapped memory — the
-// Copy-CE-field CTD. Validate the returned pointer here, reading each byte under
-// SEH so the validation itself can't fault, and reject anything that isn't a
-// non-empty printable string NUL-terminated within a sane bound.
+// Copy a NUL-terminated runtime name into a bounded local buffer under SEH so
+// garbage pointers never AV off mapped memory, then validate as printable ASCII
+// or strict UTF-8 (B-M5: supports CJK / Unicode obfuscated names while still
+// rejecting control bytes, invalid UTF-8, empty or unterminated garbage).
+bool SehCopyNameBounded(const char* s, char* out, std::size_t cap) noexcept {
+    __try {
+        for (std::size_t i = 0; i < cap; ++i) {
+            char ch = s[i];
+            out[i] = ch;
+            if (ch == '\0') return i > 0;
+        }
+        return false;  // no NUL within cap bytes → garbage
+    } __except (Discrete::Seh::MemoryAccessExceptionFilter(
+                    GetExceptionCode(), GetExceptionInformation())) {
+        return false;
+    }
+}
+
 bool SehNameLooksSane(const char* s) {
     if (s == nullptr) return false;
-    __try {
-        std::size_t i = 0;
-        for (; i < 512; ++i) {
-            unsigned char c = static_cast<unsigned char>(s[i]);
-            if (c == 0) return i > 0;                 // non-empty, NUL within bound
-            if (c < 0x20 || c > 0x7E) return false;   // non-printable → garbage
-        }
-        return false;                                 // no NUL in 512 bytes → garbage
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;                                 // faulted while reading → garbage
-    }
+    char buf[512];
+    if (!SehCopyNameBounded(s, buf, sizeof(buf))) return false;
+    return Discrete::AddressBounds::LooksLikePlausibleClassName(buf, sizeof(buf));
 }
 #pragma warning(pop)
 
@@ -385,7 +399,7 @@ ClassInfoResult ReadClassInfo(Il2CppClass* klass) {
             if (f == nullptr) break;
             FieldEntry fe;
             if (r.field_get_name != nullptr)   fe.name   = SafeStr(SehCall(r.field_get_name, f));
-            if (r.field_get_offset != nullptr) fe.offset = SehCall(r.field_get_offset, f);
+            if (r.field_get_offset != nullptr) fe.offset = Discrete::ManagedLayout::NormalizeFieldOffset32(SehCall(r.field_get_offset, f));
             if (r.field_get_flags != nullptr)  fe.flags  = static_cast<std::uint32_t>(SehCall(r.field_get_flags, f));
             const Il2CppType* ft = (r.field_get_type != nullptr) ? SehCall(r.field_get_type, f) : nullptr;
             if (ft != nullptr) fe.typeName = TypeName(ft);
@@ -399,37 +413,72 @@ ClassInfoResult ReadClassInfo(Il2CppClass* klass) {
                     if (r.class_is_valuetype != nullptr) {
                         fe.isValueType = SehClassIsValueType(r.class_is_valuetype, fc) != 0;
                     }
-                    if (r.class_get_parent != nullptr && r.class_get_name != nullptr) {
-                        Il2CppClass* parent = SehParent(r.class_get_parent, fc);
-                        if (parent != nullptr) {
-                            const char* pn = SehClassName(r.class_get_name, parent);
-                            if (pn != nullptr && std::strcmp(pn, "Enum") == 0) {
-                                fe.isEnum = true;
-                                // Underlying type lives in the enum's `value__`
-                                // instance field — same trick getEnumValues uses.
-                                if (r.class_get_fields != nullptr) {
-                                    void* fit = nullptr;
-                                    for (;;) {
-                                        FieldInfo* uf = SehNextField(r.class_get_fields, fc, &fit);
-                                        if (uf == nullptr) break;
-                                        const char* un = (r.field_get_name != nullptr)
-                                            ? SehCall(r.field_get_name, uf) : nullptr;
-                                        if (un != nullptr && std::strcmp(un, "value__") == 0) {
-                                            const Il2CppType* ut = (r.field_get_type != nullptr)
-                                                ? SehCall(r.field_get_type, uf) : nullptr;
-                                            if (ut != nullptr) fe.underlyingTypeName = TypeName(ut);
-                                            break;
-                                        }
-                                    }
+                    auto detectEnum = [&](Il2CppClass* target, bool& outIsEnum, std::string& outUnderlying) {
+                        if (r.class_get_parent == nullptr || r.class_get_name == nullptr) return;
+                        Il2CppClass* parent = SehParent(r.class_get_parent, target);
+                        if (parent == nullptr) return;
+                        const char* pn = SehClassName(r.class_get_name, parent);
+                        const char* pns = (r.class_get_namespace != nullptr)
+                            ? SehCall(r.class_get_namespace, parent) : nullptr;
+                        // B-L6: require System.Enum (not a user-defined Enum in another namespace).
+                        if (pn == nullptr || std::strcmp(pn, "Enum") != 0) return;
+                        if (r.class_get_namespace != nullptr &&
+                            (pns == nullptr || std::strcmp(pns, "System") != 0)) return;
+                        outIsEnum = true;
+                        // Underlying type lives in the enum's `value__`
+                        // instance field — same trick getEnumValues uses.
+                        if (r.class_get_fields != nullptr) {
+                            void* fit = nullptr;
+                            for (;;) {
+                                FieldInfo* uf = SehNextField(r.class_get_fields, target, &fit);
+                                if (uf == nullptr) break;
+                                const char* un = (r.field_get_name != nullptr)
+                                    ? SehCall(r.field_get_name, uf) : nullptr;
+                                if (un != nullptr && std::strcmp(un, "value__") == 0) {
+                                    const Il2CppType* ut = (r.field_get_type != nullptr)
+                                        ? SehCall(r.field_get_type, uf) : nullptr;
+                                    if (ut != nullptr) outUnderlying = TypeName(ut);
+                                    break;
                                 }
                             }
                         }
-                    }
+                    };
+                    detectEnum(fc, fe.isEnum, fe.underlyingTypeName);
                     // Phase 31-2 (Phase B) — remember the field's runtime class
                     // for inline value-type STRUCT fields (not enums) so the
                     // decode paths recurse into members by exact class pointer.
                     // Set after enum detection so enums don't keep a class.
                     if (fe.isValueType && !fe.isEnum) fe.valueTypeClass = fc;
+
+                    // C-M4 — for 1D array fields (`T[]`), resolve element class
+                    // metadata once here so snapshot array walks know the exact
+                    // stride + value-type / enum classification without guessing.
+                    if (fe.typeName.size() >= 2 &&
+                        fe.typeName[fe.typeName.size() - 1] == ']' &&
+                        fe.typeName[fe.typeName.size() - 2] == '[' &&
+                        r.class_get_element_class != nullptr &&
+                        r.class_is_valuetype != nullptr) {
+                        Il2CppClass* ec = SehCall(r.class_get_element_class, fc);
+                        // GUARD: il2cpp_class_get_element_class returns `fc` itself for non-arrays.
+                        if (ec != nullptr && ec != fc) {
+                            const bool eIsVt = SehClassIsValueType(r.class_is_valuetype, ec) != 0;
+                            fe.arrayElemIsValueType = eIsVt;
+                            if (!eIsVt) {
+                                fe.arrayElemLayoutKnown = true;
+                                fe.arrayElemSize = Discrete::ManagedLayout::kPointerSize;
+                            } else {
+                                detectEnum(ec, fe.arrayElemIsEnum, fe.arrayElemUnderlyingTypeName);
+                                int vs = (r.class_value_size != nullptr)
+                                    ? SehClassValueSize(r.class_value_size, ec) : 0;
+                                if (vs > 0 && vs <= 4096) {
+                                    fe.arrayElemSize = static_cast<std::size_t>(vs);
+                                    fe.arrayElemLayoutKnown = true;
+                                } else if (fe.arrayElemIsEnum && !fe.arrayElemUnderlyingTypeName.empty()) {
+                                    fe.arrayElemLayoutKnown = true;
+                                }
+                            }
+                        }
+                    }
                 }
             }
             result.info.fields.push_back(std::move(fe));
@@ -490,26 +539,35 @@ StaticFieldAddress ResolveStaticFieldAddress(Il2CppClass* klass, const std::stri
 
     std::uint32_t flags = (r.field_get_flags != nullptr)
                           ? static_cast<std::uint32_t>(r.field_get_flags(match)) : 0u;
-    if ((flags & 0x10u) == 0) {
+    std::int32_t offset = (r.field_get_offset != nullptr)
+                          ? Discrete::ManagedLayout::NormalizeFieldOffset32(r.field_get_offset(match))
+                          : -1;
+    std::string typeName = (r.field_get_type != nullptr) ? TypeName(r.field_get_type(match)) : std::string{};
+    out.offset   = offset;
+    out.flags    = flags;
+    out.typeName = typeName;
+
+    // B-M4: reject non-static, const/literal (0x40), and [ThreadStatic] (-1 /
+    // SIZE_MAX) fields before touching static storage so we never return base-1
+    // or alias offset 0.
+    const auto kind = Discrete::ManagedLayout::ClassifyStaticFieldStorage(flags, offset);
+    if (kind != Discrete::ManagedLayout::StaticFieldStorageKind::Regular) {
+        out.reason = Discrete::ManagedLayout::StaticFieldStorageReason(kind);
         Discrete::Log::Write(MagicStrings::LogCategoryWalk,
-            "IL2CPP::ResolveStaticFieldAddress: field is not static");
+            std::string("IL2CPP::ResolveStaticFieldAddress: rejected (") + out.reason + ")");
         return out;
     }
-    std::size_t offset = (r.field_get_offset != nullptr) ? r.field_get_offset(match) : 0u;
-    std::string typeName = (r.field_get_type != nullptr) ? TypeName(r.field_get_type(match)) : std::string{};
 
     void* base = SehStaticData(r.class_get_static_data, klass);
     if (base == nullptr) {
+        out.reason = "static_data_null";
         Discrete::Log::Write(MagicStrings::LogCategoryWalk,
             "IL2CPP::ResolveStaticFieldAddress: class_get_static_field_data returned null");
         return out;
     }
 
     out.ok       = true;
-    out.address  = static_cast<std::uint8_t*>(base) + offset;
-    out.offset   = offset;
-    out.flags    = flags;
-    out.typeName = std::move(typeName);
+    out.address  = static_cast<std::uint8_t*>(base) + static_cast<std::size_t>(offset);
     return out;
 }
 

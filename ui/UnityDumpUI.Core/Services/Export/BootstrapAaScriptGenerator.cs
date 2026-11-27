@@ -181,24 +181,35 @@ for _, name in ipairs(BRIDGE_FILES) do
   end
 end
 
--- Smoke: confirm the DLL pipe is reachable. We go through the SAME
--- pipe path the bridge's registerMethodSymbol / callUnityMethod /
--- whatIsAt use — io.open(pipe) + 1 RPC + close. The earlier
--- remote-thread-via-symbolhandler smoke (replaced 2026-05-12) was
--- finicky on Windows x64 — empirically returned nil even when the
--- DLL was fully loaded + the pipe + every subsequent pipe-based RPC
--- worked. Pipe handshake gives us the same info (build number +
--- backend) via the path we know is good.
-local pipe = io.open([[\\.\pipe\DiscreteBfx]], 'r+b')
-if pipe then
-  -- One-shot handshake. Format mirrors unity_symbols.lua's rpc().
-  pipe:write('{""id"":0,""cmd"":""handshake"",""args"":{}}\n'); pipe:flush()
-  local resp = pipe:read('*l'); pipe:close()
+-- Smoke: confirm the DLL pipe (\\.\pipe\DiscreteBfx) is reachable with a
+-- bounded 5 s timeout via utils.pipeRpcRaw (E-M4 — uses CE's connectToPipe
+-- overlapped timeout + createThread/pump so a stalled DLL never freezes CE's
+-- GUI thread). Wrapped in pcall so any error flags DISCRETE_HAD_ERROR cleanly.
+local okU, U = pcall(require, 'utils')
+local resp, pipeErr = nil, nil
+if okU and type(U) == 'table' and type(U.pipeRpcRaw) == 'function' then
+  local okCall, r, e = pcall(U.pipeRpcRaw, '{""id"":0,""cmd"":""handshake"",""args"":{}}', 5000)
+  if okCall then
+    resp, pipeErr = r, e
+  else
+    pipeErr = tostring(r)
+  end
+else
+  -- Fallback when an older embedded utils.lua lacks pipeRpcRaw.
+  local pipe = io.open([[\\.\pipe\DiscreteBfx]], 'r+b')
+  if pipe then
+    pipe:write('{""id"":0,""cmd"":""handshake"",""args"":{}}\n'); pipe:flush()
+    resp = pipe:read('*l'); pipe:close()
+  else
+    pipeErr = 'pipe unreachable'
+  end
+end
+if resp then
   -- Cheap field extraction — full JSON parser is overkill for two ints
   -- and a string. The handshake response is small + well-formed; the
   -- field shapes are stable per pipe-protocol.md.
-  local build   = resp and resp:match('""build""%s*:%s*(%d+)') or nil
-  local backend = resp and resp:match('""backend""%s*:%s*""([^""]+)""') or nil
+  local build   = resp:match('""build""%s*:%s*(%d+)')
+  local backend = resp:match('""backend""%s*:%s*""([^""]+)""')
   if build and backend then
     -- Success is progress output — gate behind DEBUG so a clean load stays
     -- quiet and the close-tail below can dismiss the Lua Engine.
@@ -214,9 +225,10 @@ if pipe then
           .. tostring(resp))
   end
 else
-  -- Pipe unreachable — an error: flag it + always print.
+  -- Pipe unreachable or timed out — an error: flag it + always print.
   _G.DISCRETE_HAD_ERROR = true
-  print('[Discrete] __ENTRY_DESCRIPTION__: lua loaded, but DLL pipe unreachable.')
+  print('[Discrete] __ENTRY_DESCRIPTION__: lua loaded, but DLL pipe handshake failed ('
+        .. tostring(pipeErr or 'unreachable') .. ').')
   print('[Discrete]   If you ran this before DiscreteUI injected the DLL,')
   print('[Discrete]   wait a moment then disable + re-enable this entry.')
 end
